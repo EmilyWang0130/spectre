@@ -112,6 +112,19 @@ Scalar<DataType> Barotropic3D<ColdEquilEos>::
       get(underlying_eos_.chi_from_density(rest_mass_density)) /
       enthalpy_density};
 }
+
+template <typename ColdEquilEos>
+template <class DataType>
+Scalar<DataType> Barotropic3D<ColdEquilEos>::
+    kappa_times_p_over_rho_squared_from_density_and_temperature_impl(
+        const Scalar<DataType>& rest_mass_density,
+        const Scalar<DataType>& /*temperature*/,
+        const Scalar<DataType>& /*electron_fraction*/) const {
+  // Barotropic EOS: p = p(rho), so dp/deps = 0 at fixed rho.
+  // Therefore kappa * p / rho^2 = 0.
+  return make_with_value<Scalar<DataType>>(rest_mass_density, 0.0);
+}
+
 template class Barotropic3D<EquationsOfState::PolytropicFluid<true>>;
 template class Barotropic3D<EquationsOfState::PolytropicFluid<false>>;
 template class Barotropic3D<PiecewisePolytropicFluid<true>>;

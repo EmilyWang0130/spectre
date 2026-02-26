@@ -135,6 +135,9 @@ void Tabulated3D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
   auto cs2 = spectre_eos.read_quantity("sound speed squared");
 
   auto mu_l = spectre_eos.read_quantity("lepton chemical potential");
+
+  auto dp_depsilon = spectre_eos.read_quantity("dp_depsilon");
+
   //  WILL BE NEEDED FOR FUTURE PR
   //  auto mu_q = spectre_eos.read_quantity("charge chemical potential");
   //  auto mu_b = spectre_eos.read_quantity("baryon chemical potential");
@@ -185,6 +188,7 @@ void Tabulated3D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
         table_point[Epsilon] = std::log(eps[index_spectre] - energy_shift);
         table_point[CsSquared] = cs2[index_spectre];
         table_point[DeltaMu] = mu_l[index_spectre];
+        table_point[Kappa] = nb_fm3_to_geom * dp_depsilon[index_spectre];
 
         // Determine specific enthalpy minimum
         double h = 1. + table_point[Epsilon] +
@@ -578,6 +582,59 @@ Scalar<DataType> Tabulated3D<IsRelativistic>::
   }
 
   return cs2;
+}
+
+template <bool IsRelativistic>
+template <class DataType>
+Scalar<DataType> Tabulated3D<IsRelativistic>::
+    kappa_times_p_over_rho_squared_from_density_and_temperature_impl(
+        const Scalar<DataType>& rest_mass_density,
+        const Scalar<DataType>& temperature,
+        const Scalar<DataType>& electron_fraction) const {
+  Scalar<DataType> converted_electron_fraction;
+  Scalar<DataType> log_rest_mass_density;
+  Scalar<DataType> log_temperature;
+
+  convert_to_table_quantities(
+      make_not_null(&converted_electron_fraction),
+      make_not_null(&log_rest_mass_density), make_not_null(&log_temperature),
+      electron_fraction, rest_mass_density, temperature);
+
+  Scalar<DataType> result =
+      make_with_value<Scalar<DataType>>(get(rest_mass_density), 0.0);
+
+  if constexpr (std::is_same_v<DataType, double>) {
+    const auto weights = interpolator_.get_weights(
+        get(log_temperature), get(log_rest_mass_density),
+        get(converted_electron_fraction));
+
+    const double log_p =
+        interpolator_.template interpolate<Pressure>(weights)[0];
+    const double kappa = interpolator_.template interpolate<Kappa>(weights)[0];
+
+    const double rho = std::exp(get(log_rest_mass_density));
+    const double p = std::exp(log_p);
+
+    get(result) = kappa * p / square(rho);
+  } else if constexpr (std::is_same_v<DataType, DataVector>) {
+    for (size_t s = 0; s < get(electron_fraction).size(); ++s) {
+      const auto weights = interpolator_.get_weights(
+          get(log_temperature)[s], get(log_rest_mass_density)[s],
+          get(converted_electron_fraction)[s]);
+
+      const double log_p =
+          interpolator_.template interpolate<Pressure>(weights)[0];
+      const double kappa =
+          interpolator_.template interpolate<Kappa>(weights)[0];
+
+      const double rho = std::exp(get(log_rest_mass_density)[s]);
+      const double p = std::exp(log_p);
+
+      get(result)[s] = kappa * p / square(rho);
+    }
+  }
+
+  return result;
 }
 
 template <bool IsRelativistic>

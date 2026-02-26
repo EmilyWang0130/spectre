@@ -111,12 +111,17 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
     // We use a simple ideal fluid like EOS with a Ye variable Gamma:
     // p = (rho*eps)*Ye = rho T
 
-    std::array<double, TEoS::NumberOfVars> vars;
+    std::array<double, TEoS::NumberOfVars> vars{};
+    vars.fill(0.0);
 
     // This is not consistent, but better keep this simple
     vars[TEoS::Epsilon] = state[TableIndex::Temp];
     vars[TEoS::Pressure] = state[TableIndex::Temp] + state[TableIndex::Rho];
     vars[TEoS::CsSquared] = state[TableIndex::Ye];
+
+    // kappa = partial derivative of p with respect to eps = rho (consistent
+    // with p above)
+    vars[TEoS::Kappa] = std::exp(state[TableIndex::Rho]);
 
     return vars;
   };
@@ -163,7 +168,10 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
         1.e-12);
 
   // Construct a test state
-  std::array<double, 3> pure_state{{1., 1.e-3, 0.3}};
+  // std::array<double, 3> pure_state{{1., 1.e-3, 0.3}};
+  // use the exact grid points since kappa is not linear in the coordinate
+  std::array<double, 3> pure_state{
+      {std::exp(X_data[0][1]), std::exp(X_data[1][1]), X_data[2][1]}};
 
   std::array<Scalar<double>, 3> state{};
   std::array<Scalar<DataVector>, 3> vector_state{};
@@ -190,10 +198,21 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
   CHECK(std::abs((std::exp(output[TEoS::Pressure])) -
                  get(eos.pressure_from_density_and_temperature(
                      state[1], state[0], state[2]))) < 1.e-12);
-  CHECK(std::abs(output[TEoS::CsSquared]) -
-            get(eos.sound_speed_squared_from_density_and_temperature(
-                state[1], state[0], state[2])) <
-        1.e-12);
+  CHECK(std::abs(output[TEoS::CsSquared] -
+                 get(eos.sound_speed_squared_from_density_and_temperature(
+                     state[1], state[0], state[2]))) < 1.e-12);
+
+  const double rho = std::exp(pure_state[1]);
+  const double eps = std::exp(pure_state[0]);
+  const double p = rho * eps;
+  const double kappa = rho;
+  const double expected_kappa_times_p_over_rho2 = kappa * p / (rho * rho);
+
+  CHECK(std::abs(
+            expected_kappa_times_p_over_rho2 -
+            get(eos.kappa_times_p_over_rho_squared_from_density_and_temperature(
+                state[1], state[0], state[2]))) < 1.e-12);
+
   CHECK(not eos.is_barotropic());
   CHECK(not eos.is_equilibrium());
 
@@ -225,6 +244,12 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
                      vector_state[1], vector_state[0], vector_state[2]))[0]) <
         1.e-12);
 
+  CHECK(std::abs(
+            expected_kappa_times_p_over_rho2 -
+            get(eos.kappa_times_p_over_rho_squared_from_density_and_temperature(
+                vector_state[1], vector_state[0], vector_state[2]))[0]) <
+        1.e-12);
+
   const auto eps_interp_vector =
       eos.specific_internal_energy_from_density_and_temperature(
           vector_state[1], vector_state[0], vector_state[2]);
@@ -236,19 +261,29 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
         1.e-12);
 
   auto test_against_reference_values = [&](auto& this_eos) {
+    get(state[0]) = 0.1;
     get(state[1]) = 1.e-4;
+    get(state[2]) = 0.01;
 
     CHECK_ITERABLE_APPROX(
         get(this_eos.specific_internal_energy_from_density_and_temperature(
             state[1], state[0], state[2])),
-        0.30204636358732767);
+        0.18818433790073655);
+
     CHECK_ITERABLE_APPROX(get(this_eos.pressure_from_density_and_temperature(
                               state[1], state[0], state[2])),
-                          0.00001103280164124);
+                          0.0000040411442998);
+
     CHECK_ITERABLE_APPROX(
         get(this_eos.sound_speed_squared_from_density_and_temperature(
             state[1], state[0], state[2])),
-        0.41669901507784435);
+        0.49887921660196927);
+
+    CHECK_ITERABLE_APPROX(
+        get(this_eos
+                .kappa_times_p_over_rho_squared_from_density_and_temperature(
+                    state[1], state[0], state[2])),
+        -0.09814408968657554);
   };
 
   // Test against reference values

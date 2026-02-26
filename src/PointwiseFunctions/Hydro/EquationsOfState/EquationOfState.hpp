@@ -719,6 +719,30 @@ class EquationOfState<IsRelativistic, 3> : public PUP::able {
       const Scalar<DataVector>& /*electron_fraction*/) const = 0;
   /// @}
 
+  /// @{
+  /*!
+   * Computes \f$\kappa p/\rho^2=(p/\rho^2)\partial p / \partial \epsilon
+   * |_{\rho, Y_e}\f$ from \f$\rho\f$, \f$T\f$, and \f$Y_e\f$, where \f$p\f$ is
+   * the pressure, \f$\rho\f$ is the rest mass density, and \f$\epsilon\f$ is
+   * the specific internal energy.
+   *
+   * The reason for not returning just
+   * \f$\kappa=\partial p / \partial \epsilon\f$ is to avoid division by zero
+   * for small values of \f$\rho\f$.
+   */
+  virtual Scalar<double>
+  kappa_times_p_over_rho_squared_from_density_and_temperature(
+      const Scalar<double>& /*rest_mass_density*/,
+      const Scalar<double>& /*temperature*/,
+      const Scalar<double>& /*electron_fraction*/) const = 0;
+
+  virtual Scalar<DataVector>
+  kappa_times_p_over_rho_squared_from_density_and_temperature(
+      const Scalar<DataVector>& /*rest_mass_density*/,
+      const Scalar<DataVector>& /*temperature*/,
+      const Scalar<DataVector>& /*electron_fraction*/) const = 0;
+  /// @}
+
   /// The lower bound of the electron fraction that is valid for this EOS
   virtual double electron_fraction_lower_bound() const = 0;
 
@@ -793,7 +817,8 @@ bool operator!=(const EquationOfState<IsRelLhs, ThermoDimLhs>& lhs,
   (pressure_from_density_and_energy, pressure_from_density_and_temperature, \
    temperature_from_density_and_energy,                                     \
    specific_internal_energy_from_density_and_temperature,                   \
-   sound_speed_squared_from_density_and_temperature)
+   sound_speed_squared_from_density_and_temperature,                        \
+   kappa_times_p_over_rho_squared_from_density_and_temperature)
 
 #define EQUATION_OF_STATE_ARGUMENTS_EXPAND(z, n, type) \
   BOOST_PP_COMMA_IF(n) const Scalar<type>&

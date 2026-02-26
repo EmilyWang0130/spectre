@@ -127,6 +127,20 @@ Equilibrium3D<EquilEos>::sound_speed_squared_from_density_and_temperature_impl(
                    rest_mass_density, specific_internal_energy)))};
 }
 
+template <typename EquilEos>
+template <class DataType>
+Scalar<DataType> Equilibrium3D<EquilEos>::
+    kappa_times_p_over_rho_squared_from_density_and_temperature_impl(
+        const Scalar<DataType>& rest_mass_density,
+        const Scalar<DataType>& temperature,
+        const Scalar<DataType>& /*electron_fraction*/) const {
+  const Scalar<DataType> specific_internal_energy =
+      underlying_eos_.specific_internal_energy_from_density_and_temperature(
+          rest_mass_density, temperature);
+  return underlying_eos_.kappa_times_p_over_rho_squared_from_density_and_energy(
+      rest_mass_density, specific_internal_energy);
+}
+
 template class Equilibrium3D<HybridEos<PolytropicFluid<true>>>;
 template class Equilibrium3D<HybridEos<PolytropicFluid<false>>>;
 template class Equilibrium3D<HybridEos<Spectral>>;
