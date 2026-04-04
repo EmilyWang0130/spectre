@@ -10,6 +10,7 @@ spectre_target_sources(
   PRIVATE
   ComposeTable.cpp
   Connectivity.cpp
+  ComposeTableDerivatives.cpp
   )
 
 spectre_target_headers(
@@ -18,6 +19,7 @@ spectre_target_headers(
   HEADERS
   ComposeTable.hpp
   Connectivity.hpp
+  ComposeTableDerivatives.hpp
   )
 
 # Notes:

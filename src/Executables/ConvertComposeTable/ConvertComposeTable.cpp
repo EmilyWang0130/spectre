@@ -3,19 +3,50 @@
 
 #include <boost/program_options.hpp>
 
+#include <array>
+#include <cmath>
 #include <string>
 
 #include "DataStructures/DataVector.hpp"
 #include "IO/ComposeTable.hpp"
+#include "IO/ComposeTableDerivatives.hpp"
 #include "IO/H5/EosTable.hpp"
 #include "IO/H5/File.hpp"
 #include "Parallel/Printf/Printf.hpp"
+#include "Utilities/ErrorHandling/Assert.hpp"
+#include "Utilities/ErrorHandling/Error.hpp"
 
 // Charm looks for this function but since we build without a main function or
 // main module we just have it be empty
 extern "C" void CkRegisterMainModule(void) {}
 
 namespace {
+std::vector<double> make_grid_1d(const std::array<double, 2>& bounds,
+                                 const size_t npts, const bool log_spacing) {
+  std::vector<double> grid(npts);
+  if (npts == 0) {
+    ERROR("Number of points is zero.");
+  }
+  if (npts == 1) {
+    grid[0] = bounds[0];
+    return grid;
+  }
+  if (log_spacing) {
+    const double log_lo = std::log(bounds[0]);
+    const double log_hi = std::log(bounds[1]);
+    const double dlog = (log_hi - log_lo) / static_cast<double>(npts - 1);
+    for (size_t i = 0; i < npts; ++i) {
+      grid[i] = std::exp(log_lo + dlog * static_cast<double>(i));
+    }
+  } else {
+    const double d = (bounds[1] - bounds[0]) / static_cast<double>(npts - 1);
+    for (size_t i = 0; i < npts; ++i) {
+      grid[i] = bounds[0] + d * static_cast<double>(i);
+    }
+  }
+  return grid;
+}
+
 void convert_file(const std::string& compose_directory,
                   const std::string& spectre_eos_filename,
                   const std::string& spectre_eos_subfile) {
@@ -37,10 +68,34 @@ void convert_file(const std::string& compose_directory,
                   compose_table.electron_fraction_log_spacing()},
       compose_table.beta_equilibrium());
 
-  // Now dump data into the EosTable file
-  for (const auto& [quantity_name, quantity_data] : compose_table.data()) {
+  const auto& data = compose_table.data();
+
+  // Required base quantities
+  const DataVector& pressure = data.at("pressure");
+  const DataVector& eps = data.at("specific internal energy");
+
+  const size_t nN = compose_table.number_density_number_of_points();
+  const size_t nT = compose_table.temperature_number_of_points();
+  const size_t nYe = compose_table.electron_fraction_number_of_points();
+
+  ASSERT(pressure.size() == nN * nT * nYe,
+         "Pressure size does not match table dimensions.");
+  ASSERT(eps.size() == pressure.size(),
+         "Epsilon size does not match pressure size.");
+
+  // Reconstruct coordinate grids (needed for nonuniform spacing, e.g. log T)
+  const auto T_grid = make_grid_1d(compose_table.temperature_bounds(), nT,
+                                   compose_table.temperature_log_spacing());
+  const auto Ye_grid =
+      make_grid_1d(compose_table.electron_fraction_bounds(), nYe,
+                   compose_table.electron_fraction_log_spacing());
+
+  const DataVector zeta = io::compute_zeta_from_pressure_and_eps(
+      pressure, eps, T_grid, Ye_grid, nN, nT, nYe);
+  for (const auto& [quantity_name, quantity_data] : data) {
     spectre_eos.write_quantity(quantity_name, quantity_data);
   }
+  spectre_eos.write_quantity("zeta", zeta);
 }
 }  // namespace
 

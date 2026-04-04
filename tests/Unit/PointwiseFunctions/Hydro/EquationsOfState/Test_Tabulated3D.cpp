@@ -106,22 +106,23 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
   CAPTURE(energy_shift);
 
   auto test_eos = [&](auto state) {
-    enum TableIndex { Temp = 0, Rho = 1, Ye = 2 };
+    enum TableIndex { TempIndex = 0, RhoIndex = 1, YeIndex = 2 };
 
-    // We use a simple ideal fluid like EOS with a Ye variable Gamma:
-    // p = (rho*eps)*Ye = rho T
+    // We use a simple ideal fluid like EOS with a Ye variable:
+
+    const double logT = state[TempIndex];
+    const double logRho = state[RhoIndex];
+    const double Ye = state[YeIndex];
 
     std::array<double, TEoS::NumberOfVars> vars{};
     vars.fill(0.0);
 
-    // This is not consistent, but better keep this simple
-    vars[TEoS::Epsilon] = state[TableIndex::Temp];
-    vars[TEoS::Pressure] = state[TableIndex::Temp] + state[TableIndex::Rho];
-    vars[TEoS::CsSquared] = state[TableIndex::Ye];
-
-    // kappa = partial derivative of p with respect to eps = rho (consistent
-    // with p above)
-    vars[TEoS::Kappa] = std::exp(state[TableIndex::Rho]);
+    // This is not consistent, just a simple test
+    vars[TEoS::Epsilon] = logT;
+    vars[TEoS::Pressure] = logRho + logT;
+    vars[TEoS::CsSquared] = 0.2 + 0.01 * logT + 0.02 * logRho + 0.3 * Ye;
+    vars[TEoS::Kappa] = 2.0 + 0.05 * logT + 0.1 * logRho + 0.2 * Ye;
+    vars[TEoS::Zeta] = -1.0 + 0.03 * logT - 0.07 * logRho + 0.5 * Ye;
 
     return vars;
   };
@@ -168,10 +169,7 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
         1.e-12);
 
   // Construct a test state
-  // std::array<double, 3> pure_state{{1., 1.e-3, 0.3}};
-  // use the exact grid points since kappa is not linear in the coordinate
-  std::array<double, 3> pure_state{
-      {std::exp(X_data[0][1]), std::exp(X_data[1][1]), X_data[2][1]}};
+  std::array<double, 3> pure_state{{1., 1.e-3, 0.3}};
 
   std::array<Scalar<double>, 3> state{};
   std::array<Scalar<DataVector>, 3> vector_state{};
@@ -202,16 +200,31 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
                  get(eos.sound_speed_squared_from_density_and_temperature(
                      state[1], state[0], state[2]))) < 1.e-12);
 
-  const double rho = std::exp(pure_state[1]);
-  const double eps = std::exp(pure_state[0]);
-  const double p = rho * eps;
-  const double kappa = rho;
-  const double expected_kappa_times_p_over_rho2 = kappa * p / (rho * rho);
+  const double logT = pure_state[0];
+  const double logRho = pure_state[1];
+  const double Ye = pure_state[2];
+
+  const double T = std::exp(logT);
+  const double rho = std::exp(logRho);
+
+  // From the definition above:
+  const double expected_kappa = 2.0 + 0.05 * logT + 0.1 * logRho + 0.2 * Ye;
+
+  const double expected_zeta = -1.0 + 0.03 * logT - 0.07 * logRho + 0.5 * Ye;
+
+  const double p = rho * T;
+
+  // Tabulated3D returns: kappa_times_p_over_rho2 = kappa * p / rho^2
+  const double expected_kappa_times_p_over_rho2 =
+      expected_kappa * p / (rho * rho);
 
   CHECK(std::abs(
             expected_kappa_times_p_over_rho2 -
             get(eos.kappa_times_p_over_rho_squared_from_density_and_temperature(
                 state[1], state[0], state[2]))) < 1.e-12);
+  /*CHECK(std::abs(expected_zeta -
+                 get(eos.zeta_from_density_and_temperature(
+                     state[1], state[0], state[2]))) < 1.e-12);*/
 
   CHECK(not eos.is_barotropic());
   CHECK(not eos.is_equilibrium());
@@ -249,7 +262,9 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
             get(eos.kappa_times_p_over_rho_squared_from_density_and_temperature(
                 vector_state[1], vector_state[0], vector_state[2]))[0]) <
         1.e-12);
-
+  CHECK(std::abs(expected_zeta - get(eos.zeta_from_density_and_temperature(
+                                     vector_state[1], vector_state[0],
+                                     vector_state[2]))[0]) < 1.e-12);
   const auto eps_interp_vector =
       eos.specific_internal_energy_from_density_and_temperature(
           vector_state[1], vector_state[0], vector_state[2]);
@@ -284,6 +299,10 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
                 .kappa_times_p_over_rho_squared_from_density_and_temperature(
                     state[1], state[0], state[2])),
         -0.09814408968657554);
+
+    CHECK_ITERABLE_APPROX(get(this_eos.zeta_from_density_and_temperature(
+                              state[1], state[0], state[2])),
+                          -0.00023044183153473);
   };
 
   // Test against reference values
