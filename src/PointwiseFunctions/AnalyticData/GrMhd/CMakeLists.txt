@@ -21,6 +21,7 @@ spectre_target_sources(
   RiemannProblem.cpp
   SlabJet.cpp
   SphericalTorus.cpp
+  Tabulated3DShockTube.cpp
   )
 
 spectre_target_headers(
@@ -41,6 +42,7 @@ spectre_target_headers(
   RiemannProblem.hpp
   SlabJet.hpp
   SphericalTorus.hpp
+  Tabulated3DShockTube.hpp
   )
 
 target_link_libraries(

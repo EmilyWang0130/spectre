@@ -16,6 +16,7 @@
 #include "PointwiseFunctions/AnalyticData/GrMhd/PolarMagnetizedFmDisk.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/RiemannProblem.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/SlabJet.hpp"
+#include "PointwiseFunctions/AnalyticData/GrMhd/Tabulated3DShockTube.hpp"
 #include "PointwiseFunctions/AnalyticSolutions/AnalyticSolution.hpp"
 #include "PointwiseFunctions/AnalyticSolutions/GrMhd/AlfvenWave.hpp"
 #include "PointwiseFunctions/AnalyticSolutions/GrMhd/BondiMichel.hpp"
@@ -33,7 +34,8 @@ using initial_data_list = tmpl::list<
     AnalyticData::MagneticFieldLoop, AnalyticData::MagneticRotor,
     AnalyticData::MagnetizedFmDisk, AnalyticData::MagnetizedTovStar,
     AnalyticData::OrszagTangVortex, AnalyticData::PolarMagnetizedFmDisk,
-    AnalyticData::RiemannProblem, AnalyticData::SlabJet, Solutions::AlfvenWave,
+    AnalyticData::RiemannProblem, AnalyticData::SlabJet,
+    AnalyticData::Tabulated3DShockTube, Solutions::AlfvenWave,
     grmhd::Solutions::BondiMichel, Solutions::KomissarovShock,
     Solutions::SmoothFlow, RelativisticEuler::Solutions::FishboneMoncriefDisk,
     RelativisticEuler::Solutions::RotatingStar,
