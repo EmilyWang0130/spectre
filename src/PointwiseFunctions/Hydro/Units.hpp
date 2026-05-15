@@ -71,6 +71,12 @@ constexpr double atomic_mass_unit = 1.66053906660e-24;
 constexpr double neutron_mass = 1.67492749804e-24;
 /// The proton mass, given in grams. Uncertainty at 2e-8 level
 constexpr double proton_mass = 1.672621898e-24;
+/// The electron mass, given in grams. Uncertainty at 3e-10 level.
+/// https://journals.aps.org/rmp/abstract/10.1103/RevModPhys.93.025010
+constexpr double electron_mass = 9.1093837015e-28;
+/// Planck's reduced constant hbar = h/(2pi) in erg*s.
+/// Derived from the exact SI value h = 6.62607015e-34 J*s.
+constexpr double hbar = 1.054571817e-27;
 /// The electron-volt (eV) given in ergs, which is known exactly in SI/cgs
 constexpr double electron_volt = 1.602176634e-12;
 
@@ -154,6 +160,13 @@ constexpr double proton_mass =
     cgs::proton_mass /
     (1.0e6 * cgs::electron_volt / square(cgs::speed_of_light));
 
+/// The electron mass in MeV/c^2.
+constexpr double electron_mass =
+    cgs::electron_mass /
+    (1.0e6 * cgs::electron_volt / square(cgs::speed_of_light));
+/// hbar*c in MeV*fm (natural unit combination for nuclear physics).
+constexpr double hbarc = cgs::hbar * cgs::speed_of_light * 1.0e13 /
+                         (1.0e6 * cgs::electron_volt);
 /// The saturation number density of baryons in nuclear matter, in
 /// units of 1/fm^3.  This is a standard value, consistent with  e.g.
 /// https://journals.aps.org/prc/abstract/10.1103/PhysRevC.102.044321
