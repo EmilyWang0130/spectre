@@ -473,25 +473,16 @@ void eigenvectors_hydro(
     get(sound_speed_squared) =
         get(equation_of_state.sound_speed_squared_from_density_and_temperature(
             rest_mass_density, temperature, electron_fraction));
-    get(pressure) = get(equation_of_state.pressure_from_density_and_energy(
-        rest_mass_density, specific_internal_energy, electron_fraction));
-    // So, we're currently using the equations from an ideal fluid EoS to set
-    // kappa, assuming the same adiabatic index as used in the tests. This
-    // approach will need to be improved during the code review process..
-    const double adiabatic_index = 1.5;
-    const Scalar<DataVector> chi =
-        tenex::evaluate(specific_internal_energy() * (adiabatic_index - 1.0));
-    const Scalar<DataVector> kappa_times_p_over_rho_squared = tenex::evaluate(
-        square(adiabatic_index - 1.0) * specific_internal_energy());
-    const DataVector sound_speed_squared_ideal_fluid =
-        (get(chi) + get(kappa_times_p_over_rho_squared)) /
-        get(specific_enthalpy);
-    ASSERT(max(abs(get(sound_speed_squared) -
-                   sound_speed_squared_ideal_fluid)) < 1e-10,
-           "The ideal fluid approximation for kappa is not valid.");
+    get(pressure) = get(equation_of_state.pressure_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
+    const Scalar<DataVector> kappa_times_p_over_rho_squared =
+        equation_of_state
+            .kappa_times_p_over_rho_squared_from_density_and_temperature(
+                rest_mass_density, temperature, electron_fraction);
     get(kappa) = get(kappa_times_p_over_rho_squared) / get(pressure) *
                  square(get(rest_mass_density));
-    get(zeta) = 0.0;
+    get(zeta) = get(equation_of_state.zeta_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
   }
 
   // This is for the case for zeta = 0.
@@ -785,35 +776,23 @@ void flux_jacobian_hydro(
                  square(get(rest_mass_density));
     get(zeta) = 0.0;
   } else if constexpr (ThermodynamicDim == 3) {
-    // The following computation works for a general 3D EoS, but it doesn't
-    // allow getting kappa.
     const auto temperature =
         equation_of_state.temperature_from_density_and_energy(
             rest_mass_density, specific_internal_energy, electron_fraction);
     get(sound_speed_squared) =
         get(equation_of_state.sound_speed_squared_from_density_and_temperature(
             rest_mass_density, temperature, electron_fraction));
-    // So, we're currently using the equations from an ideal fluid EoS to set
-    // kappa, assuming the same adiabatic index as used in the tests. This
-    // approach will need to be improved during the code review process..
-    const double adiabatic_index = 1.5;
-    const Scalar<DataVector> chi =
-        tenex::evaluate(specific_internal_energy() * (adiabatic_index - 1.0));
-    const Scalar<DataVector> kappa_times_p_over_rho_squared = tenex::evaluate(
-        square(adiabatic_index - 1.0) * specific_internal_energy());
-    const DataVector sound_speed_squared_ideal_fluid =
-        (get(chi) + get(kappa_times_p_over_rho_squared)) /
-        get(specific_enthalpy);
-    ASSERT(max(abs(get(sound_speed_squared) -
-                   sound_speed_squared_ideal_fluid)) < 1e-10,
-           "The ideal fluid approximation for kappa is not valid.");
-    const auto pressure = equation_of_state.pressure_from_density_and_energy(
-        rest_mass_density, specific_internal_energy, electron_fraction);
+    const auto kappa_times_p_over_rho_squared =
+        equation_of_state
+            .kappa_times_p_over_rho_squared_from_density_and_temperature(
+                rest_mass_density, temperature, electron_fraction);
+    const auto pressure =
+        equation_of_state.pressure_from_density_and_temperature(
+            rest_mass_density, temperature, electron_fraction);
     get(kappa) = get(kappa_times_p_over_rho_squared) / get(pressure) *
                  square(get(rest_mass_density));
-    // For now, we assume that we are at compositional equilibrium, so we set
-    // zeta to zero.
-    get(zeta) = 0.0;
+    get(zeta) = get(equation_of_state.zeta_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
   }
 
   // Intermediate variables

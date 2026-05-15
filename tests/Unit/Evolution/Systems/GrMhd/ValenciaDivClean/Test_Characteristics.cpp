@@ -22,10 +22,12 @@
 #include "Helpers/Domain/DomainTestHelpers.hpp"
 #include "Helpers/PointwiseFunctions/GeneralRelativity/TestHelpers.hpp"
 #include "Helpers/PointwiseFunctions/Hydro/TestHelpers.hpp"
+#include "Informer/InfoFromBuild.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/Equilibrium3D.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/IdealFluid.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/PolytropicFluid.hpp"
+#include "PointwiseFunctions/Hydro/EquationsOfState/Tabulated3d.hpp"
 #include "PointwiseFunctions/Hydro/SpecificEnthalpy.hpp"
 #include "Utilities/ConstantExpressions.hpp"
 #include "Utilities/Gsl.hpp"
@@ -678,6 +680,122 @@ void test_hydro_numerical_eigensystem(const DataVector& used_for_size) {
     }
   }
 }
+
+void test_tabulated3d_kappa_and_zeta_in_characteristics() {
+  const size_t num_points = 3;
+  const DataVector used_for_size(num_points, 0.0);
+
+  EquationsOfState::Tabulated3D<true> equation_of_state{
+      unit_test_src_path() +
+          "PointwiseFunctions/Hydro/EquationsOfState/dd2_unit_test.h5",
+      "dd2"};
+
+  Scalar<DataVector> temperature{DataVector(num_points, 0.1)};
+  Scalar<DataVector> rest_mass_density{DataVector(num_points, 1.0e-4)};
+  Scalar<DataVector> electron_fraction{DataVector(num_points, 0.01)};
+
+  const auto specific_internal_energy =
+      equation_of_state.specific_internal_energy_from_density_and_temperature(
+          rest_mass_density, temperature, electron_fraction);
+  const auto pressure = equation_of_state.pressure_from_density_and_temperature(
+      rest_mass_density, temperature, electron_fraction);
+  const auto specific_enthalpy = hydro::relativistic_specific_enthalpy(
+      rest_mass_density, specific_internal_energy, pressure);
+  const auto kappa_times_p_over_rho_squared =
+      equation_of_state
+          .kappa_times_p_over_rho_squared_from_density_and_temperature(
+              rest_mass_density, temperature, electron_fraction);
+  const auto zeta = equation_of_state.zeta_from_density_and_temperature(
+      rest_mass_density, temperature, electron_fraction);
+
+  Scalar<DataVector> kappa{num_points};
+  get(kappa) = get(kappa_times_p_over_rho_squared) / get(pressure) *
+               square(get(rest_mass_density));
+
+  CHECK(max(abs(get(kappa))) > 1.0e-12);
+  CHECK(max(abs(get(zeta))) > 1.0e-12);
+
+  tnsr::ii<DataVector, 3, Frame::Inertial> spatial_metric{
+      make_with_value<tnsr::ii<DataVector, 3, Frame::Inertial>>(used_for_size,
+                                                                0.0)};
+  for (size_t i = 0; i < 3; ++i) {
+    spatial_metric.get(i, i) = 1.0;
+  }
+  const auto& inv_spatial_metric =
+      determinant_and_inverse(spatial_metric).second;
+
+  tnsr::I<DataVector, 3, Frame::Inertial> spatial_velocity{
+      make_with_value<tnsr::I<DataVector, 3, Frame::Inertial>>(used_for_size,
+                                                               0.0)};
+  spatial_velocity.get(0) = 0.1;
+  spatial_velocity.get(1) = 0.02;
+  spatial_velocity.get(2) = -0.03;
+
+  const double velocity_squared = 0.1 * 0.1 + 0.02 * 0.02 + 0.03 * 0.03;
+  Scalar<DataVector> lorentz_factor{
+      DataVector(num_points, 1.0 / sqrt(1.0 - velocity_squared))};
+
+  const auto unit_normal =
+      unit_basis_form(Direction<3>::upper_xi(), inv_spatial_metric);
+
+  constexpr size_t matrix_size = 6;
+  std::array<tnsr::i<DataVector, matrix_size, Frame::Inertial>, matrix_size>
+      right_eigenvectors{};
+  std::array<tnsr::I<DataVector, matrix_size, Frame::Inertial>, matrix_size>
+      left_eigenvectors{};
+  grmhd::ValenciaDivClean::eigenvectors_hydro<3>(
+      make_not_null(&right_eigenvectors), make_not_null(&left_eigenvectors),
+      spatial_velocity, rest_mass_density, specific_internal_energy,
+      specific_enthalpy, electron_fraction, lorentz_factor, unit_normal,
+      spatial_metric, equation_of_state);
+
+  const std::array<DataVector, 3> analytic_speeds =
+      grmhd::ValenciaDivClean::characteristic_speeds_hydro<3>(
+          spatial_velocity, rest_mass_density, specific_internal_energy,
+          specific_enthalpy, electron_fraction, lorentz_factor, unit_normal,
+          spatial_metric, equation_of_state);
+
+  std::array<Scalar<DataVector>, matrix_size> all_eigenvalues;
+  for (size_t i = 0; i < matrix_size; ++i) {
+    get(gsl::at(all_eigenvalues, i)).destructive_resize(num_points);
+  }
+  for (size_t i = 0; i < 4; ++i) {
+    get(gsl::at(all_eigenvalues, i)) =
+        analytic_speeds[HydroSpeed::NormalDotVelocity];
+  }
+  get(gsl::at(all_eigenvalues, 4)) = analytic_speeds[HydroSpeed::LambdaPlus];
+  get(gsl::at(all_eigenvalues, 5)) = analytic_speeds[HydroSpeed::LambdaMinus];
+
+  tnsr::iJ<DataVector, 6> characteristic_matrix =
+      make_with_value<tnsr::iJ<DataVector, 6>>(spatial_metric, 0.0);
+  grmhd::ValenciaDivClean::detail::flux_jacobian_hydro(
+      make_not_null(&characteristic_matrix), spatial_velocity,
+      rest_mass_density, specific_internal_energy, electron_fraction,
+      lorentz_factor, specific_enthalpy, spatial_metric, inv_spatial_metric,
+      unit_normal, equation_of_state);
+
+  constexpr double tolerance = 1.0e-11;
+  for (size_t i = 0; i < matrix_size; ++i) {
+    const auto& eigenvalue = gsl::at(all_eigenvalues, i);
+    const auto& right_eigenvector = gsl::at(right_eigenvectors, i);
+    const auto& left_eigenvector = gsl::at(left_eigenvectors, i);
+
+    const Scalar<DataVector> right_residual = magnitude(tenex::evaluate<ti::i>(
+        characteristic_matrix(ti::i, ti::J) * right_eigenvector(ti::j) -
+        eigenvalue() * right_eigenvector(ti::i)));
+    const Scalar<DataVector> left_residual = magnitude(tenex::evaluate<ti::I>(
+        left_eigenvector(ti::J) * characteristic_matrix(ti::j, ti::I) -
+        eigenvalue() * left_eigenvector(ti::I)));
+
+    CHECK(max(get(right_residual)) < tolerance);
+    CHECK(max(get(left_residual)) < tolerance);
+  }
+
+  CHECK(max(abs(gsl::at(right_eigenvectors, HydroVectorR::R4).get(5) - 1.0)) >
+        1.0e-12);
+  CHECK(max(abs(gsl::at(left_eigenvectors, HydroVectorL::L4).get(5) + 1.0)) >
+        1.0e-12);
+}
 }  // namespace
 
 SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.Characteristics",
@@ -695,6 +813,7 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.Characteristics",
   test_hydro_eigenvectors_identity(dv);
   test_hydro_numerical_eigensystem(dv);
   test_hydro_analytic_eigenvectors(dv);
+  test_tabulated3d_kappa_and_zeta_in_characteristics();
 
   TestHelpers::db::test_compute_tag<
       grmhd::ValenciaDivClean::Tags::CharacteristicSpeedsCompute>(
