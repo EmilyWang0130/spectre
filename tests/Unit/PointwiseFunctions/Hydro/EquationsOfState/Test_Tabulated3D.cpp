@@ -200,15 +200,19 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
                  get(eos.sound_speed_squared_from_density_and_temperature(
                      state[1], state[0], state[2]))) < 1.e-12);
 
-  CHECK(std::abs(output[TEoS::Kappa] -
-                 get(eos.kappa_from_density_and_temperature(
-                     state[1], state[0], state[2]))) < 1.e-10);
-  CHECK(std::abs(output[TEoS::Zeta] - get(eos.zeta_from_density_and_temperature(
-                                          state[1], state[0], state[2]))) <
-        1.e-12);
+  // Tabulated3D returns kappa = dp/deps. The synthetic table stores
+  // kappa = logRho at each point.
+  const double expected_kappa = pure_state[1];
+  const double expected_zeta = pure_state[2];
+
+  CHECK(std::abs(expected_kappa - get(eos.kappa_from_density_and_temperature(
+                                      state[1], state[0], state[2]))) < 1.e-10);
+  CHECK(std::abs(expected_zeta - get(eos.zeta_from_density_and_temperature(
+                                     state[1], state[0], state[2]))) < 1.e-12);
   CHECK(std::abs(std::exp(output[TEoS::SpecificEntropy]) -
                  get(eos.specific_entropy_from_density_and_temperature(
                      state[1], state[0], state[2]))) < 2.e-12);
+
   CHECK(not eos.is_barotropic());
   CHECK(not eos.is_equilibrium());
 
@@ -244,14 +248,12 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
                      vector_state[1], vector_state[0], vector_state[2]))[0]) <
         2.e-12);
 
-  CHECK(std::abs(output[TEoS::Kappa] -
-                 get(eos.kappa_from_density_and_temperature(
-                     vector_state[1], vector_state[0], vector_state[2]))[0]) <
-        1.e-10);
-  CHECK(std::abs(output[TEoS::Zeta] - get(eos.zeta_from_density_and_temperature(
-                                          vector_state[1], vector_state[0],
-                                          vector_state[2]))[0]) < 1.e-12);
-
+  CHECK(std::abs(expected_kappa - get(eos.kappa_from_density_and_temperature(
+                                      vector_state[1], vector_state[0],
+                                      vector_state[2]))[0]) < 1.e-10);
+  CHECK(std::abs(expected_zeta - get(eos.zeta_from_density_and_temperature(
+                                     vector_state[1], vector_state[0],
+                                     vector_state[2]))[0]) < 1.e-12);
   const auto eps_interp_vector =
       eos.specific_internal_energy_from_density_and_temperature(
           vector_state[1], vector_state[0], vector_state[2]);
@@ -272,13 +274,17 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
     CHECK_ITERABLE_APPROX(get(this_eos.pressure_from_density_and_temperature(
                               state[1], state[0], state[2])),
                           0.00003283930543247);
+    // c_s^2 and kappa are now reconstructed from the tabulated p, s, and ε by
+    // finite differences in ConvertComposeTable rather than read verbatim from
+    // CompOSE Q12/Q11; the reference values below are the FD-reconstructed
+    // ones at (T=1 MeV, rho_geom=1e-4, Ye=0.3) on the small (2,4,3) test grid.
     CHECK_ITERABLE_APPROX(
         get(this_eos.sound_speed_squared_from_density_and_temperature(
             state[1], state[0], state[2])),
-        0.52939128000453251);
+        0.32224092372902718);
     CHECK_ITERABLE_APPROX(get(this_eos.kappa_from_density_and_temperature(
                               state[1], state[0], state[2])),
-                          0.00490097126107262);
+                          0.00066402922990649);
     CHECK_ITERABLE_APPROX(get(this_eos.zeta_from_density_and_temperature(
                               state[1], state[0], state[2])),
                           -0.00043219601036757);

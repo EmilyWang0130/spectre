@@ -14,7 +14,6 @@
 #include "IO/H5/EosTable.hpp"
 #include "IO/H5/File.hpp"
 #include "Parallel/Printf/Printf.hpp"
-#include "PointwiseFunctions/Hydro/Units.hpp"
 #include "Utilities/ErrorHandling/Assert.hpp"
 #include "Utilities/ErrorHandling/Error.hpp"
 
@@ -97,175 +96,24 @@ void convert_file(const std::string& compose_directory,
       zeta_derivative_keys.begin(), zeta_derivative_keys.end(),
       [&data](const std::string& key) { return data.count(key) == 1; });
 
-  // Write everything available from the CompOSE table except those
-  // derivatives, the sound speed squared, and kappa. The latter two are
-  // reconstructed from p, s, and ε below; CompOSE's tabulated Q12 and Q11 are
-  // unreliable at table corners.
+  // Write everything available from the CompOSE table except those derivatives.
   for (const auto& [quantity_name, quantity_data] : data) {
     if (std::find(zeta_derivative_keys.begin(), zeta_derivative_keys.end(),
                   quantity_name) != zeta_derivative_keys.end()) {
       continue;
     }
-    if (quantity_name == "sound speed squared" or quantity_name == "kappa") {
-      continue;
-    }
     spectre_eos.write_quantity(quantity_name, quantity_data);
   }
 
-  // Replace CompOSE's tabulated Q12 (sound speed squared) with one
-  // reconstructed by finite-differencing pressure and entropy on the table
-  // grid. CompOSE's Q12 is computed internally from high-order interpolation
-  // of the free energy and is known to go unphysical (negative, or > 1) at
-  // dilute-table corners (a small percent of the DD2 table, for example).
-  // The reconstruction follows the recipe used by PyCompOSE
-  // (https://github.com/computationalrelativity/PyCompOSE) — see
-  // compute_cs2_from_pressure_and_entropy in ComposeTableDerivatives. For
-  // β-equilibrium tables Y_e is slaved and the table is 2D, so the
-  // independent (∂s/∂T)/(∂s/∂n_b) derivatives that the recipe needs do not
-  // mean the same thing; in that case we leave the original Q12 in place and
-  // warn.
-  //
-  // The cs² floor matches PyCompOSE's DD2 example (1e-6).
-  constexpr double cs2_floor = 1.0e-6;
-  const bool have_inputs_for_cs2_reconstruction =
-      data.count("pressure") == 1 and data.count("specific entropy") == 1 and
-      data.count("specific internal energy") == 1;
-  if (compose_table.beta_equilibrium() and
-      data.count("sound speed squared") == 1) {
+  // kappa = dp/dε (CompOSE Q11): if it wasn't requested in eos.quantities,
+  // fall back to zeros so the H5 format stays uniform and Tabulated3D can
+  // still read it.
+  if (data.count("kappa") == 0) {
     Parallel::printf(
-        "WARNING: source CompOSE table is flagged beta-equilibrium; leaving "
-        "sound speed squared (Q12) as-is. The finite-difference reconstruction "
-        "from p and s assumes T and Y_e are independent table axes.\n");
-    spectre_eos.write_quantity("sound speed squared",
-                               data.at("sound speed squared"));
-  } else if (not have_inputs_for_cs2_reconstruction) {
-    if (data.count("sound speed squared") == 1) {
-      Parallel::printf(
-          "WARNING: source CompOSE table does not contain all of pressure "
-          "(Q1), specific entropy (Q2), and specific internal energy (Q7), so "
-          "the cs² reconstruction is skipped; writing CompOSE's Q12 verbatim. "
-          "Regenerate with indices 1 2 7 12 in eos.quantities to enable the "
-          "reconstruction.\n");
-      spectre_eos.write_quantity("sound speed squared",
-                                 data.at("sound speed squared"));
-    } else {
-      ERROR(
-          "Source CompOSE table is missing sound speed squared (Q12) and the "
-          "quantities needed to reconstruct it (pressure Q1, specific entropy "
-          "Q2, specific internal energy Q7). Regenerate the CompOSE table "
-          "with all of indices 1 2 7 12 in eos.quantities.");
-    }
-  } else {
-    const auto T_grid = make_grid_1d(compose_table.temperature_bounds(), nT,
-                                     compose_table.temperature_log_spacing());
-    const auto nb_grid =
-        make_grid_1d(compose_table.number_density_bounds(), nN,
-                     compose_table.number_density_log_spacing());
-    const DataVector reconstructed_cs2 =
-        io::compute_cs2_from_pressure_and_entropy(
-            data.at("pressure"), data.at("specific entropy"),
-            data.at("specific internal energy"), nb_grid, T_grid,
-            hydro::units::nuclear::neutron_mass, nN, nT, nYe, cs2_floor);
-
-    if (data.count("sound speed squared") == 1) {
-      const DataVector& original_cs2 = data.at("sound speed squared");
-      size_t n_negative_original = 0;
-      size_t n_above_one_original = 0;
-      for (size_t i = 0; i < original_cs2.size(); ++i) {
-        if (original_cs2[i] < 0.0) {
-          ++n_negative_original;
-        }
-        if (original_cs2[i] > 1.0) {
-          ++n_above_one_original;
-        }
-      }
-      Parallel::printf(
-          "Replacing CompOSE sound speed squared (Q12) with finite-difference "
-          "reconstruction from p and s; original had %zu/%zu points with "
-          "cs² < 0 and %zu with cs² > 1. Reconstructed cs² floored at "
-          "%.1e.\n",
-          n_negative_original, original_cs2.size(), n_above_one_original,
-          cs2_floor);
-    } else {
-      Parallel::printf(
-          "Computing sound speed squared from finite-difference of p and s "
-          "(CompOSE Q12 was not requested in eos.quantities); floored at "
-          "%.1e.\n",
-          cs2_floor);
-    }
-    spectre_eos.write_quantity("sound speed squared", reconstructed_cs2);
-  }
-
-  // Replace CompOSE's tabulated Q11 (kappa = ∂p/∂ε) with a finite-difference
-  // reconstruction from p and ε on the T axis at fixed (n_b, Y_e):
-  //   κ = (∂p/∂T) / (∂ε/∂T)
-  // Same motivation as for cs²: CompOSE's tabulated Q11 has interpolation
-  // noise (negative κ values are common at table corners; in the DD2 HS table
-  // ~1% of points have κ < 0, which is unphysical for any stable EoS). For
-  // β-equilibrium tables we keep the CompOSE Q11 because Y_e is slaved (T is
-  // also reduced by the β-eq condition, but the formula still nominally
-  // applies; we err on the side of preserving the original behaviour for
-  // β-eq inputs and re-evaluate later if needed). For single-T (cold)
-  // tables we cannot FD on T at all and fall back to zeros.
-  //
-  // Floor matches the cs² treatment: 1e-6 in input units (MeV/fm^3 when called
-  // on CompOSE data).
-  constexpr double kappa_floor = 1.0e-6;
-  const bool have_inputs_for_kappa_reconstruction =
-      nT >= 2 and data.count("pressure") == 1 and
-      data.count("specific internal energy") == 1;
-  if (compose_table.beta_equilibrium() and data.count("kappa") == 1) {
-    Parallel::printf(
-        "WARNING: source CompOSE table is flagged beta-equilibrium; leaving "
-        "kappa (Q11) as-is. The finite-difference reconstruction from p and "
-        "ε assumes T is an independent table axis.\n");
-    spectre_eos.write_quantity("kappa", data.at("kappa"));
-  } else if (not have_inputs_for_kappa_reconstruction) {
-    if (data.count("kappa") == 1) {
-      Parallel::printf(
-          "WARNING: cannot reconstruct kappa from p and ε (either only one T "
-          "slice or missing pressure / specific internal energy); writing "
-          "CompOSE's Q11 verbatim.\n");
-      spectre_eos.write_quantity("kappa", data.at("kappa"));
-    } else {
-      Parallel::printf(
-          "WARNING: source CompOSE table does not contain kappa (Q11 dp/dε) "
-          "and cannot be reconstructed (either only one T slice or missing "
-          "pressure / specific internal energy); writing kappa = 0. "
-          "Regenerate with indices 1 7 11 in eos.quantities and a multi-T "
-          "grid to enable the reconstruction.\n");
-      spectre_eos.write_quantity("kappa", DataVector(ntot, 0.0));
-    }
-  } else {
-    const auto T_grid_kappa =
-        make_grid_1d(compose_table.temperature_bounds(), nT,
-                     compose_table.temperature_log_spacing());
-    const DataVector reconstructed_kappa =
-        io::compute_kappa_from_pressure_and_energy(
-            data.at("pressure"), data.at("specific internal energy"),
-            T_grid_kappa, hydro::units::nuclear::neutron_mass, nN, nT, nYe,
-            kappa_floor);
-
-    if (data.count("kappa") == 1) {
-      const DataVector& original_kappa = data.at("kappa");
-      size_t n_negative_original = 0;
-      for (size_t i = 0; i < original_kappa.size(); ++i) {
-        if (original_kappa[i] < 0.0) {
-          ++n_negative_original;
-        }
-      }
-      Parallel::printf(
-          "Replacing CompOSE kappa (Q11) with finite-difference reconstruction "
-          "from p and ε; original had %zu/%zu points with κ < 0. Reconstructed "
-          "κ floored at %.1e.\n",
-          n_negative_original, original_kappa.size(), kappa_floor);
-    } else {
-      Parallel::printf(
-          "Computing kappa from finite-difference of p and ε (CompOSE Q11 was "
-          "not requested in eos.quantities); floored at %.1e.\n",
-          kappa_floor);
-    }
-    spectre_eos.write_quantity("kappa", reconstructed_kappa);
+        "WARNING: source CompOSE table does not contain kappa (Q11 dp/dε); "
+        "writing kappa = 0. Regenerate with index 11 in eos.quantities to "
+        "get the true value.\n");
+    spectre_eos.write_quantity("kappa", DataVector(ntot, 0.0));
   }
 
   // zeta = ∂P/∂Ye is computed analytically from the CompOSE free-energy
