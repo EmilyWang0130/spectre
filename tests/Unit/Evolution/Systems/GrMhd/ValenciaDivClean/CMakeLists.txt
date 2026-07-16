@@ -13,6 +13,7 @@ set(LIBRARY_SOURCES
   BoundaryConditions/Test_Reflective.cpp
   BoundaryCorrections/Test_Hll.cpp
   BoundaryCorrections/Test_Marquina.cpp
+  BoundaryCorrections/Test_MarquinaCpm.cpp
   BoundaryCorrections/Test_Rusanov.cpp
   FiniteDifference/Test_BoundaryConditionGhostData.cpp
   FiniteDifference/Test_FirstOrder.cpp

@@ -571,6 +571,306 @@ void test_boundary_correction_conservation_impl(
           << dg_formulation);
   }
 }
+
+/// Runs both `correction_a` and `correction_b` on the same random face state
+/// and asserts that their per-component boundary corrections agree to
+/// `eps`. Used to verify that two flux schemes that are algebraically
+/// equivalent (e.g. full-decomposition Marquina vs. MarquinaCpm) produce
+/// numerically identical output.
+template <typename System, typename BoundaryCorrectionA,
+          typename BoundaryCorrectionB, size_t FaceDim, typename... VolumeTags,
+          typename... RangeTags>
+void test_boundary_correction_agreement_impl(
+    const gsl::not_null<std::mt19937*> generator,
+    const BoundaryCorrectionA& correction_a_in,
+    const BoundaryCorrectionB& correction_b_in, const Mesh<FaceDim>& face_mesh,
+    const tuples::TaggedTuple<VolumeTags...>& volume_data,
+    const tuples::TaggedTuple<Tags::Range<RangeTags>...>& ranges,
+    const bool use_consistent_lorentz_factor, const bool use_moving_mesh,
+    const ::dg::Formulation dg_formulation, const double eps) {
+  CAPTURE(use_moving_mesh);
+  CAPTURE(dg_formulation);
+  CAPTURE(FaceDim);
+  constexpr bool curved_background =
+      detail::has_inverse_spatial_metric_tag_v<System>;
+  CAPTURE(curved_background);
+  Approx custom_approx = Approx::custom().epsilon(eps).scale(1.0);
+
+  using variables_tags = typename System::variables_tag::tags_list;
+  using flux_variables = typename System::flux_variables;
+  using flux_tags =
+      db::wrap_tags_in<::Tags::Flux, flux_variables, tmpl::size_t<FaceDim + 1>,
+                       Frame::Inertial>;
+  using dt_variables_tags = db::wrap_tags_in<::Tags::dt, variables_tags>;
+
+  using dg_package_field_tags =
+      typename BoundaryCorrectionA::dg_package_field_tags;
+  using dg_package_volume_tags =
+      typename BoundaryCorrectionA::dg_package_data_volume_tags;
+  using dg_boundary_terms_volume_tags =
+      typename BoundaryCorrectionA::dg_boundary_terms_volume_tags;
+  using package_temporary_tags =
+      typename BoundaryCorrectionA::dg_package_data_temporary_tags;
+  using package_primitive_tags = detail::get_correction_primitive_vars<
+      System::has_primitive_and_conservative_vars, BoundaryCorrectionA>;
+
+  static_assert(
+      std::is_same_v<typename BoundaryCorrectionA::dg_package_field_tags,
+                     typename BoundaryCorrectionB::dg_package_field_tags>,
+      "The two boundary corrections must package the same field tags for "
+      "them to be directly compared.");
+
+  const auto correction_a_base_ptr =
+      serialize_and_deserialize(correction_a_in.get_clone());
+  const auto& correction_a =
+      dynamic_cast<const BoundaryCorrectionA&>(*correction_a_base_ptr);
+  const auto correction_b_base_ptr =
+      serialize_and_deserialize(correction_b_in.get_clone());
+  const auto& correction_b =
+      dynamic_cast<const BoundaryCorrectionB&>(*correction_b_base_ptr);
+
+  using face_tags =
+      tmpl::append<variables_tags, flux_tags, package_temporary_tags,
+                   package_primitive_tags>;
+  using face_tags_with_curved_background = tmpl::conditional_t<
+      curved_background,
+      tmpl::remove_duplicates<tmpl::push_back<
+          face_tags, typename detail::inverse_spatial_metric_tag<
+                         curved_background>::template f<System>>>,
+      face_tags>;
+
+  using invalid_range_tags =
+      tmpl::list_difference<tmpl::list<RangeTags...>,
+                            face_tags_with_curved_background>;
+  static_assert(std::is_same_v<tmpl::list<>, invalid_range_tags>,
+                "Received Tags::Range for Tags that aren't arguments to "
+                "dg_package_data");
+
+  std::uniform_real_distribution<> dist(-1.0, 1.0);
+  DataVector used_for_size{face_mesh.number_of_grid_points()};
+
+  auto interior_fields_on_face =
+      make_with_random_values<Variables<face_tags_with_curved_background>>(
+          generator, make_not_null(&dist), used_for_size);
+  tmpl::for_each<tmpl::list<RangeTags...>>([&generator,
+                                            &interior_fields_on_face,
+                                            &ranges](auto tag_v) {
+    using tag = tmpl::type_from<decltype(tag_v)>;
+    const std::array<double, 2>& range = tuples::get<Tags::Range<tag>>(ranges);
+    std::uniform_real_distribution<> local_dist(range[0], range[1]);
+    fill_with_random_values(make_not_null(&get<tag>(interior_fields_on_face)),
+                            generator, make_not_null(&local_dist));
+  });
+  auto exterior_fields_on_face =
+      make_with_random_values<Variables<face_tags_with_curved_background>>(
+          generator, make_not_null(&dist), used_for_size);
+  tmpl::for_each<tmpl::list<RangeTags...>>([&generator,
+                                            &exterior_fields_on_face,
+                                            &ranges](auto tag_v) {
+    using tag = tmpl::type_from<decltype(tag_v)>;
+    const std::array<double, 2>& range = tuples::get<Tags::Range<tag>>(ranges);
+    std::uniform_real_distribution<> local_dist(range[0], range[1]);
+    fill_with_random_values(make_not_null(&get<tag>(exterior_fields_on_face)),
+                            generator, make_not_null(&local_dist));
+  });
+
+  const auto set_consistent_lorentz_factor =
+      [](const gsl::not_null<Variables<face_tags_with_curved_background>*>
+             fields) {
+        using lorentz_factor_tag = hydro::Tags::LorentzFactor<DataVector>;
+        using spatial_velocity_tag =
+            hydro::Tags::SpatialVelocity<DataVector, FaceDim + 1,
+                                         Frame::Inertial>;
+        using spatial_metric_tag =
+            gr::Tags::SpatialMetric<DataVector, FaceDim + 1, Frame::Inertial>;
+        constexpr bool has_lorentz =
+            tmpl::list_contains_v<face_tags_with_curved_background,
+                                  lorentz_factor_tag>;
+        constexpr bool has_velocity =
+            tmpl::list_contains_v<face_tags_with_curved_background,
+                                  spatial_velocity_tag>;
+        constexpr bool has_spatial_metric =
+            tmpl::list_contains_v<face_tags_with_curved_background,
+                                  spatial_metric_tag>;
+        constexpr bool lorentz_range_specified =
+            tmpl::list_contains_v<tmpl::list<RangeTags...>, lorentz_factor_tag>;
+        constexpr bool velocity_range_specified =
+            tmpl::list_contains_v<tmpl::list<RangeTags...>,
+                                  spatial_velocity_tag>;
+        if constexpr (has_lorentz and has_velocity and
+                      velocity_range_specified and
+                      not lorentz_range_specified) {
+          const auto& spatial_velocity = get<spatial_velocity_tag>(*fields);
+          auto& lorentz_factor = get<lorentz_factor_tag>(*fields);
+          if constexpr (has_spatial_metric) {
+            const auto spatial_speed =
+                magnitude(spatial_velocity, get<spatial_metric_tag>(*fields));
+            const DataVector one_minus_speed_squared =
+                1.0 - get(spatial_speed) * get(spatial_speed);
+            for (size_t i = 0; i < one_minus_speed_squared.size(); ++i) {
+              CHECK(one_minus_speed_squared[i] > 0.0);
+            }
+            get(lorentz_factor) = 1.0 / sqrt(one_minus_speed_squared);
+          } else {
+            const auto spatial_speed = magnitude(spatial_velocity);
+            const DataVector one_minus_speed_squared =
+                1.0 - get(spatial_speed) * get(spatial_speed);
+            for (size_t i = 0; i < one_minus_speed_squared.size(); ++i) {
+              CHECK(one_minus_speed_squared[i] > 0.0);
+            }
+            get(lorentz_factor) = 1.0 / sqrt(one_minus_speed_squared);
+          }
+        }
+      };
+
+  auto interior_unit_normal_covector = make_with_random_values<
+      tnsr::i<DataVector, FaceDim + 1, Frame::Inertial>>(
+      generator, make_not_null(&dist), used_for_size);
+  tnsr::I<DataVector, FaceDim + 1, Frame::Inertial>
+      interior_unit_normal_vector{};
+  tnsr::i<DataVector, FaceDim + 1, Frame::Inertial>
+      exterior_unit_normal_covector;
+  tnsr::I<DataVector, FaceDim + 1, Frame::Inertial>
+      exterior_unit_normal_vector{};
+  if constexpr (not curved_background) {
+    const Scalar<DataVector> interior_normal_magnitude =
+        magnitude(interior_unit_normal_covector);
+    for (auto& t : interior_unit_normal_covector) {
+      t /= get(interior_normal_magnitude);
+    }
+    exterior_unit_normal_covector = interior_unit_normal_covector;
+    for (auto& t : exterior_unit_normal_covector) {
+      t *= -1.0;
+    }
+  } else {
+    using inv_spatial_metric = typename detail::inverse_spatial_metric_tag<
+        curved_background>::template f<System>;
+    exterior_unit_normal_covector = interior_unit_normal_covector;
+    for (auto& t : exterior_unit_normal_covector) {
+      t *= -1.0;
+    }
+    detail::adjust_spatial_metric_or_inverse(
+        make_not_null(&get<inv_spatial_metric>(interior_fields_on_face)));
+    std::uniform_real_distribution<> inv_metric_change_dist(0.999, 1.0);
+    for (size_t i = 0; i < FaceDim + 1; ++i) {
+      for (size_t j = i; j < FaceDim + 1; ++j) {
+        get<inv_spatial_metric>(exterior_fields_on_face).get(i, j) =
+            inv_metric_change_dist(*generator) *
+            get<inv_spatial_metric>(interior_fields_on_face).get(i, j);
+      }
+    }
+    detail::normalize_vector_and_covector(
+        make_not_null(&interior_unit_normal_covector),
+        make_not_null(&interior_unit_normal_vector),
+        get<inv_spatial_metric>(interior_fields_on_face));
+    detail::normalize_vector_and_covector(
+        make_not_null(&exterior_unit_normal_covector),
+        make_not_null(&exterior_unit_normal_vector),
+        get<inv_spatial_metric>(exterior_fields_on_face));
+    using spatial_metric = gr::Tags::SpatialMetric<DataVector, FaceDim + 1>;
+    if constexpr (tmpl::list_contains_v<face_tags_with_curved_background,
+                                        spatial_metric>) {
+      detail::adjust_spatial_metric_or_inverse(
+          make_not_null(&get<spatial_metric>(interior_fields_on_face)));
+      for (size_t i = 0; i < FaceDim + 1; ++i) {
+        for (size_t j = i; j < FaceDim + 1; ++j) {
+          get<spatial_metric>(exterior_fields_on_face).get(i, j) =
+              inv_metric_change_dist(*generator) *
+              get<spatial_metric>(interior_fields_on_face).get(i, j);
+        }
+      }
+    }
+  }
+  if (use_consistent_lorentz_factor) {
+    set_consistent_lorentz_factor(make_not_null(&interior_fields_on_face));
+    set_consistent_lorentz_factor(make_not_null(&exterior_fields_on_face));
+  }
+
+  std::optional<tnsr::I<DataVector, FaceDim + 1, Frame::Inertial>>
+      mesh_velocity{};
+  if (use_moving_mesh) {
+    mesh_velocity = make_with_random_values<
+        tnsr::I<DataVector, FaceDim + 1, Frame::Inertial>>(
+        generator, make_not_null(&dist), used_for_size);
+  }
+
+  Variables<dg_package_field_tags> interior_package_data_a{
+      used_for_size.size()};
+  Variables<dg_package_field_tags> exterior_package_data_a{
+      used_for_size.size()};
+  Variables<dg_package_field_tags> interior_package_data_b{
+      used_for_size.size()};
+  Variables<dg_package_field_tags> exterior_package_data_b{
+      used_for_size.size()};
+
+  if constexpr (curved_background) {
+    call_dg_package_data(make_not_null(&interior_package_data_a), correction_a,
+                         interior_fields_on_face, volume_data,
+                         interior_unit_normal_covector,
+                         interior_unit_normal_vector, mesh_velocity,
+                         face_tags{}, dg_package_volume_tags{});
+    call_dg_package_data(make_not_null(&exterior_package_data_a), correction_a,
+                         exterior_fields_on_face, volume_data,
+                         exterior_unit_normal_covector,
+                         exterior_unit_normal_vector, mesh_velocity,
+                         face_tags{}, dg_package_volume_tags{});
+    call_dg_package_data(make_not_null(&interior_package_data_b), correction_b,
+                         interior_fields_on_face, volume_data,
+                         interior_unit_normal_covector,
+                         interior_unit_normal_vector, mesh_velocity,
+                         face_tags{}, dg_package_volume_tags{});
+    call_dg_package_data(make_not_null(&exterior_package_data_b), correction_b,
+                         exterior_fields_on_face, volume_data,
+                         exterior_unit_normal_covector,
+                         exterior_unit_normal_vector, mesh_velocity,
+                         face_tags{}, dg_package_volume_tags{});
+  } else {
+    call_dg_package_data(make_not_null(&interior_package_data_a), correction_a,
+                         interior_fields_on_face, volume_data,
+                         interior_unit_normal_covector, mesh_velocity,
+                         face_tags{}, dg_package_volume_tags{});
+    call_dg_package_data(make_not_null(&exterior_package_data_a), correction_a,
+                         exterior_fields_on_face, volume_data,
+                         exterior_unit_normal_covector, mesh_velocity,
+                         face_tags{}, dg_package_volume_tags{});
+    call_dg_package_data(make_not_null(&interior_package_data_b), correction_b,
+                         interior_fields_on_face, volume_data,
+                         interior_unit_normal_covector, mesh_velocity,
+                         face_tags{}, dg_package_volume_tags{});
+    call_dg_package_data(make_not_null(&exterior_package_data_b), correction_b,
+                         exterior_fields_on_face, volume_data,
+                         exterior_unit_normal_covector, mesh_velocity,
+                         face_tags{}, dg_package_volume_tags{});
+  }
+
+  Variables<dt_variables_tags> boundary_corrections_a{
+      face_mesh.number_of_grid_points()};
+  Variables<dt_variables_tags> boundary_corrections_b{
+      face_mesh.number_of_grid_points()};
+  call_dg_boundary_terms(make_not_null(&boundary_corrections_a), correction_a,
+                         volume_data, interior_package_data_a,
+                         exterior_package_data_a, dg_formulation,
+                         dg_boundary_terms_volume_tags{});
+  call_dg_boundary_terms(make_not_null(&boundary_corrections_b), correction_b,
+                         volume_data, interior_package_data_b,
+                         exterior_package_data_b, dg_formulation,
+                         dg_boundary_terms_volume_tags{});
+
+  INFO(
+      "Check per-component boundary-correction agreement between two schemes.");
+  tmpl::for_each<flux_variables>([&boundary_corrections_a,
+                                  &boundary_corrections_b,
+                                  &custom_approx](auto flux_variable_tag_v) {
+    using flux_variable_tag = tmpl::type_from<decltype(flux_variable_tag_v)>;
+    const std::string tag_name = db::tag_name<flux_variable_tag>();
+    CAPTURE(tag_name);
+    CHECK_ITERABLE_CUSTOM_APPROX(
+        get<::Tags::dt<flux_variable_tag>>(boundary_corrections_a),
+        get<::Tags::dt<flux_variable_tag>>(boundary_corrections_b),
+        custom_approx);
+  });
+}
+
 }  // namespace detail
 
 /*!
@@ -604,6 +904,41 @@ void test_boundary_correction_conservation(
           generator, correction, face_mesh, volume_data, ranges,
           use_consistent_lorentz_factor, use_moving_mesh, dg_formulation,
           zero_on_smooth_solution, eps);
+    }
+  }
+}
+
+/*!
+ * \ingroup TestingFrameworkGroup
+ * \brief Asserts that `correction_a` and `correction_b` produce identical
+ * boundary corrections on the same random face state, to tolerance `eps`.
+ *
+ * Runs both DG formulations (Strong/WeakInertial), both moving-mesh cases,
+ * and calls each correction's `dg_package_data` + `dg_boundary_terms`
+ * separately on the same primitives/geometry/fluxes. This is the direct
+ * verification of an algebraic-equivalence claim between two flux schemes
+ * (for example, full-decomposition Marquina vs. MarquinaCpm).
+ *
+ * `correction_a` and `correction_b` must package the same set of field tags
+ * for a direct component-wise comparison to be well defined.
+ */
+template <typename System, typename BoundaryCorrectionA,
+          typename BoundaryCorrectionB, size_t FaceDim, typename... VolumeTags,
+          typename... RangeTags>
+void test_boundary_correction_agreement(
+    const gsl::not_null<std::mt19937*> generator,
+    const BoundaryCorrectionA& correction_a,
+    const BoundaryCorrectionB& correction_b, const Mesh<FaceDim>& face_mesh,
+    const tuples::TaggedTuple<VolumeTags...>& volume_data,
+    const tuples::TaggedTuple<Tags::Range<RangeTags>...>& ranges,
+    const double eps = 1.0e-12,
+    const bool use_consistent_lorentz_factor = false) {
+  for (const auto use_moving_mesh : {true, false}) {
+    for (const auto& dg_formulation :
+         {::dg::Formulation::StrongInertial, ::dg::Formulation::WeakInertial}) {
+      detail::test_boundary_correction_agreement_impl<System>(
+          generator, correction_a, correction_b, face_mesh, volume_data, ranges,
+          use_consistent_lorentz_factor, use_moving_mesh, dg_formulation, eps);
     }
   }
 }
