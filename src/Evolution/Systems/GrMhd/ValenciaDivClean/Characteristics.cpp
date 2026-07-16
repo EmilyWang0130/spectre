@@ -475,12 +475,8 @@ void eigenvectors_hydro(
             rest_mass_density, temperature, electron_fraction));
     get(pressure) = get(equation_of_state.pressure_from_density_and_temperature(
         rest_mass_density, temperature, electron_fraction));
-    const Scalar<DataVector> kappa_times_p_over_rho_squared =
-        equation_of_state
-            .kappa_times_p_over_rho_squared_from_density_and_temperature(
-                rest_mass_density, temperature, electron_fraction);
-    get(kappa) = get(kappa_times_p_over_rho_squared) / get(pressure) *
-                 square(get(rest_mass_density));
+    get(kappa) = get(equation_of_state.kappa_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
     get(zeta) = get(equation_of_state.zeta_from_density_and_temperature(
         rest_mass_density, temperature, electron_fraction));
   }
@@ -782,15 +778,8 @@ void flux_jacobian_hydro(
     get(sound_speed_squared) =
         get(equation_of_state.sound_speed_squared_from_density_and_temperature(
             rest_mass_density, temperature, electron_fraction));
-    const auto kappa_times_p_over_rho_squared =
-        equation_of_state
-            .kappa_times_p_over_rho_squared_from_density_and_temperature(
-                rest_mass_density, temperature, electron_fraction);
-    const auto pressure =
-        equation_of_state.pressure_from_density_and_temperature(
-            rest_mass_density, temperature, electron_fraction);
-    get(kappa) = get(kappa_times_p_over_rho_squared) / get(pressure) *
-                 square(get(rest_mass_density));
+    get(kappa) = get(equation_of_state.kappa_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
     get(zeta) = get(equation_of_state.zeta_from_density_and_temperature(
         rest_mass_density, temperature, electron_fraction));
   }

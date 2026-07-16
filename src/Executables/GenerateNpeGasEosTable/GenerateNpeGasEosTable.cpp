@@ -3,7 +3,7 @@
 // Physics: cold relativistic degenerate npe matter + first-order (π²T²)
 // electron thermal correction.
 //
-// Unit conventions (same as ConvertComposeTable output):
+// Unit conventions:
 //   nb:            1/fm³
 //   T:             MeV
 //   Ye:            dimensionless
@@ -11,12 +11,12 @@
 //   eps (ε_H5):    dimensionless  (= E_per_baryon / m_n - 1)
 //   cs²:           dimensionless  (c = 1)
 //   lepton mu:     MeV
-//   dp_depsilon:   1/fm³          (= ∂P/∂(E_per_baryon_MeV) at fixed nb,Ye)
+//   kappa:   1/fm³          (= ∂P/∂(E_per_baryon_MeV) at fixed nb,Ye)
 //   zeta:          MeV/fm³        (= ∂P/∂Ye at fixed nb,ε)
 //
 // Tabulated3d unit conversions applied after reading the H5:
 //   pressure  → multiply by 1/pressure_unit
-//   dp_depsilon → multiply by neutron_mass_nuclear / pressure_unit_nuclear
+//   kappa → multiply by neutron_mass_nuclear / pressure_unit_nuclear
 //   zeta      → multiply by 1/pressure_unit
 //   density   → log(nb * neutron_mass_nuclear / pressure_unit_nuclear)
 
@@ -213,13 +213,13 @@ double analytic_lepton_chemical_potential(double nb, double T, double Ye) {
   return mu_cold + mu_thermal;
 }
 
-// dp_depsilon = ∂P/∂(E_per_baryon_MeV) at fixed nb,Ye   [1/fm³]
+// kappa = ∂P/∂(E_per_baryon_MeV) at fixed nb,Ye   [1/fm³]
 //
 // For this thermal model: ∂P/∂T / ∂E_per_baryon/∂T = (nb/3 δP/δT) / δE/δT
 // Both T-derivatives come from the electron thermal correction:
 //   ∂P/∂T = 2δP/T,  ∂(E/baryon)/∂T = δ(E/baryon)*2/T
 // Their ratio = nb/3, independent of T and Ye.
-double analytic_dp_depsilon(double nb, double /*T*/, double /*Ye*/) {
+double analytic_kappa(double nb, double /*T*/, double /*Ye*/) {
   return nb / 3.0;
 }
 
@@ -240,6 +240,16 @@ double analytic_zeta(double nb, double /*T*/, double Ye) {
   return (nb / 3.0) * (mass_n / std::sqrt(1.0 + xn * xn) -
                        mass_p / std::sqrt(1.0 + xp * xp) -
                        mass_e / std::sqrt(1.0 + xe * xe));
+}
+
+// σ = entropy per baryon   [dimensionless]
+//
+//   σ = π² Ye T / μ_E = π² T * (Ye/μ_E)
+//
+// where Ye/μ_E is computed by thermal_ye_over_muE. This is the leading-order
+// Sommerfeld expansion result for a relativistic degenerate electron gas.
+double analytic_specific_entropy(double nb, double T, double Ye) {
+  return M_PI * M_PI * T * thermal_ye_over_muE(nb, Ye);
 }
 
 // ---------------------------------------------------------------------------
@@ -287,19 +297,21 @@ size_t table_index(size_t in, size_t iT, size_t iYe, size_t nN, size_t nYe) {
 // ---------------------------------------------------------------------------
 void write_table(const std::string& output_filename,
                  const std::string& eos_subfile_name, const size_t nN,
-                 const size_t nT, const size_t nYe) {
+                 const size_t nT, const size_t nYe, const double nb_lo,
+                 const double nb_hi, const double T_lo, const double T_hi,
+                 const double Ye_lo, const double Ye_hi) {
   const GridSpec nb_spec{
-      {1.0e-3, 1.0},  // 1/fm³: sub-nuclear to ~6× saturation
+      {nb_lo, nb_hi},  // 1/fm³
       nN,
       true  // log spacing
   };
   const GridSpec T_spec{
-      {0.1, 50.0},  // MeV: low to moderate temperature
+      {T_lo, T_hi},  // MeV
       nT,
       true  // log spacing
   };
   const GridSpec Ye_spec{
-      {0.05, 0.55},  // electron fraction
+      {Ye_lo, Ye_hi},  // electron fraction
       nYe,
       false  // linear spacing
   };
@@ -317,7 +329,8 @@ void write_table(const std::string& output_filename,
   DataVector specific_internal_energy(ntot);
   DataVector sound_speed_squared(ntot);
   DataVector lepton_chemical_potential(ntot);
-  DataVector dp_depsilon(ntot);
+  DataVector kappa(ntot);
+  DataVector specific_entropy(ntot);
   DataVector zeta(ntot);
 
   for (size_t iT = 0; iT < nT_; ++iT) {
@@ -334,7 +347,8 @@ void write_table(const std::string& output_filename,
         sound_speed_squared[s] = analytic_sound_speed_squared(nb, T, Ye);
         lepton_chemical_potential[s] =
             analytic_lepton_chemical_potential(nb, T, Ye);
-        dp_depsilon[s] = analytic_dp_depsilon(nb, T, Ye);
+        kappa[s] = analytic_kappa(nb, T, Ye);
+        specific_entropy[s] = analytic_specific_entropy(nb, T, Ye);
         zeta[s] = analytic_zeta(nb, T, Ye);
       }
     }
@@ -357,7 +371,8 @@ void write_table(const std::string& output_filename,
   eos_table.write_quantity("sound speed squared", sound_speed_squared);
   eos_table.write_quantity("lepton chemical potential",
                            lepton_chemical_potential);
-  eos_table.write_quantity("dp_depsilon", dp_depsilon);
+  eos_table.write_quantity("kappa", kappa);
+  eos_table.write_quantity("specific entropy", specific_entropy);
   eos_table.write_quantity("zeta", zeta);
 }
 
@@ -377,6 +392,18 @@ int main(int argc, char** argv) {
          "Temperature grid points.")
         ("nYe", bpo::value<size_t>()->default_value(20),
          "Electron fraction grid points.")
+        ("nb-lo", bpo::value<double>()->default_value(1.0e-3),
+         "Lower bound on n_b in 1/fm^3 (log-spaced axis).")
+        ("nb-hi", bpo::value<double>()->default_value(1.0),
+         "Upper bound on n_b in 1/fm^3 (log-spaced axis).")
+        ("T-lo", bpo::value<double>()->default_value(0.1),
+         "Lower bound on temperature in MeV (log-spaced axis).")
+        ("T-hi", bpo::value<double>()->default_value(50.0),
+         "Upper bound on temperature in MeV (log-spaced axis).")
+        ("Ye-lo", bpo::value<double>()->default_value(0.05),
+         "Lower bound on electron fraction (linear-spaced axis).")
+        ("Ye-hi", bpo::value<double>()->default_value(0.55),
+         "Upper bound on electron fraction (linear-spaced axis).")
         ("output,o", bpo::value<std::string>()->default_value("npe_gas_eos.h5"),
          "Output HDF5 filename.")
         ("subfile", bpo::value<std::string>()->default_value("npe_gas"),
@@ -391,6 +418,9 @@ int main(int argc, char** argv) {
   }
   write_table(vm["output"].as<std::string>(), vm["subfile"].as<std::string>(),
               vm["nN"].as<size_t>(), vm["nT"].as<size_t>(),
-              vm["nYe"].as<size_t>());
+              vm["nYe"].as<size_t>(), vm["nb-lo"].as<double>(),
+              vm["nb-hi"].as<double>(), vm["T-lo"].as<double>(),
+              vm["T-hi"].as<double>(), vm["Ye-lo"].as<double>(),
+              vm["Ye-hi"].as<double>());
   return 0;
 }

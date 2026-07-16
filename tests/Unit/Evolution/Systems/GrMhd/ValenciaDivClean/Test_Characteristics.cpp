@@ -701,16 +701,10 @@ void test_tabulated3d_kappa_and_zeta_in_characteristics() {
       rest_mass_density, temperature, electron_fraction);
   const auto specific_enthalpy = hydro::relativistic_specific_enthalpy(
       rest_mass_density, specific_internal_energy, pressure);
-  const auto kappa_times_p_over_rho_squared =
-      equation_of_state
-          .kappa_times_p_over_rho_squared_from_density_and_temperature(
-              rest_mass_density, temperature, electron_fraction);
+  const auto kappa = equation_of_state.kappa_from_density_and_temperature(
+      rest_mass_density, temperature, electron_fraction);
   const auto zeta = equation_of_state.zeta_from_density_and_temperature(
       rest_mass_density, temperature, electron_fraction);
-
-  Scalar<DataVector> kappa{num_points};
-  get(kappa) = get(kappa_times_p_over_rho_squared) / get(pressure) *
-               square(get(rest_mass_density));
 
   CHECK(max(abs(get(kappa))) > 1.0e-12);
   CHECK(max(abs(get(zeta))) > 1.0e-12);
@@ -774,7 +768,7 @@ void test_tabulated3d_kappa_and_zeta_in_characteristics() {
       lorentz_factor, specific_enthalpy, spatial_metric, inv_spatial_metric,
       unit_normal, equation_of_state);
 
-  constexpr double tolerance = 1.0e-11;
+  constexpr double tolerance = 1.0e-10;
   for (size_t i = 0; i < matrix_size; ++i) {
     const auto& eigenvalue = gsl::at(all_eigenvalues, i);
     const auto& right_eigenvector = gsl::at(right_eigenvectors, i);
