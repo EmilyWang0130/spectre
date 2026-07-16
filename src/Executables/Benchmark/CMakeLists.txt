@@ -1,6 +1,8 @@
 # Distributed under the MIT License.
 # See LICENSE.txt for details.
 
+add_subdirectory(CpmMarquina)
+
 # Since benchmarking is only interesting in release mode the executable isn't
 # added for Debug builds. Charm++'s main function is overridden with the main
 # from the Google Benchmark library. The executable is not added to the `all` make
