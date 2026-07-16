@@ -12,6 +12,7 @@ spectre_target_sources(
   DerivativeOrder.cpp
   FallbackReconstructorType.cpp
   Filter.cpp
+  FirstOrder.cpp
   Minmod.cpp
   MonotonicityPreserving5.cpp
   MonotonisedCentral.cpp
@@ -32,6 +33,7 @@ spectre_target_headers(
   FallbackReconstructorType.hpp
   Filter.hpp
   FiniteDifference.hpp
+  FirstOrder.hpp
   HighOrderFluxCorrection.hpp
   Minmod.hpp
   MonotonicityPreserving5.hpp
