@@ -351,6 +351,40 @@ void eigenvectors_hydro(
         equation_of_state);
 /// @}
 
+/*!
+ * \brief Index labels for `acoustic_eigenvectors_hydro`.
+ *
+ * The output arrays contain only the two acoustic (non-degenerate)
+ * eigenvectors, in this order.
+ */
+enum AcousticHydroVector : uint32_t {
+  AcousticPlus = 0,
+  AcousticMinus = 1,
+};
+
+/// @{
+/*!
+ * \brief Compute only the two acoustic left/right characteristic eigenvectors
+ * for the relativistic hydrodynamics system.
+ */
+template <size_t ThermodynamicDim>
+void acoustic_eigenvectors_hydro(
+    const gsl::not_null<std::array<tnsr::i<DataVector, 6, Frame::Inertial>,
+                                   2>*>& right_eigenvectors,
+    const gsl::not_null<std::array<tnsr::I<DataVector, 6, Frame::Inertial>,
+                                   2>*>& left_eigenvectors,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity,
+    const Scalar<DataVector>& rest_mass_density,
+    const Scalar<DataVector>& specific_internal_energy,
+    const Scalar<DataVector>& specific_enthalpy,
+    const Scalar<DataVector>& electron_fraction,
+    const Scalar<DataVector>& lorentz_factor,
+    const tnsr::i<DataVector, 3>& unit_normal,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
+    const EquationsOfState::EquationOfState<true, ThermodynamicDim>&
+        equation_of_state);
+/// @}
+
 namespace detail {
 
 /**

@@ -37,6 +37,7 @@ namespace {
 using HydroSpeed = grmhd::ValenciaDivClean::HydroSpeed;
 using HydroVectorR = grmhd::ValenciaDivClean::HydroVectorR;
 using HydroVectorL = grmhd::ValenciaDivClean::HydroVectorL;
+using AcousticHydroVector = grmhd::ValenciaDivClean::AcousticHydroVector;
 
 void test_characteristic_speeds(const DataVector& /*used_for_size*/) {
   //  Arbitrary random numbers can produce a negative radicand in Lambda^\pm.
@@ -790,6 +791,79 @@ void test_tabulated3d_kappa_and_zeta_in_characteristics() {
   CHECK(max(abs(gsl::at(left_eigenvectors, HydroVectorL::L4).get(5) + 1.0)) >
         1.0e-12);
 }
+
+void test_hydro_acoustic_eigenvectors_match_full(
+    const DataVector& used_for_size) {
+  MAKE_GENERATOR(generator);
+  namespace helper = TestHelpers::hydro;
+  namespace gr_helper = TestHelpers::gr;
+  const auto nn_gen = make_not_null(&generator);
+
+  const auto spatial_metric =
+      gr_helper::random_spatial_metric<3>(nn_gen, used_for_size);
+  const auto lorentz_factor =
+      helper::random_lorentz_factor(nn_gen, used_for_size);
+  const auto spatial_velocity =
+      helper::random_velocity(nn_gen, lorentz_factor, spatial_metric);
+  const auto rest_mass_density = helper::random_density(nn_gen, used_for_size);
+  const auto specific_internal_energy =
+      helper::random_specific_internal_energy(nn_gen, used_for_size);
+  const auto electron_fraction =
+      helper::random_electron_fraction(nn_gen, used_for_size);
+
+  const auto& inv_spatial_metric =
+      determinant_and_inverse(spatial_metric).second;
+
+  const EquationsOfState::IdealFluid<true> base_eos(1.5, 0.0);
+  const auto eos_3d = base_eos.promote_to_3d_eos();
+
+  const auto pressure = eos_3d->pressure_from_density_and_energy(
+      rest_mass_density, specific_internal_energy, electron_fraction);
+  const auto specific_enthalpy = hydro::relativistic_specific_enthalpy(
+      rest_mass_density, specific_internal_energy, pressure);
+
+  for (const auto& direction : Direction<3>::all_directions()) {
+    const auto unit_normal = unit_basis_form(direction, inv_spatial_metric);
+
+    constexpr size_t matrix_size = 6;
+    std::array<tnsr::i<DataVector, matrix_size, Frame::Inertial>, matrix_size>
+        right_eigenvectors_full{};
+    std::array<tnsr::I<DataVector, matrix_size, Frame::Inertial>, matrix_size>
+        left_eigenvectors_full{};
+    grmhd::ValenciaDivClean::eigenvectors_hydro<3>(
+        make_not_null(&right_eigenvectors_full),
+        make_not_null(&left_eigenvectors_full), spatial_velocity,
+        rest_mass_density, specific_internal_energy, specific_enthalpy,
+        electron_fraction, lorentz_factor, unit_normal, spatial_metric,
+        *eos_3d);
+
+    std::array<tnsr::i<DataVector, matrix_size, Frame::Inertial>, 2>
+        right_eigenvectors_acoustic{};
+    std::array<tnsr::I<DataVector, matrix_size, Frame::Inertial>, 2>
+        left_eigenvectors_acoustic{};
+    grmhd::ValenciaDivClean::acoustic_eigenvectors_hydro<3>(
+        make_not_null(&right_eigenvectors_acoustic),
+        make_not_null(&left_eigenvectors_acoustic), spatial_velocity,
+        rest_mass_density, specific_internal_energy, specific_enthalpy,
+        electron_fraction, lorentz_factor, unit_normal, spatial_metric,
+        *eos_3d);
+
+    const Approx custom_approx = Approx::custom().epsilon(1.0e-14);
+    CHECK_ITERABLE_CUSTOM_APPROX(
+        gsl::at(right_eigenvectors_acoustic, AcousticHydroVector::AcousticPlus),
+        gsl::at(right_eigenvectors_full, HydroVectorR::Rplus), custom_approx);
+    CHECK_ITERABLE_CUSTOM_APPROX(
+        gsl::at(right_eigenvectors_acoustic,
+                AcousticHydroVector::AcousticMinus),
+        gsl::at(right_eigenvectors_full, HydroVectorR::Rminus), custom_approx);
+    CHECK_ITERABLE_CUSTOM_APPROX(
+        gsl::at(left_eigenvectors_acoustic, AcousticHydroVector::AcousticPlus),
+        gsl::at(left_eigenvectors_full, HydroVectorL::Lplus), custom_approx);
+    CHECK_ITERABLE_CUSTOM_APPROX(
+        gsl::at(left_eigenvectors_acoustic, AcousticHydroVector::AcousticMinus),
+        gsl::at(left_eigenvectors_full, HydroVectorL::Lminus), custom_approx);
+  }
+}
 }  // namespace
 
 SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.Characteristics",
@@ -807,6 +881,7 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.Characteristics",
   test_hydro_eigenvectors_identity(dv);
   test_hydro_numerical_eigensystem(dv);
   test_hydro_analytic_eigenvectors(dv);
+  test_hydro_acoustic_eigenvectors_match_full(dv);
   test_tabulated3d_kappa_and_zeta_in_characteristics();
 
   TestHelpers::db::test_compute_tag<

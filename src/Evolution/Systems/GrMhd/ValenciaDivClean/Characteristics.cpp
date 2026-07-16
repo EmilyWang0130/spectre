@@ -748,6 +748,222 @@ void eigenvectors_hydro(
   }
 }
 
+template <size_t ThermodynamicDim>
+void acoustic_eigenvectors_hydro(
+    const gsl::not_null<std::array<tnsr::i<DataVector, 6, Frame::Inertial>,
+                                   2>*>& right_eigenvectors,
+    const gsl::not_null<std::array<tnsr::I<DataVector, 6, Frame::Inertial>,
+                                   2>*>& left_eigenvectors,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity,
+    const Scalar<DataVector>& rest_mass_density,
+    const Scalar<DataVector>& specific_internal_energy,
+    const Scalar<DataVector>& specific_enthalpy,
+    const Scalar<DataVector>& electron_fraction,
+    const Scalar<DataVector>& lorentz_factor,
+    const tnsr::i<DataVector, 3>& unit_normal,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
+    const EquationsOfState::EquationOfState<true, ThermodynamicDim>&
+        equation_of_state) {
+  const size_t num_grid_points = get(lorentz_factor).size();
+
+  auto allocate_and_zero = [num_grid_points](auto& vec_array) {
+    if (vec_array[0].get(0).size() != num_grid_points) {
+      for (auto& vec : vec_array) {
+        for (size_t a = 0; a < 6; ++a) {
+          vec.get(a) = DataVector(num_grid_points, 0.0);
+        }
+      }
+    } else {
+      for (auto& vec : vec_array) {
+        for (size_t a = 0; a < 6; ++a) {
+          vec.get(a) = 0.0;
+        }
+      }
+    }
+  };
+  allocate_and_zero(*right_eigenvectors);
+  allocate_and_zero(*left_eigenvectors);
+
+  Scalar<DataVector> det_spatial_metric{num_grid_points};
+  tnsr::II<DataVector, 3, Frame::Inertial> inv_spatial_metric{num_grid_points};
+  determinant_and_inverse(make_not_null(&det_spatial_metric),
+                          make_not_null(&inv_spatial_metric), spatial_metric);
+
+  tnsr::I<DataVector, 3, Frame::Inertial> unit_normal_vector{num_grid_points};
+  raise_or_lower_index(make_not_null(&unit_normal_vector), unit_normal,
+                       inv_spatial_metric);
+
+  Scalar<DataVector> normal_velocity{num_grid_points};
+  dot_product(make_not_null(&normal_velocity), unit_normal, spatial_velocity);
+
+  // See eigenvectors_hydro for the rationale on this floor.
+  const DataVector one_minus_normal_velocity_squared =
+      max(1.0 - get(normal_velocity) * get(normal_velocity), 1.0e-8);
+
+  tnsr::i<DataVector, 3, Frame::Inertial> spatial_velocity_one_form{
+      num_grid_points};
+  raise_or_lower_index(make_not_null(&spatial_velocity_one_form),
+                       spatial_velocity, spatial_metric);
+
+  Scalar<DataVector> spatial_velocity_squared{num_grid_points};
+  dot_product(make_not_null(&spatial_velocity_squared), spatial_velocity,
+              spatial_velocity_one_form);
+
+  Scalar<DataVector> sound_speed_squared{num_grid_points};
+  Scalar<DataVector> kappa{num_grid_points};
+  Scalar<DataVector> zeta{num_grid_points};
+  Scalar<DataVector> pressure{num_grid_points};
+
+  if constexpr (ThermodynamicDim == 1) {
+    get(sound_speed_squared) =
+        get(equation_of_state.chi_from_density(rest_mass_density)) +
+        get(equation_of_state.kappa_times_p_over_rho_squared_from_density(
+            rest_mass_density));
+    get(sound_speed_squared) /= get(specific_enthalpy);
+    get(pressure) =
+        get(equation_of_state.pressure_from_density(rest_mass_density));
+    get(kappa) = 0.0;
+    get(zeta) = 0.0;
+  } else if constexpr (ThermodynamicDim == 2) {
+    get(sound_speed_squared) =
+        (get(equation_of_state.chi_from_density_and_energy(
+             rest_mass_density, specific_internal_energy)) +
+         get(equation_of_state
+                 .kappa_times_p_over_rho_squared_from_density_and_energy(
+                     rest_mass_density, specific_internal_energy))) /
+        get(specific_enthalpy);
+    const Scalar<DataVector> kappa_times_p_over_rho_squared =
+        equation_of_state
+            .kappa_times_p_over_rho_squared_from_density_and_energy(
+                rest_mass_density, specific_internal_energy);
+    get(pressure) = get(equation_of_state.pressure_from_density_and_energy(
+        rest_mass_density, specific_internal_energy));
+    get(kappa) = get(kappa_times_p_over_rho_squared) / get(pressure) *
+                 square(get(rest_mass_density));
+    get(zeta) = 0.0;
+  } else if constexpr (ThermodynamicDim == 3) {
+    const auto temperature =
+        equation_of_state.temperature_from_density_and_energy(
+            rest_mass_density, specific_internal_energy, electron_fraction);
+    get(sound_speed_squared) =
+        get(equation_of_state.sound_speed_squared_from_density_and_temperature(
+            rest_mass_density, temperature, electron_fraction));
+    get(pressure) = get(equation_of_state.pressure_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
+    get(kappa) = get(equation_of_state.kappa_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
+    get(zeta) = get(equation_of_state.zeta_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
+  }
+
+  const DataVector sound_speed = sqrt(get(sound_speed_squared));
+
+  // R±
+  // See eigenvectors_hydro for the rationale on this floor.
+  const DataVector denom =
+      get(lorentz_factor) *
+      sqrt(max(1.0 - get(spatial_velocity_squared) * get(sound_speed_squared) -
+                   get(normal_velocity) * get(normal_velocity) *
+                       (1.0 - get(sound_speed_squared)),
+               1.0e-8));
+
+  const DataVector sound_speed_over_denom = sound_speed / denom;
+
+  for (size_t i = 0; i < 3; ++i) {
+    (*right_eigenvectors)[AcousticPlus].get(i + 1) =
+        get(specific_enthalpy) * get(lorentz_factor) *
+        (spatial_velocity_one_form.get(i) +
+         sound_speed_over_denom * unit_normal.get(i));
+
+    (*right_eigenvectors)[AcousticMinus].get(i + 1) =
+        get(specific_enthalpy) * get(lorentz_factor) *
+        (spatial_velocity_one_form.get(i) -
+         sound_speed_over_denom * unit_normal.get(i));
+  }
+
+  (*right_eigenvectors)[AcousticPlus].get(0) = 1.0;
+  (*right_eigenvectors)[AcousticMinus].get(0) = 1.0;
+
+  (*right_eigenvectors)[AcousticPlus].get(4) =
+      get(specific_enthalpy) * get(lorentz_factor) *
+          (1.0 + sound_speed * get(normal_velocity) / denom) -
+      1.0;
+
+  (*right_eigenvectors)[AcousticMinus].get(4) =
+      get(specific_enthalpy) * get(lorentz_factor) *
+          (1.0 - sound_speed * get(normal_velocity) / denom) -
+      1.0;
+
+  (*right_eigenvectors)[AcousticPlus].get(5) = get(electron_fraction);
+  (*right_eigenvectors)[AcousticMinus].get(5) = get(electron_fraction);
+
+  // L±
+  {
+    const DataVector a =
+        square(get(lorentz_factor)) * one_minus_normal_velocity_squared *
+        (get(kappa) + get(rest_mass_density) * get(sound_speed_squared));
+
+    const DataVector c_plus = get(rest_mass_density) * sound_speed *
+                              (sound_speed + get(normal_velocity) * denom);
+    const DataVector c_minus = get(rest_mass_density) * sound_speed *
+                               (sound_speed - get(normal_velocity) * denom);
+
+    const DataVector b_plus = a - c_plus;
+    const DataVector b_minus = a - c_minus;
+
+    const DataVector k_term =
+        get(kappa) - get(rest_mass_density) * get(sound_speed_squared) +
+        get(zeta) * get(electron_fraction) / get(specific_enthalpy);
+
+    // See eigenvectors_hydro for the rationale on this floor.
+    const DataVector prefactor_Lpm =
+        1.0 / max(2.0 * get(rest_mass_density) * get(specific_enthalpy) *
+                      get(lorentz_factor) * get(sound_speed_squared) *
+                      one_minus_normal_velocity_squared,
+                  1.0e-12);
+
+    // S_i
+    for (size_t i = 0; i < 3; ++i) {
+      (*left_eigenvectors)[AcousticPlus].get(i + 1) =
+          (-a * spatial_velocity.get(i) +
+           get(rest_mass_density) * sound_speed *
+               (sound_speed * get(normal_velocity) + denom) *
+               unit_normal_vector.get(i)) *
+          prefactor_Lpm;
+
+      (*left_eigenvectors)[AcousticMinus].get(i + 1) =
+          (-a * spatial_velocity.get(i) +
+           get(rest_mass_density) * sound_speed *
+               (sound_speed * get(normal_velocity) - denom) *
+               unit_normal_vector.get(i)) *
+          prefactor_Lpm;
+    }
+
+    // D
+    (*left_eigenvectors)[AcousticPlus].get(0) =
+        (b_plus - get(specific_enthalpy) * get(lorentz_factor) * k_term *
+                      one_minus_normal_velocity_squared) *
+        prefactor_Lpm;
+
+    (*left_eigenvectors)[AcousticMinus].get(0) =
+        (b_minus - get(specific_enthalpy) * get(lorentz_factor) * k_term *
+                       one_minus_normal_velocity_squared) *
+        prefactor_Lpm;
+
+    // tau
+    (*left_eigenvectors)[AcousticPlus].get(4) = b_plus * prefactor_Lpm;
+    (*left_eigenvectors)[AcousticMinus].get(4) = b_minus * prefactor_Lpm;
+
+    // DYe
+    (*left_eigenvectors)[AcousticPlus].get(5) =
+        (get(zeta) * get(lorentz_factor) * one_minus_normal_velocity_squared) *
+        prefactor_Lpm;
+    (*left_eigenvectors)[AcousticMinus].get(5) =
+        (get(zeta) * get(lorentz_factor) * one_minus_normal_velocity_squared) *
+        prefactor_Lpm;
+  }
+}
+
 namespace detail {
 
 template <size_t ThermodynamicDim>
@@ -1309,6 +1525,21 @@ GENERATE_INSTANTIATIONS(FUNCTION_INSTANTIATION, (1, 2, 3))
                                      6>*>& right_eigenvectors,                 \
       const gsl::not_null<std::array<tnsr::I<DataVector, 6, Frame::Inertial>,  \
                                      6>*>& left_eigenvectors,                  \
+      const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity,         \
+      const Scalar<DataVector>& rest_mass_density,                             \
+      const Scalar<DataVector>& specific_internal_energy,                      \
+      const Scalar<DataVector>& specific_enthalpy,                             \
+      const Scalar<DataVector>& electron_fraction,                             \
+      const Scalar<DataVector>& lorentz_factor,                                \
+      const tnsr::i<DataVector, 3>& unit_normal,                               \
+      const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,          \
+      const EquationsOfState::EquationOfState<true, GET_DIM(data)>&            \
+          equation_of_state);                                                  \
+  template void acoustic_eigenvectors_hydro<GET_DIM(data)>(                    \
+      const gsl::not_null<std::array<tnsr::i<DataVector, 6, Frame::Inertial>,  \
+                                     2>*>& right_eigenvectors,                 \
+      const gsl::not_null<std::array<tnsr::I<DataVector, 6, Frame::Inertial>,  \
+                                     2>*>& left_eigenvectors,                  \
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity,         \
       const Scalar<DataVector>& rest_mass_density,                             \
       const Scalar<DataVector>& specific_internal_energy,                      \
