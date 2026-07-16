@@ -13,6 +13,7 @@
 #include "Utilities/GenerateInstantiations.hpp"
 #include "Utilities/MakeWithValue.hpp"
 #include "Utilities/Math.hpp"
+#include "Utilities/Serialization/PupStlCpp17.hpp"
 
 namespace {
 template <typename DataType>
@@ -39,6 +40,18 @@ tnsr::I<DataType, 3> compute_piecewise_vector(
             (left_value[2] - right_value[2]) *
                 step_function(get<0>(x) - discontinuity_position)}}};
 }
+
+template <typename DataType>
+DataType compute_ye_hat(const tnsr::I<DataType, 3>& x,
+                        const double ye_perturbation_center,
+                        const double ye_perturbation_half_width_left,
+                        const double ye_perturbation_half_width_right) {
+  const auto& x_coord = get<0>(x);
+  return step_function(x_coord - (ye_perturbation_center -
+                                  ye_perturbation_half_width_left)) -
+         step_function(x_coord - (ye_perturbation_center +
+                                  ye_perturbation_half_width_right));
+}
 }  // namespace
 
 namespace grmhd::AnalyticData {
@@ -52,7 +65,12 @@ Tabulated3DShockTube::Tabulated3DShockTube(
     const std::array<double, 3>& right_spatial_velocity,
     const std::array<double, 3>& left_magnetic_field,
     const std::array<double, 3>& right_magnetic_field,
-    const double discontinuity_position)
+    const double discontinuity_position, const double ye_perturbation_value,
+    const double ye_perturbation_center,
+    const double ye_perturbation_half_width_left,
+    const double ye_perturbation_half_width_right,
+    std::optional<double> ye_perturbation_left_temperature,
+    std::optional<double> ye_perturbation_right_temperature)
     : equation_of_state_(table_filename, table_subfilename),
       left_rest_mass_density_(left_rest_mass_density),
       right_rest_mass_density_(right_rest_mass_density),
@@ -64,7 +82,13 @@ Tabulated3DShockTube::Tabulated3DShockTube(
       right_spatial_velocity_(right_spatial_velocity),
       left_magnetic_field_(left_magnetic_field),
       right_magnetic_field_(right_magnetic_field),
-      discontinuity_position_(discontinuity_position) {}
+      discontinuity_position_(discontinuity_position),
+      ye_perturbation_value_(ye_perturbation_value),
+      ye_perturbation_center_(ye_perturbation_center),
+      ye_perturbation_half_width_left_(ye_perturbation_half_width_left),
+      ye_perturbation_half_width_right_(ye_perturbation_half_width_right),
+      ye_perturbation_left_temperature_(ye_perturbation_left_temperature),
+      ye_perturbation_right_temperature_(ye_perturbation_right_temperature) {}
 
 std::unique_ptr<evolution::initial_data::InitialData>
 Tabulated3DShockTube::get_clone() const {
@@ -89,6 +113,12 @@ void Tabulated3DShockTube::pup(PUP::er& p) {
   p | left_magnetic_field_;
   p | right_magnetic_field_;
   p | discontinuity_position_;
+  p | ye_perturbation_value_;
+  p | ye_perturbation_center_;
+  p | ye_perturbation_half_width_left_;
+  p | ye_perturbation_half_width_right_;
+  p | ye_perturbation_left_temperature_;
+  p | ye_perturbation_right_temperature_;
 }
 
 template <typename DataType>
@@ -105,8 +135,22 @@ tuples::TaggedTuple<hydro::Tags::ElectronFraction<DataType>>
 Tabulated3DShockTube::variables(
     const tnsr::I<DataType, 3>& x,
     tmpl::list<hydro::Tags::ElectronFraction<DataType>> /*meta*/) const {
-  return compute_piecewise(x, discontinuity_position_, left_electron_fraction_,
-                           right_electron_fraction_);
+  auto electron_fraction =
+      compute_piecewise(x, discontinuity_position_, left_electron_fraction_,
+                        right_electron_fraction_);
+  // Override Y_e inside the (asymmetric) top-hat
+  // [center - half_width_left, center + half_width_right] with the configured
+  // constant ye_perturbation_value_, regardless of which side of the
+  // discontinuity the cell sits on. Setting either half-width to 0 disables
+  // that side of the hat (useful for isolating individual hat edges from the
+  // contact discontinuity). The hat indicator is the difference of two
+  // Heaviside steps (step_function(y) is 1 for y >= 0).
+  const auto hat = compute_ye_hat(x, ye_perturbation_center_,
+                                  ye_perturbation_half_width_left_,
+                                  ye_perturbation_half_width_right_);
+  get(electron_fraction) =
+      ye_perturbation_value_ * hat + get(electron_fraction) * (1.0 - hat);
+  return electron_fraction;
 }
 
 template <typename DataType>
@@ -114,8 +158,26 @@ tuples::TaggedTuple<hydro::Tags::Temperature<DataType>>
 Tabulated3DShockTube::variables(
     const tnsr::I<DataType, 3>& x,
     tmpl::list<hydro::Tags::Temperature<DataType>> /*meta*/) const {
-  return compute_piecewise(x, discontinuity_position_, left_temperature_,
-                           right_temperature_);
+  auto temperature = compute_piecewise(x, discontinuity_position_,
+                                       left_temperature_, right_temperature_);
+  if (ye_perturbation_left_temperature_.has_value() or
+      ye_perturbation_right_temperature_.has_value()) {
+    const auto hat = compute_ye_hat(x, ye_perturbation_center_,
+                                    ye_perturbation_half_width_left_,
+                                    ye_perturbation_half_width_right_);
+    const auto right_side = step_function(get<0>(x) - discontinuity_position_);
+    const auto left_hat = hat * (1.0 - right_side);
+    const auto right_hat = hat * right_side;
+    if (ye_perturbation_left_temperature_.has_value()) {
+      get(temperature) = *ye_perturbation_left_temperature_ * left_hat +
+                         get(temperature) * (1.0 - left_hat);
+    }
+    if (ye_perturbation_right_temperature_.has_value()) {
+      get(temperature) = *ye_perturbation_right_temperature_ * right_hat +
+                         get(temperature) * (1.0 - right_hat);
+    }
+  }
+  return temperature;
 }
 
 template <typename DataType>
@@ -214,6 +276,16 @@ bool operator==(const Tabulated3DShockTube& lhs,
          lhs.left_magnetic_field_ == rhs.left_magnetic_field_ and
          lhs.right_magnetic_field_ == rhs.right_magnetic_field_ and
          lhs.discontinuity_position_ == rhs.discontinuity_position_ and
+         lhs.ye_perturbation_value_ == rhs.ye_perturbation_value_ and
+         lhs.ye_perturbation_center_ == rhs.ye_perturbation_center_ and
+         lhs.ye_perturbation_half_width_left_ ==
+             rhs.ye_perturbation_half_width_left_ and
+         lhs.ye_perturbation_half_width_right_ ==
+             rhs.ye_perturbation_half_width_right_ and
+         lhs.ye_perturbation_left_temperature_ ==
+             rhs.ye_perturbation_left_temperature_ and
+         lhs.ye_perturbation_right_temperature_ ==
+             rhs.ye_perturbation_right_temperature_ and
          lhs.equation_of_state_ == rhs.equation_of_state_;
 }
 

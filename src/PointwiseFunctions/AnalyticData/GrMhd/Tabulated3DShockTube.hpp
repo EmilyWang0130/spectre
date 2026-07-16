@@ -5,10 +5,12 @@
 
 #include <array>
 #include <limits>
+#include <optional>
 #include <string>
 
 #include "DataStructures/TaggedTuple.hpp"
 #include "DataStructures/Tensor/TypeAliases.hpp"
+#include "Options/Auto.hpp"
 #include "Options/String.hpp"
 #include "PointwiseFunctions/AnalyticData/AnalyticData.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/AnalyticData.hpp"
@@ -133,12 +135,65 @@ class Tabulated3DShockTube : public evolution::initial_data::InitialData,
         "Position of the x-direction discontinuity"};
   };
 
+  struct YePerturbationValue {
+    using type = double;
+    static constexpr Options::String help = {
+        "Electron fraction Y_e inside the top-hat region. Overrides the "
+        "piecewise base (Left/RightElectronFraction) inside "
+        "[Center - HalfWidthLeft, Center + HalfWidthRight], giving a uniform "
+        "Y_e plateau in the hat regardless of which side of the discontinuity "
+        "it covers."};
+    static type lower_bound() { return 0.0; }
+    static type upper_bound() { return 1.0; }
+  };
+
+  struct YePerturbationCenter {
+    using type = double;
+    static constexpr Options::String help = {
+        "Center x-position of the top-hat electron-fraction perturbation"};
+  };
+
+  struct YePerturbationHalfWidthLeft {
+    using type = double;
+    static constexpr Options::String help = {
+        "How far the top-hat extends to the LEFT of Center; the hat spans "
+        "[Center - HalfWidthLeft, Center + HalfWidthRight]. Set to 0 to "
+        "disable the left half of the hat."};
+    static type lower_bound() { return 0.0; }
+  };
+
+  struct YePerturbationHalfWidthRight {
+    using type = double;
+    static constexpr Options::String help = {
+        "How far the top-hat extends to the RIGHT of Center; the hat spans "
+        "[Center - HalfWidthLeft, Center + HalfWidthRight]. Set to 0 to "
+        "disable the right half of the hat."};
+    static type lower_bound() { return 0.0; }
+  };
+
+  struct YePerturbationLeftTemperature {
+    using type = Options::Auto<double>;
+    static constexpr Options::String help = {
+        "Temperature to use in the part of the Y_e top-hat left of the "
+        "discontinuity. Set to Auto to keep the left background temperature."};
+  };
+
+  struct YePerturbationRightTemperature {
+    using type = Options::Auto<double>;
+    static constexpr Options::String help = {
+        "Temperature to use in the part of the Y_e top-hat right of the "
+        "discontinuity. Set to Auto to keep the right background temperature."};
+  };
+
   using options =
       tmpl::list<TableFilename, TableSubFilename, LeftRestMassDensity,
                  RightRestMassDensity, LeftTemperature, RightTemperature,
                  LeftElectronFraction, RightElectronFraction,
                  LeftSpatialVelocity, RightSpatialVelocity, LeftMagneticField,
-                 RightMagneticField, DiscontinuityPosition>;
+                 RightMagneticField, DiscontinuityPosition, YePerturbationValue,
+                 YePerturbationCenter, YePerturbationHalfWidthLeft,
+                 YePerturbationHalfWidthRight, YePerturbationLeftTemperature,
+                 YePerturbationRightTemperature>;
 
   static constexpr Options::String help = {
       "Piecewise-constant shock-tube initial data using a tabulated 3D EOS."};
@@ -160,7 +215,11 @@ class Tabulated3DShockTube : public evolution::initial_data::InitialData,
       const std::array<double, 3>& right_spatial_velocity,
       const std::array<double, 3>& left_magnetic_field,
       const std::array<double, 3>& right_magnetic_field,
-      double discontinuity_position);
+      double discontinuity_position, double ye_perturbation_value,
+      double ye_perturbation_center, double ye_perturbation_half_width_left,
+      double ye_perturbation_half_width_right,
+      std::optional<double> ye_perturbation_left_temperature,
+      std::optional<double> ye_perturbation_right_temperature);
 
   auto get_clone() const
       -> std::unique_ptr<evolution::initial_data::InitialData> override;
@@ -277,6 +336,14 @@ class Tabulated3DShockTube : public evolution::initial_data::InitialData,
        std::numeric_limits<double>::signaling_NaN(),
        std::numeric_limits<double>::signaling_NaN()}};
   double discontinuity_position_ = std::numeric_limits<double>::signaling_NaN();
+  double ye_perturbation_value_ = std::numeric_limits<double>::signaling_NaN();
+  double ye_perturbation_center_ = std::numeric_limits<double>::signaling_NaN();
+  double ye_perturbation_half_width_left_ =
+      std::numeric_limits<double>::signaling_NaN();
+  double ye_perturbation_half_width_right_ =
+      std::numeric_limits<double>::signaling_NaN();
+  std::optional<double> ye_perturbation_left_temperature_ = std::nullopt;
+  std::optional<double> ye_perturbation_right_temperature_ = std::nullopt;
 
   friend bool operator==(const Tabulated3DShockTube& lhs,
                          const Tabulated3DShockTube& rhs);
