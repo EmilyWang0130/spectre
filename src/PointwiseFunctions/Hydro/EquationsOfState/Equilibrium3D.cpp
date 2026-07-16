@@ -158,19 +158,14 @@ Equilibrium3D<EquilEos>::kappa_from_density_and_temperature_impl(
     const Scalar<DataType>& rest_mass_density,
     const Scalar<DataType>& temperature,
     const Scalar<DataType>& /*electron_fraction*/) const {
-  // The wrapped 2D EOS exposes kappa * p / rho^2 rather than kappa itself.
-  // Undo that here so the 3D interface returns kappa = dp/deps directly.
+  // Convert temperature to specific internal energy and ask the underlying 2D
+  // EOS for kappa = dp/deps directly. This avoids recovering kappa by dividing
+  // kappa * p / rho^2 by the pressure, which diverges (0/0) as p -> 0.
   const Scalar<DataType> specific_internal_energy =
       underlying_eos_.specific_internal_energy_from_density_and_temperature(
           rest_mass_density, temperature);
-  const Scalar<DataType> pressure =
-      underlying_eos_.pressure_from_density_and_energy(
-          rest_mass_density, specific_internal_energy);
-  const Scalar<DataType> kappa_p_over_rho_squared =
-      underlying_eos_.kappa_times_p_over_rho_squared_from_density_and_energy(
-          rest_mass_density, specific_internal_energy);
-  return Scalar<DataType>{get(kappa_p_over_rho_squared) / get(pressure) *
-                          square(get(rest_mass_density))};
+  return underlying_eos_.kappa_from_density_and_energy(
+      rest_mass_density, specific_internal_energy);
 }
 
 template <typename EquilEos>

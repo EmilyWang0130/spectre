@@ -226,3 +226,15 @@ def hybrid_polytrope_kappa_times_p_over_rho_squared_from_density_and_energy(
     return (thermal_adiabatic_index - 1.0) * p_c / rest_mass_density + max(
         (specific_internal_energy - eps_c), 0.0
     ) * (thermal_adiabatic_index - 1.0) ** 2
+
+
+def hybrid_polytrope_kappa_from_density_and_energy(
+    rest_mass_density,
+    specific_internal_energy,
+    polytropic_constant,
+    polytropic_exponent,
+    thermal_adiabatic_index,
+    minimum_temperature,
+):
+    # Unclamped thermal kappa, consistent with kappa_times_p_over_rho_squared.
+    return rest_mass_density * (thermal_adiabatic_index - 1.0)

@@ -142,6 +142,16 @@ Scalar<DataType> Barotropic2D<ColdEos>::
       rest_mass_density);
 }
 
+template <typename ColdEos>
+template <class DataType>
+Scalar<DataType> Barotropic2D<ColdEos>::kappa_from_density_and_energy_impl(
+    const Scalar<DataType>& rest_mass_density,
+    const Scalar<DataType>& /*specific_internal_energy*/) const {
+  // The pressure is independent of the specific internal energy, so
+  // kappa = dp/deps|_rho = 0.
+  return Scalar<DataType>{0.0 * get(rest_mass_density)};
+}
+
 template class Barotropic2D<PolytropicFluid<true>>;
 template class Barotropic2D<PolytropicFluid<false>>;
 template class Barotropic2D<PiecewisePolytropicFluid<true>>;

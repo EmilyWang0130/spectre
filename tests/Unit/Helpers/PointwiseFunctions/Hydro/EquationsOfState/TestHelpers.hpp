@@ -215,6 +215,11 @@ void check_impl(
         python_function_prefix +
             "_kappa_times_p_over_rho_squared_from_density_and_energy",
         random_value_bounds, member_args_tuple, used_for_size);
+    INFO("Done\nTesting kappa_from_density_and_energy...");
+    pypp::check_with_random_values<2>(
+        func = &EoS::kappa_from_density_and_energy, *eos, python_file_name,
+        python_function_prefix + "_kappa_from_density_and_energy",
+        random_value_bounds, member_args_tuple, used_for_size);
     INFO("Done\n\n");
   };
   helper(in_eos);

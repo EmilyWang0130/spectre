@@ -185,6 +185,15 @@ Scalar<DataType> IdealFluid<IsRelativistic>::
 }
 
 template <bool IsRelativistic>
+template <class DataType>
+Scalar<DataType> IdealFluid<IsRelativistic>::kappa_from_density_and_energy_impl(
+    const Scalar<DataType>& rest_mass_density,
+    const Scalar<DataType>& /*specific_internal_energy*/) const {
+  // kappa = dp/deps|_rho = (Gamma - 1) rho for an ideal gas.
+  return Scalar<DataType>{(adiabatic_index_ - 1.0) * get(rest_mass_density)};
+}
+
+template <bool IsRelativistic>
 double IdealFluid<IsRelativistic>::specific_internal_energy_upper_bound(
     const double /* rest_mass_density */) const {
   // this bound comes from the dominant energy condition which implies

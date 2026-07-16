@@ -116,3 +116,12 @@ def ideal_fluid_kappa_times_p_over_rho_squared_from_density_and_energy(
     minimum_temperature,
 ):
     return specific_internal_energy * (adiabatic_index - 1.0) ** 2
+
+
+def ideal_fluid_kappa_from_density_and_energy(
+    rest_mass_density,
+    specific_internal_energy,
+    adiabatic_index,
+    minimum_temperature,
+):
+    return rest_mass_density * (adiabatic_index - 1.0)

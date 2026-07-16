@@ -563,6 +563,26 @@ class EquationOfState<IsRelativistic, 2> : public PUP::able {
       const Scalar<DataVector>& /*specific_internal_energy*/) const = 0;
   /// @}
 
+  /// @{
+  /*!
+   * Computes \f$\kappa=\partial p / \partial \epsilon |_{\rho}\f$ from
+   * \f$\rho\f$ and \f$\epsilon\f$, where \f$p\f$ is the pressure, \f$\rho\f$ is
+   * the rest mass density, and \f$\epsilon\f$ is the specific internal energy.
+   *
+   * Unlike kappa_times_p_over_rho_squared_from_density_and_energy(), this
+   * returns \f$\kappa\f$ directly. It is needed by the 3D
+   * kappa_from_density_and_temperature() interface (e.g. for 2D EOS promoted to
+   * 3D via Equilibrium3D) so that \f$\kappa\f$ can be obtained without dividing
+   * \f$\kappa p/\rho^2\f$ by the pressure (which diverges as \f$p\to 0\f$).
+   */
+  virtual Scalar<double> kappa_from_density_and_energy(
+      const Scalar<double>& /*rest_mass_density*/,
+      const Scalar<double>& /*specific_internal_energy*/) const = 0;
+  virtual Scalar<DataVector> kappa_from_density_and_energy(
+      const Scalar<DataVector>& /*rest_mass_density*/,
+      const Scalar<DataVector>& /*specific_internal_energy*/) const = 0;
+  /// @}
+
   /// The lower bound of the electron fraction that is valid for this EOS
   virtual double electron_fraction_lower_bound() const { return 0.0; }
 
@@ -930,7 +950,8 @@ bool operator!=(const EquationOfState<IsRelLhs, ThermoDimLhs>& lhs,
    temperature_from_density_and_energy,                                  \
    specific_internal_energy_from_density_and_temperature,                \
    chi_from_density_and_energy,                                          \
-   kappa_times_p_over_rho_squared_from_density_and_energy)
+   kappa_times_p_over_rho_squared_from_density_and_energy,               \
+   kappa_from_density_and_energy)
 
 #define EQUATION_OF_STATE_FUNCTIONS_3D                                      \
   (pressure_from_density_and_energy, pressure_from_density_and_temperature, \

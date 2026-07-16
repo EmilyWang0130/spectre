@@ -246,6 +246,20 @@ Scalar<DataType> HybridEos<ColdEquationOfState>::
 }
 
 template <typename ColdEquationOfState>
+template <class DataType>
+Scalar<DataType>
+HybridEos<ColdEquationOfState>::kappa_from_density_and_energy_impl(
+    const Scalar<DataType>& rest_mass_density,
+    const Scalar<DataType>& /*specific_internal_energy*/) const {
+  // kappa = dp/deps|_rho = (Gamma_th - 1) rho for the thermal part. We use the
+  // unclamped form (consistent with
+  // kappa_times_p_over_rho_squared_from_density_and_energy, which uses the
+  // unclamped thermal kappa).
+  return Scalar<DataType>{(thermal_adiabatic_index_ - 1.0) *
+                          get(rest_mass_density)};
+}
+
+template <typename ColdEquationOfState>
 double HybridEos<ColdEquationOfState>::
     specific_entropy_from_density_and_thermal_energy(
         const double rest_mass_density,
