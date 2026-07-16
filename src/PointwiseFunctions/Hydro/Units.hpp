@@ -165,8 +165,8 @@ constexpr double electron_mass =
     cgs::electron_mass /
     (1.0e6 * cgs::electron_volt / square(cgs::speed_of_light));
 /// hbar*c in MeV*fm (natural unit combination for nuclear physics).
-constexpr double hbarc = cgs::hbar * cgs::speed_of_light * 1.0e13 /
-                         (1.0e6 * cgs::electron_volt);
+constexpr double hbarc =
+    cgs::hbar * cgs::speed_of_light * 1.0e13 / (1.0e6 * cgs::electron_volt);
 /// The saturation number density of baryons in nuclear matter, in
 /// units of 1/fm^3.  This is a standard value, consistent with  e.g.
 /// https://journals.aps.org/prc/abstract/10.1103/PhysRevC.102.044321

@@ -24,9 +24,8 @@
 #include "Utilities/TMPL.hpp"
 
 // [[TimeOut, 10]]
-SPECTRE_TEST_CASE(
-    "Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.MarquinaCpm",
-    "[Unit][GrMhd]") {
+SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.MarquinaCpm",
+                  "[Unit][GrMhd]") {
   PUPable_reg(grmhd::ValenciaDivClean::BoundaryCorrections::MarquinaCpm);
   MAKE_GENERATOR(gen);
 

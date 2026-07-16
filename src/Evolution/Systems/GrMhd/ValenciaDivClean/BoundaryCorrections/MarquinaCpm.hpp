@@ -84,8 +84,7 @@ class MarquinaCpm final : public evolution::BoundaryCorrection {
   using dg_package_data_primitive_tags =
       Marquina::dg_package_data_primitive_tags;
   using dg_package_data_volume_tags = Marquina::dg_package_data_volume_tags;
-  using dg_boundary_terms_volume_tags =
-      Marquina::dg_boundary_terms_volume_tags;
+  using dg_boundary_terms_volume_tags = Marquina::dg_boundary_terms_volume_tags;
 
   static double dg_package_data(
       gsl::not_null<Scalar<DataVector>*> packaged_tilde_d,

@@ -97,10 +97,9 @@ BeckwithStoneKhInstability::variables(
     get_element(get<0>(result), s) =
         sgn * shear_velocity_ * tanh(layer / transition_thickness_);
     // v_y = sign(y) A_0 v_sh sin(2 pi x) exp[-((y - sign(y) h) / sigma)^2]
-    get_element(get<1>(result), s) =
-        sgn * perturbation_amplitude_ * shear_velocity_ *
-        sin(2.0 * M_PI * xx) *
-        exp(-square(layer / perturbation_width_));
+    get_element(get<1>(result), s) = sgn * perturbation_amplitude_ *
+                                     shear_velocity_ * sin(2.0 * M_PI * xx) *
+                                     exp(-square(layer / perturbation_width_));
   }
   return {std::move(result)};
 }
@@ -221,10 +220,10 @@ bool operator!=(const BeckwithStoneKhInstability& lhs,
 #define TAG(data) BOOST_PP_TUPLE_ELEM(1, data)
 
 #define INSTANTIATE_SCALARS(_, data)                         \
-  template tuples::TaggedTuple<TAG(data) < DTYPE(data)>>     \
+  template tuples::TaggedTuple < TAG(data) < DTYPE(data) >>  \
       BeckwithStoneKhInstability::variables(                 \
           const tnsr::I<DTYPE(data), 3, Frame::Inertial>& x, \
-          tmpl::list<TAG(data) < DTYPE(data)>>) const;
+          tmpl::list < TAG(data) < DTYPE(data) >>) const;
 
 GENERATE_INSTANTIATIONS(
     INSTANTIATE_SCALARS, (double, DataVector),
@@ -233,11 +232,13 @@ GENERATE_INSTANTIATIONS(
      hydro::Tags::DivergenceCleaningField, hydro::Tags::SpecificEnthalpy,
      hydro::Tags::LorentzFactor))
 
-#define INSTANTIATE_VECTORS(_, data)                                         \
-  template tuples::TaggedTuple<TAG(data) < DTYPE(data), 3, Frame::Inertial>> \
-      BeckwithStoneKhInstability::variables(                                 \
-          const tnsr::I<DTYPE(data), 3, Frame::Inertial>& x,                 \
-          tmpl::list<TAG(data) < DTYPE(data), 3, Frame::Inertial>>) const;
+#define INSTANTIATE_VECTORS(_, data)                                       \
+  template tuples::TaggedTuple < TAG(data) < DTYPE(data), 3,               \
+      Frame::Inertial >>                                                   \
+          BeckwithStoneKhInstability::variables(                           \
+              const tnsr::I<DTYPE(data), 3, Frame::Inertial>& x,           \
+              tmpl::list < TAG(data) < DTYPE(data), 3, Frame::Inertial >>) \
+              const;
 
 GENERATE_INSTANTIATIONS(INSTANTIATE_VECTORS, (double, DataVector),
                         (hydro::Tags::SpatialVelocity,

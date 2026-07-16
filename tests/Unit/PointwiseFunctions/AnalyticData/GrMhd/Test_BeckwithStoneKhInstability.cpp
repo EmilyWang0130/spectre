@@ -84,8 +84,8 @@ void test(const DataType& used_for_size) {
 
   CHECK(kh_instability == grmhd::AnalyticData::BeckwithStoneKhInstability(
                               adiabatic_index, shear_velocity, strip_half_width,
-                              transition_thickness, upper_density, lower_density,
-                              pressure, perturbation_amplitude,
+                              transition_thickness, upper_density,
+                              lower_density, pressure, perturbation_amplitude,
                               perturbation_width, magnetic_field));
 
   BeckwithStoneKhInstabilityProxy kh_inst_to_move(

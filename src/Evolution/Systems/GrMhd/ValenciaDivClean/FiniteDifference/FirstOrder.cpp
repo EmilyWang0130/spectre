@@ -95,8 +95,7 @@ void FirstOrderPrim::reconstruct_fd_neighbor(
          const Index<dim>& ghost_data_extents,
          const Direction<dim>& local_direction_to_reconstruct) {
         ::fd::reconstruction::reconstruct_neighbor<
-            Side::Lower,
-            ::fd::reconstruction::detail::FirstOrderReconstructor>(
+            Side::Lower, ::fd::reconstruction::detail::FirstOrderReconstructor>(
             tensor_component_on_face_ptr, tensor_component_volume,
             tensor_component_neighbor, subcell_extents, ghost_data_extents,
             local_direction_to_reconstruct);
@@ -108,8 +107,7 @@ void FirstOrderPrim::reconstruct_fd_neighbor(
          const Index<dim>& ghost_data_extents,
          const Direction<dim>& local_direction_to_reconstruct) {
         ::fd::reconstruction::reconstruct_neighbor<
-            Side::Upper,
-            ::fd::reconstruction::detail::FirstOrderReconstructor>(
+            Side::Upper, ::fd::reconstruction::detail::FirstOrderReconstructor>(
             tensor_component_on_face_ptr, tensor_component_volume,
             tensor_component_neighbor, subcell_extents, ghost_data_extents,
             local_direction_to_reconstruct);

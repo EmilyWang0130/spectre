@@ -136,13 +136,13 @@ void MarquinaCpm::dg_boundary_terms(
       normal_dot_flux_tilde_tau_int, normal_dot_flux_tilde_s_int,
       normal_dot_flux_tilde_b_int, normal_dot_flux_tilde_phi_int,
       characteristic_speeds_int, left_characteristic_fields_int,
-      right_characteristic_fields_int, tilde_d_ext, tilde_ye_ext,
-      tilde_tau_ext, tilde_s_ext, tilde_b_ext, tilde_phi_ext,
-      normal_dot_flux_tilde_d_ext, normal_dot_flux_tilde_ye_ext,
-      normal_dot_flux_tilde_tau_ext, normal_dot_flux_tilde_s_ext,
-      normal_dot_flux_tilde_b_ext, normal_dot_flux_tilde_phi_ext,
-      characteristic_speeds_ext, left_characteristic_fields_ext,
-      right_characteristic_fields_ext, dg_formulation);
+      right_characteristic_fields_int, tilde_d_ext, tilde_ye_ext, tilde_tau_ext,
+      tilde_s_ext, tilde_b_ext, tilde_phi_ext, normal_dot_flux_tilde_d_ext,
+      normal_dot_flux_tilde_ye_ext, normal_dot_flux_tilde_tau_ext,
+      normal_dot_flux_tilde_s_ext, normal_dot_flux_tilde_b_ext,
+      normal_dot_flux_tilde_phi_ext, characteristic_speeds_ext,
+      left_characteristic_fields_ext, right_characteristic_fields_ext,
+      dg_formulation);
 }
 
 bool operator==(const MarquinaCpm& /*lhs*/, const MarquinaCpm& /*rhs*/) {

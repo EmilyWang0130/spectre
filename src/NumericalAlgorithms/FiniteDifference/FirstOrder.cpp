@@ -31,11 +31,11 @@ GENERATE_INSTANTIATIONS(INSTANTIATION, (1, 2, 3))
 
 #define SIDE(data) BOOST_PP_TUPLE_ELEM(1, data)
 
-#define INSTANTIATION(r, data)                                                  \
-  template void                                                                 \
-  reconstruct_neighbor<SIDE(data), detail::FirstOrderReconstructor>(            \
-      gsl::not_null<DataVector*> face_data, const DataVector& volume_data,      \
-      const DataVector& neighbor_data, const Index<DIM(data)>& volume_extents,  \
+#define INSTANTIATION(r, data)                                                 \
+  template void                                                                \
+  reconstruct_neighbor<SIDE(data), detail::FirstOrderReconstructor>(           \
+      gsl::not_null<DataVector*> face_data, const DataVector& volume_data,     \
+      const DataVector& neighbor_data, const Index<DIM(data)>& volume_extents, \
       const Index<DIM(data)>& ghost_data_extents,                              \
       const Direction<DIM(data)>& direction_to_reconstruct);
 

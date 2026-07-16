@@ -218,8 +218,8 @@ void initialize_side(SideState* s, size_t n_points, std::mt19937* gen,
   for (size_t i = 0; i < 3; ++i) {
     s->unit_normal_vector.get(i) = 0.0;
     for (size_t j = 0; j < 3; ++j) {
-      s->unit_normal_vector.get(i) += s->inv_spatial_metric.get(i, j) *
-                                      s->unit_normal_covector.get(j);
+      s->unit_normal_vector.get(i) +=
+          s->inv_spatial_metric.get(i, j) * s->unit_normal_covector.get(j);
     }
   }
   DataVector normal_mag_squared(n_points, 0.0);
@@ -271,8 +271,8 @@ void initialize_side(SideState* s, size_t n_points, std::mt19937* gen,
       make_not_null(&s->flux_tilde_b), make_not_null(&s->flux_tilde_phi),
       s->tilde_d, s->tilde_ye, s->tilde_tau, s->tilde_s, s->tilde_b,
       s->tilde_phi, s->lapse, s->shift, s->sqrt_det_spatial_metric,
-      s->spatial_metric, s->inv_spatial_metric, s->pressure, s->spatial_velocity,
-      s->lorentz_factor, s->magnetic_field);
+      s->spatial_metric, s->inv_spatial_metric, s->pressure,
+      s->spatial_velocity, s->lorentz_factor, s->magnetic_field);
 
   s->package_data.initialize(n_points);
 }
@@ -285,10 +285,8 @@ void run_package_data(SideState* s,
       make_not_null(&get<grmhd_tags::TildeD>(s->package_data)),
       make_not_null(&get<grmhd_tags::TildeYe>(s->package_data)),
       make_not_null(&get<grmhd_tags::TildeTau>(s->package_data)),
-      make_not_null(
-          &get<grmhd_tags::TildeS<Frame::Inertial>>(s->package_data)),
-      make_not_null(
-          &get<grmhd_tags::TildeB<Frame::Inertial>>(s->package_data)),
+      make_not_null(&get<grmhd_tags::TildeS<Frame::Inertial>>(s->package_data)),
+      make_not_null(&get<grmhd_tags::TildeB<Frame::Inertial>>(s->package_data)),
       make_not_null(&get<grmhd_tags::TildePhi>(s->package_data)),
       make_not_null(
           &get<::Tags::NormalDotFlux<grmhd_tags::TildeD>>(s->package_data)),
@@ -296,12 +294,14 @@ void run_package_data(SideState* s,
           &get<::Tags::NormalDotFlux<grmhd_tags::TildeYe>>(s->package_data)),
       make_not_null(
           &get<::Tags::NormalDotFlux<grmhd_tags::TildeTau>>(s->package_data)),
-      make_not_null(&get<::Tags::NormalDotFlux<
-                        grmhd_tags::TildeS<Frame::Inertial>>>(s->package_data)),
-      make_not_null(&get<::Tags::NormalDotFlux<
-                        grmhd_tags::TildeB<Frame::Inertial>>>(s->package_data)),
-      make_not_null(&get<::Tags::NormalDotFlux<grmhd_tags::TildePhi>>(
-          s->package_data)),
+      make_not_null(
+          &get<::Tags::NormalDotFlux<grmhd_tags::TildeS<Frame::Inertial>>>(
+              s->package_data)),
+      make_not_null(
+          &get<::Tags::NormalDotFlux<grmhd_tags::TildeB<Frame::Inertial>>>(
+              s->package_data)),
+      make_not_null(
+          &get<::Tags::NormalDotFlux<grmhd_tags::TildePhi>>(s->package_data)),
       make_not_null(
           &get<typename Marquina::CharacteristicSpeeds>(s->package_data)),
       make_not_null(
@@ -321,13 +321,14 @@ void run_package_data(SideState* s,
 // One iteration of the flux evaluation: package interior + exterior + run
 // boundary terms. Bench state variables are captured by reference.
 template <typename Scheme>
-void one_iteration(
-    SideState* interior, SideState* exterior, Scalar<DataVector>* bc_tilde_d,
-    Scalar<DataVector>* bc_tilde_ye, Scalar<DataVector>* bc_tilde_tau,
-    tnsr::i<DataVector, 3, Frame::Inertial>* bc_tilde_s,
-    tnsr::I<DataVector, 3, Frame::Inertial>* bc_tilde_b,
-    Scalar<DataVector>* bc_tilde_phi,
-    const EquationsOfState::EquationOfState<true, 3>& eos) {
+void one_iteration(SideState* interior, SideState* exterior,
+                   Scalar<DataVector>* bc_tilde_d,
+                   Scalar<DataVector>* bc_tilde_ye,
+                   Scalar<DataVector>* bc_tilde_tau,
+                   tnsr::i<DataVector, 3, Frame::Inertial>* bc_tilde_s,
+                   tnsr::I<DataVector, 3, Frame::Inertial>* bc_tilde_b,
+                   Scalar<DataVector>* bc_tilde_phi,
+                   const EquationsOfState::EquationOfState<true, 3>& eos) {
   run_package_data<Scheme>(interior, eos);
   run_package_data<Scheme>(exterior, eos);
   Scheme::dg_boundary_terms(

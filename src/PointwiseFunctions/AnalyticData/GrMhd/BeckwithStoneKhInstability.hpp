@@ -107,16 +107,14 @@ class BeckwithStoneKhInstability
   struct UpperDensity {
     using type = double;
     static type lower_bound() { return 0.0; }
-    static constexpr Options::String help = {
-        "The density where v_x = +v_sh."};
+    static constexpr Options::String help = {"The density where v_x = +v_sh."};
   };
 
   /// The density \f$\rho_l\f$ where \f$v_x = -v_\mathrm{sh}\f$.
   struct LowerDensity {
     using type = double;
     static type lower_bound() { return 0.0; }
-    static constexpr Options::String help = {
-        "The density where v_x = -v_sh."};
+    static constexpr Options::String help = {"The density where v_x = -v_sh."};
   };
 
   /// The initial (constant) pressure of the fluid.
@@ -154,7 +152,8 @@ class BeckwithStoneKhInstability
                  PerturbAmplitude, PerturbWidth, MagneticField>;
 
   static constexpr Options::String help = {
-      "Beckwith & Stone (2011) relativistic Kelvin-Helmholtz instability with a "
+      "Beckwith & Stone (2011) relativistic Kelvin-Helmholtz instability with "
+      "a "
       "smooth tanh shear layer and density tied to the velocity."};
 
   BeckwithStoneKhInstability() = default;
@@ -168,9 +167,10 @@ class BeckwithStoneKhInstability
   ~BeckwithStoneKhInstability() override = default;
 
   BeckwithStoneKhInstability(double adiabatic_index, double shear_velocity,
-                             double strip_half_width, double transition_thickness,
-                             double upper_density, double lower_density,
-                             double pressure, double perturbation_amplitude,
+                             double strip_half_width,
+                             double transition_thickness, double upper_density,
+                             double lower_density, double pressure,
+                             double perturbation_amplitude,
                              double perturbation_width,
                              const std::array<double, 3>& magnetic_field);
 
