@@ -422,8 +422,16 @@ void eigenvectors_hydro(
   Scalar<DataVector> normal_velocity{num_grid_points};
   dot_product(make_not_null(&normal_velocity), unit_normal, spatial_velocity);
 
+  // NOTE (eos-marquina stopgap): clamp 1 - v_n^2 away from zero. A
+  // reconstructed subcell-face state in a developed shear/mixing region can
+  // overshoot to a near-luminal normal velocity (v_n -> 1), making this vanish
+  // and the L1/L2 prefactor 1/(h*(1-v_n^2)) below overflow into a trapped FPE.
+  // Floor lowered from 1e-2 to 1e-8 so the clamp only activates at truly
+  // extreme reconstructed states (W > 10000), leaving all physically plausible
+  // subcell face values untouched. TODO: replace with a proper failsafe-to-HLL
+  // on extreme states. See spectre_runs/kh/marquina_singularity_notes.md.
   const DataVector one_minus_normal_velocity_squared =
-      1.0 - get(normal_velocity) * get(normal_velocity);
+      max(1.0 - get(normal_velocity) * get(normal_velocity), 1.0e-8);
 
   tnsr::i<DataVector, 3, Frame::Inertial> spatial_velocity_one_form{
       num_grid_points};
@@ -547,11 +555,16 @@ void eigenvectors_hydro(
   }
 
   // R±
+  // NOTE (eos-marquina stopgap): the radicand 1 - v^2 cs^2 - v_n^2 (1-cs^2)
+  // = 1 - v_n^2 - cs^2 v_t^2 goes negative as v_n -> 1 (same near-luminal
+  // reconstruction overshoot as above), giving sqrt(<0) = NaN (trapped FPE).
+  // Floor it at the same 1e-8 scale; physical states have radicand ~1.
   const DataVector denom =
       get(lorentz_factor) *
-      sqrt(1.0 - get(spatial_velocity_squared) * get(sound_speed_squared) -
-           get(normal_velocity) * get(normal_velocity) *
-               (1.0 - get(sound_speed_squared)));
+      sqrt(max(1.0 - get(spatial_velocity_squared) * get(sound_speed_squared) -
+                   get(normal_velocity) * get(normal_velocity) *
+                       (1.0 - get(sound_speed_squared)),
+               1.0e-8));
 
   const DataVector sound_speed_over_denom = sound_speed / denom;
 
@@ -609,11 +622,22 @@ void eigenvectors_hydro(
         prefactor_L12;
   }
 
+  // kappa can be small in cold, low-density regions, so floor the denominator
+  // magnitude to keep the arithmetic finite. Tabulated EOS derivatives can be
+  // negative, so preserve the sign.
+  const DataVector safe_kappa =
+      (2.0 * step_function(get(kappa)) - 1.0) * max(abs(get(kappa)), 1.0e-12);
+
   // L3
   {
+    // Floored for the same reason as prefactor_Lpm: rho and cs^2 both vanish in
+    // cold low-density filaments, so this 1/(rho h cs^2) prefactor overflows.
+    // Kept finite only to avoid a trapped FPE; the eigenvector is unreliable at
+    // such points until Marquina has a proper fallback for extreme states.
     const DataVector prefactor_L3 =
-        1.0 / (get(rest_mass_density) * get(specific_enthalpy) *
-               get(sound_speed_squared));
+        1.0 / max(get(rest_mass_density) * get(specific_enthalpy) *
+                      get(sound_speed_squared),
+                  1.0e-12);
 
     const DataVector h_minus_one =
         get(specific_internal_energy) + get(pressure) / get(rest_mass_density);
@@ -625,7 +649,7 @@ void eigenvectors_hydro(
     const DataVector h_minus_W = h_minus_one - W_minus_one;
 
     (*left_eigenvectors)[L3].get(0) =
-        (h_minus_W + get(zeta) * get(electron_fraction) / get(kappa)) *
+        (h_minus_W + get(zeta) * get(electron_fraction) / safe_kappa) *
         prefactor_L3;
 
     for (size_t i = 0; i < 3; ++i) {
@@ -634,7 +658,7 @@ void eigenvectors_hydro(
     }
 
     (*left_eigenvectors)[L3].get(4) = (-get(lorentz_factor)) * prefactor_L3;
-    (*left_eigenvectors)[L3].get(5) = (-get(zeta) / get(kappa)) * prefactor_L3;
+    (*left_eigenvectors)[L3].get(5) = (-get(zeta) / safe_kappa) * prefactor_L3;
   }
 
   // L4
@@ -644,7 +668,7 @@ void eigenvectors_hydro(
       (*left_eigenvectors)[L4].get(5) = 1.0;
     } else {
       const DataVector prefactor_L4 =
-          get(zeta) * get(lorentz_factor) / get(kappa);
+          get(zeta) * get(lorentz_factor) / safe_kappa;
       (*left_eigenvectors)[L4].get(0) = prefactor_L4 * get(electron_fraction);
       (*left_eigenvectors)[L4].get(5) = -prefactor_L4;
     }
@@ -668,10 +692,19 @@ void eigenvectors_hydro(
         get(kappa) - get(rest_mass_density) * get(sound_speed_squared) +
         get(zeta) * get(electron_fraction) / get(specific_enthalpy);
 
+    // NOTE (eos-marquina): this denominator collapses to zero in the cold,
+    // low-density, near-luminal filaments of a developed shear flow because it
+    // carries cs^2 (= Gamma p / (rho h) -> 0 as p -> 0), rho, and (1 - v_n^2),
+    // all of which vanish there. We floor it only to keep the eigenvector
+    // arithmetic finite so dg_package_data does not raise a trapped FPE; the
+    // resulting eigenvectors at such points are unreliable until Marquina has a
+    // proper fallback for extreme states. See
+    // spectre_runs/kh/marquina_singularity_notes.md.
     const DataVector prefactor_Lpm =
-        1.0 / (2.0 * get(rest_mass_density) * get(specific_enthalpy) *
-               get(lorentz_factor) * get(sound_speed_squared) *
-               one_minus_normal_velocity_squared);
+        1.0 / max(2.0 * get(rest_mass_density) * get(specific_enthalpy) *
+                      get(lorentz_factor) * get(sound_speed_squared) *
+                      one_minus_normal_velocity_squared,
+                  1.0e-12);
 
     // S_i
     for (size_t i = 0; i < 3; ++i) {
