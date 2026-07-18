@@ -20,7 +20,6 @@
 #include "NumericalAlgorithms/DiscontinuousGalerkin/NormalDotFlux.hpp"
 #include "Utilities/GenerateInstantiations.hpp"
 #include "Utilities/Gsl.hpp"
-#include "Utilities/MakeWithValue.hpp"
 
 namespace grmhd::ValenciaDivClean::BoundaryCorrections {
 Marquina::Marquina(CkMigrateMessage* /*unused*/) {}
@@ -173,42 +172,80 @@ double Marquina::dg_package_data_impl(
         normal_covector.get(i) / get(normal_covector_mag);
   }
 
-  // Compute characteristic decomposition
-  // TO-DO: update functions to stop using std::array
-  std::array<DataVector, 3> tmp_char_speeds = {DataVector(num_points, 0.0),
-                                               DataVector(num_points, 0.0),
-                                               DataVector(num_points, 0.0)};
-  std::array<tnsr::I<DataVector, 6>, 6> tmp_left_eigenvectors =
-      make_array<6>(make_with_value<tnsr::I<DataVector, 6>>(tilde_d, 0.0));
-  std::array<tnsr::i<DataVector, 6>, 6> tmp_right_eigenvectors =
-      make_array<6>(make_with_value<tnsr::i<DataVector, 6>>(tilde_d, 0.0));
+  // Compute characteristic decomposition.
+  //
+  // TO-DO: update functions to stop using std::array. In the meantime, alias
+  // the std::array elements directly onto the packaged output storage via
+  // set_data_ref, so `characteristic_speeds_hydro` / `eigenvectors_hydro`
+  // write their results in place. This removes the 6 + 72 DataVector
+  // copy-backs that a temp-then-copy would incur per call. The callees only
+  // reallocate an output component when its size differs from num_points
+  // (which would detach the non-owning alias), so size the packaged storage
+  // first to guarantee the in-place path.
+  std::array<DataVector, 3> tmp_char_speeds{};
+  for (size_t i = 0; i < 3; ++i) {
+    if (packaged_characteristic_speeds->get(i).size() != num_points) {
+      packaged_characteristic_speeds->get(i) = DataVector(num_points);
+    }
+    tmp_char_speeds[i].set_data_ref(
+        make_not_null(&packaged_characteristic_speeds->get(i)));
+  }
+  std::array<tnsr::I<DataVector, 6>, 6> tmp_left_eigenvectors{};
+  std::array<tnsr::i<DataVector, 6>, 6> tmp_right_eigenvectors{};
+  for (size_t i = 0; i < 6; ++i) {
+    for (size_t j = 0; j < 6; ++j) {
+      if (packaged_left_eigenvectors->get(i, j).size() != num_points) {
+        packaged_left_eigenvectors->get(i, j) = DataVector(num_points);
+      }
+      if (packaged_right_eigenvectors->get(i, j).size() != num_points) {
+        packaged_right_eigenvectors->get(i, j) = DataVector(num_points);
+      }
+      tmp_left_eigenvectors[i].get(j).set_data_ref(
+          make_not_null(&packaged_left_eigenvectors->get(i, j)));
+      tmp_right_eigenvectors[i].get(j).set_data_ref(
+          make_not_null(&packaged_right_eigenvectors->get(i, j)));
+    }
+  }
   characteristic_speeds_hydro(
       make_not_null(&tmp_char_speeds), spatial_velocity, rest_mass_density,
       specific_internal_energy, specific_enthalpy, electron_fraction,
       lorentz_factor, unit_normal_covector, spatial_metric, equation_of_state);
   if (use_cpm_degenerate_block) {
-    // CPM: only the two acoustic eigenvectors are needed. Leave the
-    // degenerate-block rows (0..3) as zero; the CPM branch of
-    // dg_boundary_terms never reads them.
-    std::array<tnsr::I<DataVector, 6>, 2> tmp_left_acoustic =
-        make_array<2>(make_with_value<tnsr::I<DataVector, 6>>(tilde_d, 0.0));
-    std::array<tnsr::i<DataVector, 6>, 2> tmp_right_acoustic =
-        make_array<2>(make_with_value<tnsr::i<DataVector, 6>>(tilde_d, 0.0));
+    // CPM (Aloy et al. 1999 FAST shortcut): only the two acoustic eigenvectors
+    // carry data; the four degenerate-block rows (R1..R4 / L1..L4) are handled
+    // analytically in dg_boundary_terms via the spectral-projector complement
+    // and are never read from the packaged fields, so they only need to be
+    // zero in the packaged output. Rows Rplus/Rminus (== Lplus/Lminus == 4,5)
+    // are fully overwritten by acoustic_eigenvectors_hydro below, so zero only
+    // rows 0..3 here.
+    for (size_t i = 0; i < static_cast<size_t>(HydroVectorR::Rplus); ++i) {
+      for (size_t a = 0; a < 6; ++a) {
+        tmp_left_eigenvectors[i].get(a) = 0.0;
+        tmp_right_eigenvectors[i].get(a) = 0.0;
+      }
+    }
+    // Alias the two acoustic outputs onto the packaged Lplus/Lminus (left) and
+    // Rplus/Rminus (right) rows so acoustic_eigenvectors_hydro writes them in
+    // place — no separate allocation and no copy-back.
+    std::array<tnsr::I<DataVector, 6>, 2> tmp_left_acoustic{};
+    std::array<tnsr::i<DataVector, 6>, 2> tmp_right_acoustic{};
+    for (size_t j = 0; j < 6; ++j) {
+      tmp_left_acoustic[AcousticHydroVector::AcousticPlus].get(j).set_data_ref(
+          make_not_null(&tmp_left_eigenvectors[HydroVectorL::Lplus].get(j)));
+      tmp_left_acoustic[AcousticHydroVector::AcousticMinus].get(j).set_data_ref(
+          make_not_null(&tmp_left_eigenvectors[HydroVectorL::Lminus].get(j)));
+      tmp_right_acoustic[AcousticHydroVector::AcousticPlus].get(j).set_data_ref(
+          make_not_null(&tmp_right_eigenvectors[HydroVectorR::Rplus].get(j)));
+      tmp_right_acoustic[AcousticHydroVector::AcousticMinus]
+          .get(j)
+          .set_data_ref(make_not_null(
+              &tmp_right_eigenvectors[HydroVectorR::Rminus].get(j)));
+    }
     acoustic_eigenvectors_hydro(
         make_not_null(&tmp_right_acoustic), make_not_null(&tmp_left_acoustic),
         spatial_velocity, rest_mass_density, specific_internal_energy,
         specific_enthalpy, electron_fraction, lorentz_factor,
         unit_normal_covector, spatial_metric, equation_of_state);
-    for (size_t j = 0; j < 6; ++j) {
-      tmp_left_eigenvectors[HydroVectorL::Lplus].get(j) =
-          tmp_left_acoustic[AcousticHydroVector::AcousticPlus].get(j);
-      tmp_left_eigenvectors[HydroVectorL::Lminus].get(j) =
-          tmp_left_acoustic[AcousticHydroVector::AcousticMinus].get(j);
-      tmp_right_eigenvectors[HydroVectorR::Rplus].get(j) =
-          tmp_right_acoustic[AcousticHydroVector::AcousticPlus].get(j);
-      tmp_right_eigenvectors[HydroVectorR::Rminus].get(j) =
-          tmp_right_acoustic[AcousticHydroVector::AcousticMinus].get(j);
-    }
   } else {
     eigenvectors_hydro(make_not_null(&tmp_right_eigenvectors),
                        make_not_null(&tmp_left_eigenvectors), spatial_velocity,
@@ -216,16 +253,8 @@ double Marquina::dg_package_data_impl(
                        specific_enthalpy, electron_fraction, lorentz_factor,
                        unit_normal_covector, spatial_metric, equation_of_state);
   }
-  // Copy from std::array to tnsr
-  for (size_t i = 0; i < 3; ++i) {
-    packaged_characteristic_speeds->get(i) = tmp_char_speeds[i];
-  }
-  for (size_t i = 0; i < 6; ++i) {
-    for (size_t j = 0; j < 6; ++j) {
-      packaged_left_eigenvectors->get(i, j) = tmp_left_eigenvectors[i].get(j);
-      packaged_right_eigenvectors->get(i, j) = tmp_right_eigenvectors[i].get(j);
-    }
-  }
+  // Characteristic speeds and eigenvectors were written in place into the
+  // packaged output storage via the set_data_ref aliases above.
 
   // Package conservative variables
   *packaged_tilde_d = tilde_d;
@@ -381,45 +410,45 @@ void Marquina::dg_boundary_terms_impl(
       -characteristic_speeds_ext.get(
           grmhd::ValenciaDivClean::HydroSpeed::LambdaPlus);
 
-  auto aligned_left_characteristic_fields_ext = left_characteristic_fields_ext;
-  auto aligned_right_characteristic_fields_ext =
-      right_characteristic_fields_ext;
-  for (size_t j = 0; j < 6; ++j) {
-    aligned_left_characteristic_fields_ext.get(
-        grmhd::ValenciaDivClean::HydroVectorR::Rplus, j) =
-        left_characteristic_fields_ext.get(
-            grmhd::ValenciaDivClean::HydroVectorR::Rminus, j);
-    aligned_left_characteristic_fields_ext.get(
-        grmhd::ValenciaDivClean::HydroVectorR::Rminus, j) =
-        left_characteristic_fields_ext.get(
-            grmhd::ValenciaDivClean::HydroVectorR::Rplus, j);
-    aligned_right_characteristic_fields_ext.get(
-        grmhd::ValenciaDivClean::HydroVectorR::Rplus, j) =
-        right_characteristic_fields_ext.get(
-            grmhd::ValenciaDivClean::HydroVectorR::Rminus, j);
-    aligned_right_characteristic_fields_ext.get(
-        grmhd::ValenciaDivClean::HydroVectorR::Rminus, j) =
-        right_characteristic_fields_ext.get(
-            grmhd::ValenciaDivClean::HydroVectorR::Rplus, j);
-  }
+  // Aligning the exterior characteristic fields to the interior normal
+  // convention swaps only the two acoustic rows (Rplus <-> Rminus). Rather
+  // than materialize two full 6x6 copies just to swap two rows, remap the row
+  // index on read in the per-mode loop below. (The CPM branch, which needs the
+  // aligned matrices as arguments, materializes them locally.)
+  const auto aligned_row = [](const size_t row) -> size_t {
+    if (row == grmhd::ValenciaDivClean::HydroVectorR::Rplus) {
+      return grmhd::ValenciaDivClean::HydroVectorR::Rminus;
+    }
+    if (row == grmhd::ValenciaDivClean::HydroVectorR::Rminus) {
+      return grmhd::ValenciaDivClean::HydroVectorR::Rplus;
+    }
+    return row;
+  };
+  const auto aligned_left_ext = [&](const size_t i,
+                                    const size_t k) -> const DataVector& {
+    return left_characteristic_fields_ext.get(aligned_row(i), k);
+  };
+  const auto aligned_right_ext = [&](const size_t i,
+                                     const size_t k) -> const DataVector& {
+    return right_characteristic_fields_ext.get(aligned_row(i), k);
+  };
   // Initialize boundary corrections to zero, as we'll compute them by adding
-  // the contributions from each characteristic field
+  // the contributions from each characteristic field. Each assignment zeroes
+  // the entire DataVector, so it must be done once — not once per grid point.
   const size_t num_points = get(tilde_d_int).size();
-  for (size_t point = 0; point < get(tilde_d_int).size(); ++point) {
-    get(*boundary_correction_tilde_d) = 0.0;
-    get<0>(*boundary_correction_tilde_s) = 0.0;
-    get<1>(*boundary_correction_tilde_s) = 0.0;
-    get<2>(*boundary_correction_tilde_s) = 0.0;
-    get(*boundary_correction_tilde_tau) = 0.0;
-    get(*boundary_correction_tilde_ye) = 0.0;
+  get(*boundary_correction_tilde_d) = 0.0;
+  get<0>(*boundary_correction_tilde_s) = 0.0;
+  get<1>(*boundary_correction_tilde_s) = 0.0;
+  get<2>(*boundary_correction_tilde_s) = 0.0;
+  get(*boundary_correction_tilde_tau) = 0.0;
+  get(*boundary_correction_tilde_ye) = 0.0;
 
-    // Not yet implemented for magnetic field and divergence cleaning field, so
-    // set to zero
-    get<0>(*boundary_correction_tilde_b) = 0.0;
-    get<1>(*boundary_correction_tilde_b) = 0.0;
-    get<2>(*boundary_correction_tilde_b) = 0.0;
-    get(*boundary_correction_tilde_phi) = 0.0;
-  }
+  // Not yet implemented for magnetic field and divergence cleaning field, so
+  // set to zero
+  get<0>(*boundary_correction_tilde_b) = 0.0;
+  get<1>(*boundary_correction_tilde_b) = 0.0;
+  get<2>(*boundary_correction_tilde_b) = 0.0;
+  get(*boundary_correction_tilde_phi) = 0.0;
 
   // Fallback flux for unmodeled B and Phi fields to satisfy DG contracts
   for (size_t j = 0; j < 3; ++j) {
@@ -456,13 +485,12 @@ void Marquina::dg_boundary_terms_impl(
         left_characteristic_fields_int.get(i, 3) * get<2>(tilde_s_int) +
         left_characteristic_fields_int.get(i, 4) * get(tilde_tau_int) +
         left_characteristic_fields_int.get(i, 5) * get(tilde_ye_int);
-    get(omega_i_ext) =
-        aligned_left_characteristic_fields_ext.get(i, 0) * get(tilde_d_ext) +
-        aligned_left_characteristic_fields_ext.get(i, 1) * get<0>(tilde_s_ext) +
-        aligned_left_characteristic_fields_ext.get(i, 2) * get<1>(tilde_s_ext) +
-        aligned_left_characteristic_fields_ext.get(i, 3) * get<2>(tilde_s_ext) +
-        aligned_left_characteristic_fields_ext.get(i, 4) * get(tilde_tau_ext) +
-        aligned_left_characteristic_fields_ext.get(i, 5) * get(tilde_ye_ext);
+    get(omega_i_ext) = aligned_left_ext(i, 0) * get(tilde_d_ext) +
+                       aligned_left_ext(i, 1) * get<0>(tilde_s_ext) +
+                       aligned_left_ext(i, 2) * get<1>(tilde_s_ext) +
+                       aligned_left_ext(i, 3) * get<2>(tilde_s_ext) +
+                       aligned_left_ext(i, 4) * get(tilde_tau_ext) +
+                       aligned_left_ext(i, 5) * get(tilde_ye_ext);
     get(phi_i_int) = left_characteristic_fields_int.get(i, 0) *
                          get(normal_dot_flux_tilde_d_int) +
                      left_characteristic_fields_int.get(i, 1) *
@@ -475,18 +503,13 @@ void Marquina::dg_boundary_terms_impl(
                          get(normal_dot_flux_tilde_tau_int) +
                      left_characteristic_fields_int.get(i, 5) *
                          get(normal_dot_flux_tilde_ye_int);
-    get(phi_i_ext) = aligned_left_characteristic_fields_ext.get(i, 0) *
-                         (-get(normal_dot_flux_tilde_d_ext)) +
-                     aligned_left_characteristic_fields_ext.get(i, 1) *
-                         (-get<0>(normal_dot_flux_tilde_s_ext)) +
-                     aligned_left_characteristic_fields_ext.get(i, 2) *
-                         (-get<1>(normal_dot_flux_tilde_s_ext)) +
-                     aligned_left_characteristic_fields_ext.get(i, 3) *
-                         (-get<2>(normal_dot_flux_tilde_s_ext)) +
-                     aligned_left_characteristic_fields_ext.get(i, 4) *
-                         (-get(normal_dot_flux_tilde_tau_ext)) +
-                     aligned_left_characteristic_fields_ext.get(i, 5) *
-                         (-get(normal_dot_flux_tilde_ye_ext));
+    get(phi_i_ext) =
+        aligned_left_ext(i, 0) * (-get(normal_dot_flux_tilde_d_ext)) +
+        aligned_left_ext(i, 1) * (-get<0>(normal_dot_flux_tilde_s_ext)) +
+        aligned_left_ext(i, 2) * (-get<1>(normal_dot_flux_tilde_s_ext)) +
+        aligned_left_ext(i, 3) * (-get<2>(normal_dot_flux_tilde_s_ext)) +
+        aligned_left_ext(i, 4) * (-get(normal_dot_flux_tilde_tau_ext)) +
+        aligned_left_ext(i, 5) * (-get(normal_dot_flux_tilde_ye_ext));
 
     // TO-DO: improve how we handle the indices of characteristic speeds
     size_t hydro_speed_index;
@@ -534,22 +557,22 @@ void Marquina::dg_boundary_terms_impl(
     // TO-DO: handle dg_formulation (strong/weak)
     get(*boundary_correction_tilde_d) +=
         get(phi_i_plus) * right_characteristic_fields_int.get(i, 0) +
-        get(phi_i_minus) * aligned_right_characteristic_fields_ext.get(i, 0);
+        get(phi_i_minus) * aligned_right_ext(i, 0);
     get<0>(*boundary_correction_tilde_s) +=
         get(phi_i_plus) * right_characteristic_fields_int.get(i, 1) +
-        get(phi_i_minus) * aligned_right_characteristic_fields_ext.get(i, 1);
+        get(phi_i_minus) * aligned_right_ext(i, 1);
     get<1>(*boundary_correction_tilde_s) +=
         get(phi_i_plus) * right_characteristic_fields_int.get(i, 2) +
-        get(phi_i_minus) * aligned_right_characteristic_fields_ext.get(i, 2);
+        get(phi_i_minus) * aligned_right_ext(i, 2);
     get<2>(*boundary_correction_tilde_s) +=
         get(phi_i_plus) * right_characteristic_fields_int.get(i, 3) +
-        get(phi_i_minus) * aligned_right_characteristic_fields_ext.get(i, 3);
+        get(phi_i_minus) * aligned_right_ext(i, 3);
     get(*boundary_correction_tilde_tau) +=
         get(phi_i_plus) * right_characteristic_fields_int.get(i, 4) +
-        get(phi_i_minus) * aligned_right_characteristic_fields_ext.get(i, 4);
+        get(phi_i_minus) * aligned_right_ext(i, 4);
     get(*boundary_correction_tilde_ye) +=
         get(phi_i_plus) * right_characteristic_fields_int.get(i, 5) +
-        get(phi_i_minus) * aligned_right_characteristic_fields_ext.get(i, 5);
+        get(phi_i_minus) * aligned_right_ext(i, 5);
   }
 
   if (use_cpm_degenerate_block) {
@@ -561,6 +584,10 @@ void Marquina::dg_boundary_terms_impl(
     using grmhd::ValenciaDivClean::HydroSpeed;
     using grmhd::ValenciaDivClean::HydroVectorL;
     using grmhd::ValenciaDivClean::HydroVectorR;
+
+    // The degenerate block reads only the two acoustic rows of the aligned
+    // exterior fields, so read them through the row-remap accessors defined at
+    // the top of this function instead of materializing full 6x6 copies.
 
     Scalar<DataVector> omega_plus_int{num_points};
     Scalar<DataVector> omega_minus_int{num_points};
@@ -588,12 +615,12 @@ void Marquina::dg_boundary_terms_impl(
     project(&omega_minus_int, left_characteristic_fields_int,
             HydroVectorL::Lminus, tilde_d_int, tilde_s_int, tilde_tau_int,
             tilde_ye_int, 1.0);
-    project(&omega_plus_ext, aligned_left_characteristic_fields_ext,
-            HydroVectorL::Lplus, tilde_d_ext, tilde_s_ext, tilde_tau_ext,
-            tilde_ye_ext, 1.0);
-    project(&omega_minus_ext, aligned_left_characteristic_fields_ext,
-            HydroVectorL::Lminus, tilde_d_ext, tilde_s_ext, tilde_tau_ext,
-            tilde_ye_ext, 1.0);
+    project(&omega_plus_ext, left_characteristic_fields_ext,
+            aligned_row(HydroVectorL::Lplus), tilde_d_ext, tilde_s_ext,
+            tilde_tau_ext, tilde_ye_ext, 1.0);
+    project(&omega_minus_ext, left_characteristic_fields_ext,
+            aligned_row(HydroVectorL::Lminus), tilde_d_ext, tilde_s_ext,
+            tilde_tau_ext, tilde_ye_ext, 1.0);
     project(&phi_plus_int, left_characteristic_fields_int, HydroVectorL::Lplus,
             normal_dot_flux_tilde_d_int, normal_dot_flux_tilde_s_int,
             normal_dot_flux_tilde_tau_int, normal_dot_flux_tilde_ye_int, 1.0);
@@ -602,12 +629,12 @@ void Marquina::dg_boundary_terms_impl(
             normal_dot_flux_tilde_s_int, normal_dot_flux_tilde_tau_int,
             normal_dot_flux_tilde_ye_int, 1.0);
     // Exterior fluxes flip sign under the aligned-normal convention.
-    project(&phi_plus_ext, aligned_left_characteristic_fields_ext,
-            HydroVectorL::Lplus, normal_dot_flux_tilde_d_ext,
+    project(&phi_plus_ext, left_characteristic_fields_ext,
+            aligned_row(HydroVectorL::Lplus), normal_dot_flux_tilde_d_ext,
             normal_dot_flux_tilde_s_ext, normal_dot_flux_tilde_tau_ext,
             normal_dot_flux_tilde_ye_ext, -1.0);
-    project(&phi_minus_ext, aligned_left_characteristic_fields_ext,
-            HydroVectorL::Lminus, normal_dot_flux_tilde_d_ext,
+    project(&phi_minus_ext, left_characteristic_fields_ext,
+            aligned_row(HydroVectorL::Lminus), normal_dot_flux_tilde_d_ext,
             normal_dot_flux_tilde_s_ext, normal_dot_flux_tilde_tau_ext,
             normal_dot_flux_tilde_ye_ext, -1.0);
 
@@ -616,36 +643,39 @@ void Marquina::dg_boundary_terms_impl(
     const DataVector& lambda_0_ext =
         aligned_characteristic_speeds_ext.get(HydroSpeed::NormalDotVelocity);
 
+    // Scratch buffers for the projector-complement degenerate flux/state,
+    // reused across the six component invocations below to avoid reallocating
+    // them each time (the expressions, and hence the results, are unchanged).
+    DataVector f_deg_int_j{num_points};
+    DataVector f_deg_ext_j{num_points};
+    DataVector u_deg_int_j{num_points};
+    DataVector u_deg_ext_j{num_points};
     const auto cpm_add_component = [&](const gsl::not_null<DataVector*> bc_j,
                                        const DataVector& u_int_j,
                                        const DataVector& u_ext_j,
                                        const DataVector& f_int_j,
                                        const DataVector& f_ext_j,
                                        const size_t j) {
-      const DataVector f_deg_int_j =
+      f_deg_int_j =
           f_int_j -
           right_characteristic_fields_int.get(HydroVectorR::Rplus, j) *
               get(phi_plus_int) -
           right_characteristic_fields_int.get(HydroVectorR::Rminus, j) *
               get(phi_minus_int);
-      const DataVector f_deg_ext_j =
+      f_deg_ext_j =
           (-f_ext_j) -
-          aligned_right_characteristic_fields_ext.get(HydroVectorR::Rplus, j) *
-              get(phi_plus_ext) -
-          aligned_right_characteristic_fields_ext.get(HydroVectorR::Rminus, j) *
-              get(phi_minus_ext);
-      const DataVector u_deg_int_j =
+          aligned_right_ext(HydroVectorR::Rplus, j) * get(phi_plus_ext) -
+          aligned_right_ext(HydroVectorR::Rminus, j) * get(phi_minus_ext);
+      u_deg_int_j =
           u_int_j -
           right_characteristic_fields_int.get(HydroVectorR::Rplus, j) *
               get(omega_plus_int) -
           right_characteristic_fields_int.get(HydroVectorR::Rminus, j) *
               get(omega_minus_int);
-      const DataVector u_deg_ext_j =
+      u_deg_ext_j =
           u_ext_j -
-          aligned_right_characteristic_fields_ext.get(HydroVectorR::Rplus, j) *
-              get(omega_plus_ext) -
-          aligned_right_characteristic_fields_ext.get(HydroVectorR::Rminus, j) *
-              get(omega_minus_ext);
+          aligned_right_ext(HydroVectorR::Rplus, j) * get(omega_plus_ext) -
+          aligned_right_ext(HydroVectorR::Rminus, j) * get(omega_minus_ext);
 
       for (size_t point = 0; point < num_points; ++point) {
         double f_deg_plus;

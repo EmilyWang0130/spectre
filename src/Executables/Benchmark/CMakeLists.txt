@@ -3,6 +3,12 @@
 
 add_subdirectory(CpmMarquina)
 
+# Standalone Marquina flux-kernel benchmark harness (lives outside src/ under
+# bench/). Registered here so the C++ target can reuse add_spectre_executable.
+if(EXISTS "${CMAKE_SOURCE_DIR}/bench/CMakeLists.txt")
+  add_subdirectory("${CMAKE_SOURCE_DIR}/bench" "${CMAKE_BINARY_DIR}/bench")
+endif()
+
 # Since benchmarking is only interesting in release mode the executable isn't
 # added for Debug builds. Charm++'s main function is overridden with the main
 # from the Google Benchmark library. The executable is not added to the `all` make
