@@ -44,3 +44,28 @@ set_target_properties(
   LINKER_LANGUAGE Fortran
   )
 target_compile_options(bench_whisky PRIVATE -O3 -march=native -DNDEBUG)
+
+# --- SpECTRE-vs-WHISKY numerical cross-check (mixed C++/Fortran) ---------
+# The C-callable WHISKY diagnostic kernel (whisky_crosscheck.F90) is compiled
+# with the C++ driver into one executable; libgfortran supplies the Fortran
+# runtime.
+set(executable bench_marquina_crosscheck)
+add_spectre_executable(
+  ${executable}
+  EXCLUDE_FROM_ALL
+  bench_marquina_crosscheck.cpp
+  whisky_crosscheck.F90
+  )
+target_link_libraries(
+  ${executable}
+  PRIVATE
+  DataStructures
+  GeneralRelativity
+  Hydro
+  Informer
+  Spectral
+  Utilities
+  ValenciaDivClean
+  gfortran
+  )
+target_compile_options(${executable} PRIVATE -O3 -march=native -DNDEBUG)
