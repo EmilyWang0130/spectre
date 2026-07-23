@@ -175,6 +175,37 @@ disagree on essentially every interface.
   per-interface cost, but it is **not** a same-output comparison — that was the
   motivation for this document.
 
+## Does the sign-conditioning explain SpECTRE's slower runtime?
+
+Partly, but it is a minor factor. Replacing the two sign-conditioned per-point
+loops in the CPM path (the acoustic-mode loop and the degenerate-block loop)
+with the branchless, vectorizable max-|λ| form (WHISKY's) — a throwaway
+experiment, since it changes the flux — moved MarquinaCpm from ~319 to ~287
+ns/interface:
+
+| CPM variant | ns/interface |
+|-------------|-------------:|
+| sided (sign-conditioned, as shipped)   | ~319 |
+| branchless vectorized max-\|λ\| (test)   | ~287 |
+
+So the conditioning costs ~**32 ns (~10%)** of CPM, because it forces a scalar
+per-point loop that does not vectorize over the `DataVector` (plus branch
+cost). But it is **not** the reason CPM (~319 ns) is ~4.3× slower than WHISKY
+(~75 ns): even fully branchless, CPM would be ~287 ns ≈ 3.8× WHISKY. The
+conditioning is ~13% of the gap; the remaining ~87% is the per-interface
+`DataVector` machinery — heap allocations plus the full metric geometry
+(`raise_or_lower_index`, `determinant_and_inverse`, `dot_product`) and the EOS
+evaluations inside `acoustic_eigenvectors_hydro` / `characteristic_speeds_hydro`
+— which WHISKY does as a few scalar FLOPs per cell with no heap traffic.
+
+Note that going branchless is *not* a free optimization: it changes the flux to
+WHISKY's more-diffusive scheme (breaking the reference gate and the equivalence
+envelope). A bit-identical speedup would instead keep the sided math but
+restructure it to vectorize (compute both sided branches as `DataVector`
+expressions and blend with a precomputed mask) — recovering most of the ~10%
+while preserving the output. That is a real change, not a one-liner, and was not
+pursued here.
+
 ## Caveats
 
 - Only the hydro subset (D, Sᵢ, τ) is compared; SpECTRE's `Yₑ` mode has no
