@@ -33,7 +33,16 @@ class er;
 
 namespace grmhd::ValenciaDivClean::BoundaryCorrections {
 /*!
- * TO-DO
+ * \brief Marquina flux with the full 6-mode characteristic decomposition,
+ * including the fourfold-degenerate \f$\lambda_0 = v_n\f$ eigenspace built
+ * from the (non-unique) L3, L4, R3, R4 eigenvectors with a
+ * \f$\zeta \to 0\f$ regularization.
+ *
+ * \note For new production runs prefer `MarquinaCpm`, which is analytically
+ * identical at every face point but avoids constructing the four non-unique
+ * degenerate eigenvectors (and their \f$\zeta \to 0\f$ regularization),
+ * yielding a substantially faster flux kernel. This class is retained for
+ * unit-testing the full eigenbasis path and for comparison studies.
  */
 class Marquina final : public evolution::BoundaryCorrection {
  public:

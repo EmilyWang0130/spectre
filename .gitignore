@@ -80,3 +80,6 @@ AGENTS.local.md
 .aider*
 .claude/settings.local.json
 CLAUDE.local.md
+
+# codex tooling backups
+.codex/

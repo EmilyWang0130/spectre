@@ -32,6 +32,12 @@ namespace grmhd::ValenciaDivClean::BoundaryCorrections {
  * \brief Marquina flux with the Complementary Projection Method (CPM)
  * replacing the degenerate-block characteristic decomposition.
  *
+ * \note This is the **preferred Marquina variant for production runs**.
+ * Analytically identical to `Marquina` at every face point, but much faster
+ * — avoids constructing the four non-unique degenerate eigenvectors and the
+ * associated \f$\zeta \to 0\f$ regularization. Use this class in YAML input
+ * files unless you specifically need the base `Marquina` for validation.
+ *
  * Behaves identically to `Marquina` on the two acoustic modes. For the
  * fourfold-degenerate \f$\lambda_0 = v_n\f$ eigenspace, the flux is assembled
  * via the spectral projector complement
