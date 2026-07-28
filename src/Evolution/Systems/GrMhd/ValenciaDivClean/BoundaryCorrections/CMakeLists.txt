@@ -6,6 +6,7 @@ spectre_target_sources(
   ${LIBRARY}
   PRIVATE
   Hll.cpp
+  Hllc.cpp
   Marquina.cpp
   MarquinaCpm.cpp
   Rusanov.cpp
@@ -17,6 +18,7 @@ spectre_target_headers(
   HEADERS
   Factory.hpp
   Hll.hpp
+  Hllc.hpp
   Marquina.hpp
   MarquinaCpm.hpp
   NamespaceDocs.hpp

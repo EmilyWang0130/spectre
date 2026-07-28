@@ -4,6 +4,7 @@
 #pragma once
 
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Hll.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Hllc.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Marquina.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/MarquinaCpm.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Rusanov.hpp"
@@ -11,5 +12,5 @@
 
 namespace grmhd::ValenciaDivClean::BoundaryCorrections {
 using standard_boundary_corrections =
-    tmpl::list<Hll, Marquina, MarquinaCpm, Rusanov>;
+    tmpl::list<Hll, Hllc, Marquina, MarquinaCpm, Rusanov>;
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections
