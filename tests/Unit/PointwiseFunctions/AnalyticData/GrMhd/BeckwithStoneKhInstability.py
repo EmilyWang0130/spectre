@@ -16,6 +16,8 @@ def velocity(
     transition_thickness,
     upper_density,
     lower_density,
+    upper_ye,
+    lower_ye,
     pressure,
     perturbation_amplitude,
     perturbation_width,
@@ -44,6 +46,8 @@ def rest_mass_density(
     transition_thickness,
     upper_density,
     lower_density,
+    upper_ye,
+    lower_ye,
     pressure,
     perturbation_amplitude,
     perturbation_width,
@@ -52,9 +56,10 @@ def rest_mass_density(
     sgn = _sign(x[1])
     layer = x[1] - sgn * strip_half_width
     v_x = sgn * shear_velocity * np.tanh(layer / transition_thickness)
-    return 0.5 * (upper_density + lower_density) + 0.5 * (
-        upper_density - lower_density
-    ) * v_x / shear_velocity
+    return (
+        0.5 * (upper_density + lower_density)
+        + 0.5 * (upper_density - lower_density) * v_x / shear_velocity
+    )
 
 
 def electron_fraction(
@@ -65,12 +70,20 @@ def electron_fraction(
     transition_thickness,
     upper_density,
     lower_density,
+    upper_ye,
+    lower_ye,
     pressure,
     perturbation_amplitude,
     perturbation_width,
     magnetic_field,
 ):
-    return 0.1
+    sgn = _sign(x[1])
+    layer = x[1] - sgn * strip_half_width
+    v_x = sgn * shear_velocity * np.tanh(layer / transition_thickness)
+    return (
+        0.5 * (upper_ye + lower_ye)
+        + 0.5 * (upper_ye - lower_ye) * v_x / shear_velocity
+    )
 
 
 def specific_internal_energy(
@@ -81,6 +94,8 @@ def specific_internal_energy(
     transition_thickness,
     upper_density,
     lower_density,
+    upper_ye,
+    lower_ye,
     pressure,
     perturbation_amplitude,
     perturbation_width,
@@ -94,6 +109,8 @@ def specific_internal_energy(
         transition_thickness,
         upper_density,
         lower_density,
+        upper_ye,
+        lower_ye,
         pressure,
         perturbation_amplitude,
         perturbation_width,
@@ -110,6 +127,8 @@ def pressure(
     transition_thickness,
     upper_density,
     lower_density,
+    upper_ye,
+    lower_ye,
     pressure,
     perturbation_amplitude,
     perturbation_width,
@@ -126,6 +145,8 @@ def specific_enthalpy(
     transition_thickness,
     upper_density,
     lower_density,
+    upper_ye,
+    lower_ye,
     pressure,
     perturbation_amplitude,
     perturbation_width,
@@ -139,6 +160,8 @@ def specific_enthalpy(
         transition_thickness,
         upper_density,
         lower_density,
+        upper_ye,
+        lower_ye,
         pressure,
         perturbation_amplitude,
         perturbation_width,
@@ -154,6 +177,8 @@ def lorentz_factor(
     transition_thickness,
     upper_density,
     lower_density,
+    upper_ye,
+    lower_ye,
     pressure,
     perturbation_amplitude,
     perturbation_width,
@@ -167,6 +192,8 @@ def lorentz_factor(
         transition_thickness,
         upper_density,
         lower_density,
+        upper_ye,
+        lower_ye,
         pressure,
         perturbation_amplitude,
         perturbation_width,
@@ -183,6 +210,8 @@ def magnetic_field(
     transition_thickness,
     upper_density,
     lower_density,
+    upper_ye,
+    lower_ye,
     pressure,
     perturbation_amplitude,
     perturbation_width,
@@ -199,6 +228,8 @@ def divergence_cleaning_field(
     transition_thickness,
     upper_density,
     lower_density,
+    upper_ye,
+    lower_ye,
     pressure,
     perturbation_amplitude,
     perturbation_width,
