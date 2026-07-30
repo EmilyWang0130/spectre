@@ -38,6 +38,8 @@ class Spectral;
 template <typename LowDensityEoS>
 class Enthalpy;
 template <bool IsRelativistic>
+class Tabulated1D;
+template <bool IsRelativistic>
 class Tabulated3D;
 }  // namespace EquationsOfState
 /// \endcond
@@ -51,18 +53,19 @@ struct DerivedClasses {};
 
 template <>
 struct DerivedClasses<true, 1> {
-  using type = tmpl::list<PolytropicFluid<true>, PiecewisePolytropicFluid<true>,
-                          Spectral, Enthalpy<PolytropicFluid<true>>,
-                          Enthalpy<Enthalpy<PolytropicFluid<true>>>,
-                          Enthalpy<Enthalpy<Enthalpy<PolytropicFluid<true>>>>,
-                          Enthalpy<Spectral>, Enthalpy<Enthalpy<Spectral>>,
-                          Enthalpy<Enthalpy<Enthalpy<Spectral>>>>;
+  using type =
+      tmpl::list<PolytropicFluid<true>, PiecewisePolytropicFluid<true>,
+                 Spectral, Enthalpy<PolytropicFluid<true>>,
+                 Enthalpy<Enthalpy<PolytropicFluid<true>>>,
+                 Enthalpy<Enthalpy<Enthalpy<PolytropicFluid<true>>>>,
+                 Enthalpy<Spectral>, Enthalpy<Enthalpy<Spectral>>,
+                 Enthalpy<Enthalpy<Enthalpy<Spectral>>>, Tabulated1D<true>>;
 };
 
 template <>
 struct DerivedClasses<false, 1> {
-  using type =
-      tmpl::list<PolytropicFluid<false>, PiecewisePolytropicFluid<false>>;
+  using type = tmpl::list<PolytropicFluid<false>,
+                          PiecewisePolytropicFluid<false>, Tabulated1D<false>>;
 };
 
 template <>

@@ -14,6 +14,7 @@ spectre_target_sources(
   PolytropicFluid.cpp
   RegisterDerivedWithCharm.cpp
   Spectral.cpp
+  Tabulated1D.cpp
   Tabulated3d.cpp
   )
 
@@ -33,6 +34,7 @@ spectre_target_headers(
   PolytropicFluid.hpp
   RegisterDerivedWithCharm.hpp
   Spectral.hpp
+  Tabulated1D.hpp
   Tabulated3d.hpp
   )
 

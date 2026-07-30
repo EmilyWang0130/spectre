@@ -13,4 +13,5 @@
 #include "PointwiseFunctions/Hydro/EquationsOfState/PiecewisePolytropicFluid.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/PolytropicFluid.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/Spectral.hpp"
+#include "PointwiseFunctions/Hydro/EquationsOfState/Tabulated1D.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/Tabulated3d.hpp"

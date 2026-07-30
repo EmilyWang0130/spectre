@@ -13,6 +13,7 @@ set(LIBRARY_SOURCES
   Test_PiecewisePolytropicFluid.cpp
   Test_PolytropicFluid.cpp
   Test_SpectralEoS.cpp
+  Test_Tabulated1D.cpp
   Test_Tabulated3D.cpp
   )
 

@@ -12,6 +12,7 @@
 #include "PointwiseFunctions/Hydro/EquationsOfState/PiecewisePolytropicFluid.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/PolytropicFluid.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/Spectral.hpp"
+#include "PointwiseFunctions/Hydro/EquationsOfState/Tabulated1D.hpp"
 #include "Utilities/ConstantExpressions.hpp"
 #include "Utilities/MakeWithValue.hpp"
 
@@ -167,5 +168,7 @@ template class Barotropic3D<
 template class Barotropic3D<Enthalpy<Spectral>>;
 template class Barotropic3D<Enthalpy<Enthalpy<Spectral>>>;
 template class Barotropic3D<Enthalpy<Enthalpy<Enthalpy<Spectral>>>>;
+template class Barotropic3D<Tabulated1D<true>>;
+template class Barotropic3D<Tabulated1D<false>>;
 
 }  // namespace EquationsOfState
