@@ -48,7 +48,7 @@ void test_solution(const TovCoordinates coord_system) {
       "      PolytropicExponent: 2\n"
       "      PolytropicConstant: 1.\n"
       "  Coordinates: " +
-      get_output(coord_system));
+      get_output(coord_system) + "\n" + "  Yeq: None");
   REQUIRE(dynamic_cast<const TovStar*>(created.get()) != nullptr);
   const auto& solution = dynamic_cast<const TovStar&>(*created);
   {

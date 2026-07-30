@@ -23,12 +23,15 @@ TovStar::TovStar(
     const double central_rest_mass_density,
     std::unique_ptr<EquationsOfState::EquationOfState<true, 1>>
         equation_of_state,
-    const RelativisticEuler::Solutions::TovCoordinates coordinate_system)
+    const RelativisticEuler::Solutions::TovCoordinates coordinate_system,
+    std::optional<std::unique_ptr<EquationsOfState::EquationOfState<true, 3>>>
+        yeq_eos)
     : central_rest_mass_density_(central_rest_mass_density),
       equation_of_state_(std::move(equation_of_state)),
       coordinate_system_(coordinate_system),
       radial_solution_(*equation_of_state_, central_rest_mass_density_,
-                       coordinate_system_) {}
+                       coordinate_system_),
+      yeq_eos_(yeq_eos.has_value() ? std::move(*yeq_eos) : nullptr) {}
 
 TovStar::TovStar(const TovStar& rhs)
     : evolution::initial_data::InitialData(rhs),
@@ -36,7 +39,8 @@ TovStar::TovStar(const TovStar& rhs)
       equation_of_state_(rhs.equation_of_state_->get_clone()),
       coordinate_system_(rhs.coordinate_system_),
       radial_solution_(*equation_of_state_, central_rest_mass_density_,
-                       coordinate_system_) {}
+                       coordinate_system_),
+      yeq_eos_(rhs.yeq_eos_ != nullptr ? rhs.yeq_eos_->get_clone() : nullptr) {}
 
 TovStar& TovStar::operator=(const TovStar& rhs) {
   central_rest_mass_density_ = rhs.central_rest_mass_density_;
@@ -44,6 +48,7 @@ TovStar& TovStar::operator=(const TovStar& rhs) {
   coordinate_system_ = rhs.coordinate_system_;
   radial_solution_ = RelativisticEuler::Solutions::TovSolution(
       *equation_of_state_, central_rest_mass_density_, coordinate_system_);
+  yeq_eos_ = rhs.yeq_eos_ != nullptr ? rhs.yeq_eos_->get_clone() : nullptr;
   return *this;
 }
 
@@ -58,6 +63,7 @@ void TovStar::pup(PUP::er& p) {
   p | equation_of_state_;
   p | coordinate_system_;
   p | radial_solution_;
+  p | yeq_eos_;
 }
 
 namespace tov_detail {
@@ -226,6 +232,19 @@ void TovVariables<DataType, Region>::operator()(
     const gsl::not_null<Scalar<DataType>*> electron_fraction,
     [[maybe_unused]] const gsl::not_null<Cache*> cache,
     hydro::Tags::ElectronFraction<DataType> /*meta*/) const {
+  if (yeq_eos != nullptr) {
+    // Query the companion 3D EOS's beta-equilibrium relation at the local
+    // rest-mass density and the EOS's minimum representable temperature
+    // (cold-star limit).
+    const auto& rest_mass_density =
+        cache->get_var(*this, hydro::Tags::RestMassDensity<DataType>{});
+    Scalar<DataType> temperature = make_with_value<Scalar<DataType>>(
+        rest_mass_density, yeq_eos->temperature_lower_bound());
+    *electron_fraction =
+        yeq_eos->equilibrium_electron_fraction_from_density_temperature(
+            rest_mass_density, temperature);
+    return;
+  }
   if constexpr (Region == StarRegion::Exterior) {
     get(*electron_fraction) = 0.45;
   } else {
@@ -763,9 +782,13 @@ void TovVariables<DataType, Region>::operator()(
 PUP::able::PUP_ID TovStar::my_PUP_ID = 0;
 
 bool operator==(const TovStar& lhs, const TovStar& rhs) {
+  const bool yeq_matches =
+      (lhs.yeq_eos_ == nullptr and rhs.yeq_eos_ == nullptr) or
+      (lhs.yeq_eos_ != nullptr and rhs.yeq_eos_ != nullptr and
+       lhs.yeq_eos_->is_equal(*rhs.yeq_eos_));
   return lhs.central_rest_mass_density_ == rhs.central_rest_mass_density_ and
          lhs.coordinate_system_ == rhs.coordinate_system_ and
-         *lhs.equation_of_state_ == *rhs.equation_of_state_;
+         *lhs.equation_of_state_ == *rhs.equation_of_state_ and yeq_matches;
 }
 
 bool operator!=(const TovStar& lhs, const TovStar& rhs) {

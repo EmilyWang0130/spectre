@@ -31,6 +31,7 @@ Background: &background
             PolytropicConstant: 123.6489
             PolytropicExponent: 2.
         Coordinates: Isotropic
+        Yeq: None
     ObjectRight: *star_left
     AngularVelocity: 0.
     Expansion: 0.

@@ -52,10 +52,12 @@ struct MagnetizedTovVariables
       const tnsr::I<DataType, 3>& local_x, const DataType& local_radius,
       const RelativisticEuler::Solutions::TovSolution& local_radial_solution,
       const EquationsOfState::EquationOfState<true, 1>& local_eos,
+      const EquationsOfState::EquationOfState<true, 3>* const local_yeq_eos,
       const std::vector<std::unique_ptr<
           grmhd::AnalyticData::InitialMagneticFields::InitialMagneticField>>&
           mag_fields)
-      : Base(local_x, local_radius, local_radial_solution, local_eos),
+      : Base(local_x, local_radius, local_radial_solution, local_eos,
+             local_yeq_eos),
         magnetic_fields(mag_fields) {}
 
   void operator()(
@@ -128,7 +130,13 @@ class MagnetizedTovStar : public virtual evolution::initial_data::InitialData,
         "Magnetic fields to superpose on the TOV solution."};
   };
 
-  using options = tmpl::push_back<tov_star::options, MagneticFields>;
+  // Deliberately compose from `tov_star::options_without_yeq` so
+  // MagnetizedTovStar's yaml keeps its historical option list. If a
+  // magnetized-TOV-with-beta-eq-Y_e configuration is needed later, extend
+  // this list to include tov_star::Yeq and thread it through the
+  // constructor.
+  using options =
+      tmpl::push_back<tov_star::options_without_yeq, MagneticFields>;
 
   static constexpr Options::String help = {"Magnetized TOV star."};
 

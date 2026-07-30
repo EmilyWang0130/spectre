@@ -33,6 +33,7 @@ Background: &solution
         PolytropicConstant: 1.
         PolytropicExponent: 2
     Coordinates: Isotropic
+    Yeq: None
 
 InitialGuess: Flatness
 

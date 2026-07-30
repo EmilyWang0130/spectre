@@ -51,6 +51,7 @@ InitialData: &InitialData
             PolytropicConstant: 100.0
             PolytropicExponent: 2.0
     Coordinates: Isotropic
+    Yeq: None
 
 EquationOfState:
   FromInitialData

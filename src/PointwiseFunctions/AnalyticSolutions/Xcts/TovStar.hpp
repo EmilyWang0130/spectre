@@ -4,6 +4,8 @@
 #pragma once
 
 #include <limits>
+#include <memory>
+#include <optional>
 #include <ostream>
 
 #include "DataStructures/CachedTempBuffer.hpp"
@@ -201,12 +203,15 @@ class TovStar : public elliptic::analytic_data::AnalyticSolution {
   TovStar& operator=(TovStar&&) = default;
   ~TovStar() = default;
 
-  TovStar(double central_rest_mass_density,
-          std::unique_ptr<EquationsOfState::EquationOfState<true, 1>>
-              equation_of_state,
-          const RelativisticEuler::Solutions::TovCoordinates coordinate_system)
+  TovStar(
+      double central_rest_mass_density,
+      std::unique_ptr<EquationsOfState::EquationOfState<true, 1>>
+          equation_of_state,
+      const RelativisticEuler::Solutions::TovCoordinates coordinate_system,
+      std::optional<std::unique_ptr<EquationsOfState::EquationOfState<true, 3>>>
+          yeq_eos = std::nullopt)
       : tov_star(central_rest_mass_density, std::move(equation_of_state),
-                 coordinate_system) {}
+                 coordinate_system, std::move(yeq_eos)) {}
 
   const EquationsOfState::EquationOfState<true, 1>& equation_of_state() const {
     return tov_star.equation_of_state();

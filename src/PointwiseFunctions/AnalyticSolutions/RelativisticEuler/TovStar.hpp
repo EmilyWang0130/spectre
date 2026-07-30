@@ -5,6 +5,8 @@
 
 #include <cstddef>
 #include <limits>
+#include <memory>
+#include <optional>
 
 #include "DataStructures/CachedTempBuffer.hpp"
 #include "DataStructures/DataBox/Tag.hpp"
@@ -12,6 +14,7 @@
 #include "DataStructures/TaggedTuple.hpp"
 #include "DataStructures/Tensor/EagerMath/Magnitude.hpp"
 #include "DataStructures/Tensor/Tensor.hpp"
+#include "Options/Auto.hpp"
 #include "Options/String.hpp"
 #include "PointwiseFunctions/AnalyticSolutions/AnalyticSolution.hpp"
 #include "PointwiseFunctions/AnalyticSolutions/RelativisticEuler/Solutions.hpp"
@@ -139,16 +142,23 @@ struct TovVariables {
   TovVariables(
       const tnsr::I<DataType, 3>& local_coords, const DataType& local_radius,
       const RelativisticEuler::Solutions::TovSolution& local_radial_solution,
-      const EquationsOfState::EquationOfState<true, 1>& local_eos)
+      const EquationsOfState::EquationOfState<true, 1>& local_eos,
+      const EquationsOfState::EquationOfState<true, 3>* const local_yeq_eos =
+          nullptr)
       : coords(local_coords),
         radius(local_radius),
         radial_solution(local_radial_solution),
-        eos(local_eos) {}
+        eos(local_eos),
+        yeq_eos(local_yeq_eos) {}
 
   const tnsr::I<DataType, 3>& coords;
   const DataType& radius;
   const RelativisticEuler::Solutions::TovSolution& radial_solution;
   const EquationsOfState::EquationOfState<true, 1>& eos;
+  // Optional 3D EoS used only to look up Y_e in beta-equilibrium at T = T_min.
+  // When nullptr, the ElectronFraction operator falls back to the historical
+  // hardcoded constants (0.45 exterior, 0.1 interior).
+  const EquationsOfState::EquationOfState<true, 3>* yeq_eos = nullptr;
 
   void operator()(gsl::not_null<Scalar<DataType>*> mass_over_radius,
                   gsl::not_null<Cache*> cache,
@@ -343,12 +353,43 @@ class TovStar : public virtual evolution::initial_data::InitialData,
         "Areal ('Schwarzschild') or 'Isotropic' coordinates."};
   };
 
+  /// Optional 3D equation of state consulted only for the electron-fraction
+  /// output at beta-equilibrium.
+  ///
+  /// When provided (e.g. a `Tabulated3D` DD2 table), the ElectronFraction
+  /// output of `TovStar::variables(...)` is
+  /// `Y_e = eos_yeq.equilibrium_electron_fraction_from_density_temperature(rho,
+  /// T_min)` where `T_min = eos_yeq.temperature_lower_bound()`.
+  ///
+  /// When omitted, the ElectronFraction output retains the historical
+  /// hardcoded values (0.45 exterior, 0.1 interior) for backwards
+  /// compatibility with existing polytropic-TovStar yamls.
+  ///
+  /// The 1D EOS given via `EquationOfState` is still used for the TOV ODE
+  /// integration itself; this optional 3D EOS is *not* used to change the
+  /// star's mass/radius profile.
+  struct Yeq {
+    static std::string name() { return "Yeq"; }
+    using type = Options::Auto<
+        std::unique_ptr<EquationsOfState::EquationOfState<true, 3>>,
+        Options::AutoLabel::None>;
+    static constexpr Options::String help = {
+        "Optional 3D equation of state used only to look up Y_e at "
+        "beta-equilibrium. When omitted (set to 'None'), Y_e defaults to the "
+        "historical hardcoded constants."};
+  };
+
   static constexpr size_t volume_dim = 3_st;
 
-  using options =
+  /// Options for the plain TovStar with the optional Yeq companion EOS at the
+  /// end. Downstream classes like `MagnetizedTovStar` that append their own
+  /// options via `tmpl::push_back` may want `options_without_yeq` instead if
+  /// they don't want to expose Yeq in their own yaml.
+  using options_without_yeq =
       tmpl::list<CentralDensity,
                  hydro::OptionTags::InitialDataEquationOfState<true, 1>,
                  Coordinates>;
+  using options = tmpl::push_back<options_without_yeq, Yeq>;
 
   static constexpr Options::String help = {
       "A static, spherically-symmetric star found by solving the \n"
@@ -361,11 +402,14 @@ class TovStar : public virtual evolution::initial_data::InitialData,
   TovStar(TovStar&& /*rhs*/) = default;
   TovStar& operator=(TovStar&& /*rhs*/) = default;
   ~TovStar() override = default;
-  TovStar(double central_rest_mass_density,
-          std::unique_ptr<EquationsOfState::EquationOfState<true, 1>>
-              equation_of_state,
-          const RelativisticEuler::Solutions::TovCoordinates coordinate_system =
-              RelativisticEuler::Solutions::TovCoordinates::Schwarzschild);
+  TovStar(
+      double central_rest_mass_density,
+      std::unique_ptr<EquationsOfState::EquationOfState<true, 1>>
+          equation_of_state,
+      const RelativisticEuler::Solutions::TovCoordinates coordinate_system =
+          RelativisticEuler::Solutions::TovCoordinates::Schwarzschild,
+      std::optional<std::unique_ptr<EquationsOfState::EquationOfState<true, 3>>>
+          yeq_eos = std::nullopt);
 
   auto get_clone() const
       -> std::unique_ptr<evolution::initial_data::InitialData> override;
@@ -396,6 +440,12 @@ class TovStar : public virtual evolution::initial_data::InitialData,
     return radial_solution_;
   }
 
+  /// The optional beta-equilibrium electron-fraction EOS, or nullptr if the
+  /// TovStar was constructed without one (historical hardcoded-Y_e mode).
+  const EquationsOfState::EquationOfState<true, 3>* yeq_eos() const {
+    return yeq_eos_.get();
+  }
+
  protected:
   template <template <class, tov_detail::StarRegion> class VarsComputer,
             typename DataType, typename... Tags, typename... VarsComputerArgs>
@@ -420,7 +470,11 @@ class TovStar : public virtual evolution::initial_data::InitialData,
           VarsComputer<DataType, tov_detail::StarRegion::Exterior>;
       typename ExteriorVarsComputer::Cache cache{get_size(radius)};
       ExteriorVarsComputer computer{
-          x, radius, radial_solution_, *equation_of_state_,
+          x,
+          radius,
+          radial_solution_,
+          *equation_of_state_,
+          yeq_eos_.get(),
           std::forward<VarsComputerArgs>(vars_computer_args)...};
       return {cache.get_var(computer, Tags{})...};
     } else if (max(radius) <= outer_radius and
@@ -430,7 +484,11 @@ class TovStar : public virtual evolution::initial_data::InitialData,
           VarsComputer<DataType, tov_detail::StarRegion::Interior>;
       typename InteriorVarsComputer::Cache cache{get_size(radius)};
       InteriorVarsComputer computer{
-          x, radius, radial_solution_, *equation_of_state_,
+          x,
+          radius,
+          radial_solution_,
+          *equation_of_state_,
+          yeq_eos_.get(),
           std::forward<VarsComputerArgs>(vars_computer_args)...};
       return {cache.get_var(computer, Tags{})...};
     } else {
@@ -472,22 +530,31 @@ class TovStar : public virtual evolution::initial_data::InitialData,
         if (get_element(radius, i) > outer_radius) {
           typename ExteriorVarsComputer::Cache cache{1};
           ExteriorVarsComputer computer{
-              x_i, get_element(radius, i), radial_solution_,
+              x_i,
+              get_element(radius, i),
+              radial_solution_,
               *equation_of_state_,
+              yeq_eos_.get(),
               std::forward<VarsComputerArgs>(vars_computer_args)...};
           expand_pack(get_var(i, cache, computer, Tags{})...);
         } else if (get_element(radius, i) > center_radius_cutoff) {
           typename InteriorVarsComputer::Cache cache{1};
           InteriorVarsComputer computer{
-              x_i, get_element(radius, i), radial_solution_,
+              x_i,
+              get_element(radius, i),
+              radial_solution_,
               *equation_of_state_,
+              yeq_eos_.get(),
               std::forward<VarsComputerArgs>(vars_computer_args)...};
           expand_pack(get_var(i, cache, computer, Tags{})...);
         } else {
           typename CenterVarsComputer::Cache cache{1};
           CenterVarsComputer computer{
-              x_i, get_element(radius, i), radial_solution_,
+              x_i,
+              get_element(radius, i),
+              radial_solution_,
               *equation_of_state_,
+              yeq_eos_.get(),
               std::forward<VarsComputerArgs>(vars_computer_args)...};
           expand_pack(get_var(i, cache, computer, Tags{})...);
         }
@@ -524,6 +591,10 @@ class TovStar : public virtual evolution::initial_data::InitialData,
   std::unique_ptr<equation_of_state_type> equation_of_state_;
   RelativisticEuler::Solutions::TovCoordinates coordinate_system_{};
   RelativisticEuler::Solutions::TovSolution radial_solution_{};
+  // Optional 3D EOS consulted only for the ElectronFraction output. See
+  // the `Yeq` option struct for details. `nullptr` restores the historical
+  // hardcoded-constants behavior.
+  std::unique_ptr<EquationsOfState::EquationOfState<true, 3>> yeq_eos_{};
 };
 
 bool operator!=(const TovStar& lhs, const TovStar& rhs);
