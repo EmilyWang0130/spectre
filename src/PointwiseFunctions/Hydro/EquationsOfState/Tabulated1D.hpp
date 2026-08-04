@@ -12,8 +12,11 @@
 #include <boost/preprocessor/tuple/to_list.hpp>
 #include <limits>
 #include <pup.h>
+#include <string>
+#include <vector>
 
 #include "DataStructures/Tensor/TypeAliases.hpp"
+#include "IO/H5/EosTable.hpp"
 #include "Options/String.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
 #include "PointwiseFunctions/Hydro/Units.hpp"
@@ -27,19 +30,31 @@ class DataVector;
 namespace EquationsOfState {
 /*!
  * \ingroup EquationsOfStateGroup
- * \brief Tabulated 1D barotropic equation of state.
+ * \brief Tabulated 1D barotropic equation of state loaded from an h5 file.
  *
- * Stores a projected 1D barotropic slice \f$p(\rho)\f$, \f$\epsilon(\rho)\f$
- * of an underlying 3D equation of state on a uniform grid in either
- * \f$\rho\f$ or \f$\log\rho\f$, and answers all 1D EOS API calls by
- * interpolation on the stored arrays. Intended for use with `TovStar` to
- * drive the TOV ODE integration from a tabulated 3D EOS (e.g. `Tabulated3D`
- * loaded from a CompOSE table) without a parametric fit.
+ * Reads a 1D barotropic slice stored in an `h5::EosTable` subfile — with
+ * `"number density"` as the single independent variable (in
+ * fm\f$^{-3}\f$) and the standard CompOSE-natural datasets
+ * `"pressure"` (MeV/fm\f$^{3}\f$), `"specific internal energy"`
+ * (dimensionless), and `"chi slope"` (\f$d\ln p / d\ln n_b\f$,
+ * dimensionless). Applies the runtime nuclear-to-geometric unit
+ * conversion (same `nb_fm3_to_geom` and `press_MeV_to_geom` constants
+ * used by `Tabulated3D`), computes the specific enthalpy
+ * \f$h = 1 + \epsilon + p/\rho\f$ point-wise, and stores the resulting
+ * five 1D arrays.
  *
- * \note This is the Stage 1 skeleton: the class is factory-registered and
- * Charm-serializable, but all pointwise queries currently throw. Stage 2
- * adds the projection loop and array storage; Stages 3-5 add
- * interpolation, finite-difference derivatives, and the h-inversion.
+ * The intended workflow is symmetric with the 3D pipeline: an offline
+ * Python converter (e.g. `ConvertComposeBetaTo1D.py`) reads a CompOSE
+ * `.beta` ASCII slice and emits the 1D h5 file. Runtime just consumes
+ * it, so the h5 becomes a first-class, inspectable artifact rather than
+ * a hidden per-startup projection.
+ *
+ * \note This is the Stage 2 class: the h5 read + array storage + PUP is
+ * in place, but the pointwise field queries (`pressure_from_density`,
+ * `chi_from_density`, `rest_mass_density_from_enthalpy`, ...) still
+ * throw. Stages 3-5 fill those in with
+ * `intrp::UniformMultiLinearSpanInterpolation<1, N>` on the stored
+ * arrays and a `std::lower_bound` for the h-inversion.
  */
 template <bool IsRelativistic>
 class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
@@ -47,26 +62,26 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
   static constexpr size_t thermodynamic_dim = 1;
   static constexpr bool is_relativistic = IsRelativistic;
 
-  struct NumberOfGridPoints {
-    using type = size_t;
+  struct TableFilename {
+    using type = std::string;
     static constexpr Options::String help = {
-        "Number of grid points in the projected 1D table."};
-    static size_t lower_bound() { return 32; }
+        "Path to the h5 file containing the tabulated 1D EOS."};
   };
 
-  struct LogSpacing {
-    using type = bool;
+  struct TableSubFilename {
+    using type = std::string;
     static constexpr Options::String help = {
-        "If true, the rest mass density grid is log-spaced; else linear."};
+        "Name of the EosTable subfile inside the h5 file (e.g. "
+        "\"dd2.eos_beta\")."};
   };
 
   static constexpr Options::String help = {
-      "A tabulated 1D barotropic equation of state, obtained by projecting "
-      "an underlying 3D equation of state onto a 1D curve (currently only "
-      "cold beta-equilibrium is supported). Stage 1 skeleton: constructor "
-      "stores grid parameters but does not yet build the projection."};
+      "A tabulated 1D barotropic equation of state, loaded from an h5 file "
+      "produced by an offline converter (e.g. ConvertComposeBetaTo1D.py for "
+      "cold beta-equilibrium slices from CompOSE .beta ASCII tables). "
+      "Structurally analogous to Tabulated3D."};
 
-  using options = tmpl::list<NumberOfGridPoints, LogSpacing>;
+  using options = tmpl::list<TableFilename, TableSubFilename>;
 
   Tabulated1D() = default;
   Tabulated1D(const Tabulated1D&) = default;
@@ -75,7 +90,12 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
   Tabulated1D& operator=(Tabulated1D&&) = default;
   ~Tabulated1D() override = default;
 
-  Tabulated1D(size_t number_of_grid_points, bool log_spacing);
+  /// Construct by reading the named subfile from the h5 file at `filename`.
+  Tabulated1D(const std::string& filename, const std::string& subfilename);
+
+  /// Construct directly from an already-opened `h5::EosTable`.
+  /// Useful for tests that build the table in-memory.
+  explicit Tabulated1D(const h5::EosTable& spectre_eos);
 
   std::unique_ptr<EquationOfState<IsRelativistic, 1>> get_clone()
       const override;
@@ -98,25 +118,19 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
       SINGLE_ARG(EquationOfState<IsRelativistic, 1>), Tabulated1D);
 
   /// The lower bound of the rest mass density that is valid for this EOS
-  double rest_mass_density_lower_bound() const override { return 0.0; }
+  double rest_mass_density_lower_bound() const override;
 
   /// The upper bound of the rest mass density that is valid for this EOS
-  double rest_mass_density_upper_bound() const override {
-    return std::numeric_limits<double>::max();
-  }
+  double rest_mass_density_upper_bound() const override;
 
   /// The lower bound of the specific enthalpy that is valid for this EOS
-  double specific_enthalpy_lower_bound() const override {
-    return IsRelativistic ? 1.0 : 0.0;
-  }
+  double specific_enthalpy_lower_bound() const override;
 
   /// The lower bound of the specific internal energy that is valid for this EOS
-  double specific_internal_energy_lower_bound() const override { return 0.0; }
+  double specific_internal_energy_lower_bound() const override;
 
   /// The upper bound of the specific internal energy that is valid for this EOS
-  double specific_internal_energy_upper_bound() const override {
-    return std::numeric_limits<double>::max();
-  }
+  double specific_internal_energy_upper_bound() const override;
 
   /// The vacuum baryon mass for this EoS
   double baryon_mass() const override {
@@ -126,8 +140,19 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
  private:
   EQUATION_OF_STATE_FORWARD_DECLARE_MEMBER_IMPLS(1)
 
-  size_t number_of_grid_points_ = 0;
-  bool log_spacing_ = true;
+  void initialize(const h5::EosTable& spectre_eos);
+
+  // Uniformly log-spaced grid in log(rho_geom). Uniformity is required
+  // by intrp::UniformMultiLinearSpanInterpolation at Stage 3.
+  std::vector<double> log_rho_grid_;
+  // Pressure in geometric units (linear).
+  std::vector<double> pressure_;
+  // Specific internal energy (dimensionless, linear).
+  std::vector<double> specific_internal_energy_;
+  // Specific enthalpy h = 1 + eps + p/rho (dimensionless, linear).
+  std::vector<double> specific_enthalpy_;
+  // d(ln p)/d(ln rho), dimensionless. Chi_geom = (p_geom/rho_geom) * chi_slope.
+  std::vector<double> chi_slope_;
 };
 
 /// \cond
