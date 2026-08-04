@@ -10,19 +10,7 @@
 #include "Utilities/ErrorHandling/Error.hpp"
 
 namespace io {
-namespace {
 
-size_t idx_of(const size_t in, const size_t iT, const size_t iYe,
-              const size_t nN, const size_t nYe) {
-  return (iT * nN + in) * nYe + iYe;
-}
-
-// d(log Q) / d(log x) for a quantity Q sampled at three (or two, at a
-// boundary) consecutive nodes of a log-spaced grid. Returns 0 when any of the
-// Q values involved in the stencil is non-positive: log is undefined there, and
-// returning 0 makes cs² fall back to a defined value at the caller without
-// poisoning the rest of the table. The caller decides whether such fallbacks
-// are acceptable.
 double log_log_derivative(const double q_minus, const double q_center,
                           const double q_plus, const double log_x_minus,
                           const double log_x_center, const double log_x_plus,
@@ -46,6 +34,13 @@ double log_log_derivative(const double q_minus, const double q_center,
     return 0.0;
   }
   return (std::log(q_plus) - std::log(q_minus)) / (log_x_plus - log_x_minus);
+}
+
+namespace {
+
+size_t idx_of(const size_t in, const size_t iT, const size_t iYe,
+              const size_t nN, const size_t nYe) {
+  return (iT * nN + in) * nYe + iYe;
 }
 
 }  // namespace
@@ -127,8 +122,11 @@ DataVector compute_cs2_from_pressure_and_entropy(
     const DataVector& specific_internal_energy,
     const std::vector<double>& number_density_grid,
     const std::vector<double>& temperature_grid, const double neutron_mass_mev,
-    const size_t nN, const size_t nT, const size_t nYe,
-    const double cs2_floor) {
+    const size_t number_density_points, const size_t temperature_points,
+    const size_t electron_fraction_points, const double cs2_floor) {
+  const size_t nN = number_density_points;
+  const size_t nT = temperature_points;
+  const size_t nYe = electron_fraction_points;
   const size_t ntot = nN * nT * nYe;
   ASSERT(pressure.size() == ntot,
          "Pressure size " << pressure.size() << " does not match table size "
@@ -211,7 +209,7 @@ DataVector compute_cs2_from_pressure_and_entropy(
             neutron_mass_mev * (1.0 + specific_internal_energy[idx]) +
             p_center / nb;
 
-        double value;
+        double value = 0.0;
         if (nT > 1) {
           const double dlnp_dlnt = log_log_derivative(
               t_low ? 0.0 : pressure[idx_of(in, iT - 1, iYe, nN, nYe)],
@@ -259,8 +257,11 @@ DataVector compute_cs2_from_pressure_and_entropy(
 DataVector compute_kappa_from_pressure_and_energy(
     const DataVector& pressure, const DataVector& specific_internal_energy,
     const std::vector<double>& temperature_grid, const double neutron_mass_mev,
-    const size_t nN, const size_t nT, const size_t nYe,
-    const double kappa_floor) {
+    const size_t number_density_points, const size_t temperature_points,
+    const size_t electron_fraction_points, const double kappa_floor) {
+  const size_t nN = number_density_points;
+  const size_t nT = temperature_points;
+  const size_t nYe = electron_fraction_points;
   const size_t ntot = nN * nT * nYe;
   ASSERT(pressure.size() == ntot,
          "Pressure size " << pressure.size() << " does not match table size "
@@ -280,7 +281,8 @@ DataVector compute_kappa_from_pressure_and_energy(
   // (or the floor, whichever is larger).
   if (nT < 2) {
     const double fill = (kappa_floor > 0.0) ? kappa_floor : 0.0;
-    return DataVector(ntot, fill);
+    DataVector result(ntot, fill);
+    return result;
   }
 
   for (size_t i = 0; i < nT; ++i) {
@@ -320,7 +322,7 @@ DataVector compute_kappa_from_pressure_and_energy(
         const double eps_lo = specific_internal_energy[idx_lo];
         const double eps_hi = specific_internal_energy[idx_hi];
 
-        double value;
+        double value = 0.0;
         if (p_lo <= 0.0 or p_hi <= 0.0 or p_center <= 0.0) {
           value = kappa_fallback_when_undefined;
         } else {

@@ -11,6 +11,28 @@
 namespace io {
 
 /*!
+ * \brief 3-point log-log finite-difference derivative on a log-spaced grid.
+ *
+ * Returns \f$\mathrm{d}(\ln Q)/\mathrm{d}(\ln x)\f$ evaluated at
+ * `q_center`, using a centered stencil over the three sampled values in the
+ * interior and a 2-point one-sided stencil when `at_low_boundary` or
+ * `at_high_boundary` is true. Returns 0 when any \f$Q\f$ value used by the
+ * stencil is non-positive (log is undefined there); the caller decides
+ * whether that fallback is acceptable.
+ *
+ * The `log_x_*` inputs are precomputed \f$\ln x\f$ values on the log-spaced
+ * abscissa. Used by `ConvertComposeBetaTo1D` to compute the
+ * \f$\chi\f$-slope from tabulated pressure and by
+ * `compute_kappa_from_pressure_and_energy` /
+ * `compute_cs2_from_pressure_and_entropy` inside this file to reconstruct
+ * CompOSE Q11 / Q12 from tabulated pressure and entropy.
+ */
+double log_log_derivative(double q_minus, double q_center, double q_plus,
+                          double log_x_minus, double log_x_center,
+                          double log_x_plus, bool at_low_boundary,
+                          bool at_high_boundary);
+
+/*!
  * \brief Compute \f$\zeta\f$ analytically from the tabulated free-energy
  * derivatives of a CompOSE 3D EoS.
  *
