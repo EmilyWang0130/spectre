@@ -42,7 +42,6 @@ Tabulated1D<IsRelativistic>::Tabulated1D(const Tabulated1D& rhs)
       log_rho_grid_(rhs.log_rho_grid_),
       table_data_(rhs.table_data_),
       specific_enthalpy_(rhs.specific_enthalpy_),
-      chi_slope_(rhs.chi_slope_),
       energy_shift_(rhs.energy_shift_) {
   initialize_interpolator();
 }
@@ -55,7 +54,6 @@ Tabulated1D<IsRelativistic>& Tabulated1D<IsRelativistic>::operator=(
     log_rho_grid_ = rhs.log_rho_grid_;
     table_data_ = rhs.table_data_;
     specific_enthalpy_ = rhs.specific_enthalpy_;
-    chi_slope_ = rhs.chi_slope_;
     energy_shift_ = rhs.energy_shift_;
     initialize_interpolator();
   }
@@ -135,10 +133,10 @@ void Tabulated1D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
   }
   energy_shift_ = (eps_min < 0.0) ? 2.0 * eps_min : 0.0;
 
-  // Fill packed [log_pressure, log(eps - energy_shift)] per grid point.
+  // Fill packed [log_pressure, log(eps - energy_shift), chi_slope]
+  // per grid point.
   table_data_.assign(num_grid_points * NumberOfVars, 0.0);
   specific_enthalpy_.resize(num_grid_points);
-  chi_slope_.resize(num_grid_points);
   for (size_t i = 0; i < num_grid_points; ++i) {
     const double p_geom = press_MeV_to_geom * pressure_data[i];
     const double eps = eps_data[i];
@@ -146,7 +144,7 @@ void Tabulated1D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
     table_data_[i * NumberOfVars + LogPressure] = std::log(p_geom);
     table_data_[i * NumberOfVars + LogShiftedEpsilon] =
         std::log(eps - energy_shift_);
-    chi_slope_[i] = chi_slope_data[i];
+    table_data_[i * NumberOfVars + ChiSlope] = chi_slope_data[i];
     if constexpr (IsRelativistic) {
       specific_enthalpy_[i] = 1.0 + eps + p_geom / rho_geom;
     } else {
@@ -206,7 +204,7 @@ bool Tabulated1D<IsRelativistic>::operator==(
   return log_rho_grid_ == rhs.log_rho_grid_ and
          table_data_ == rhs.table_data_ and
          specific_enthalpy_ == rhs.specific_enthalpy_ and
-         chi_slope_ == rhs.chi_slope_ and energy_shift_ == rhs.energy_shift_;
+         energy_shift_ == rhs.energy_shift_;
 }
 
 template <bool IsRelativistic>
@@ -252,7 +250,6 @@ void Tabulated1D<IsRelativistic>::pup(PUP::er& p) {
   p | log_rho_grid_;
   p | table_data_;
   p | specific_enthalpy_;
-  p | chi_slope_;
   p | energy_shift_;
   if (p.isUnpacking()) {
     initialize_interpolator();
@@ -377,8 +374,41 @@ Tabulated1D<IsRelativistic>::rest_mass_density_from_enthalpy_impl(
 template <bool IsRelativistic>
 template <class DataType>
 Scalar<DataType> Tabulated1D<IsRelativistic>::chi_from_density_impl(
-    const Scalar<DataType>& /*rest_mass_density*/) const {
-  ERROR("Tabulated1D::chi_from_density is not implemented yet.");
+    const Scalar<DataType>& rest_mass_density) const {
+  // chi = dp/drho at fixed epsilon. We stored the dimensionless log-log
+  // slope chi_slope = d(ln p)/d(ln rho) in the packed table and
+  // reconstruct chi = (p_geom / rho_geom) * chi_slope at query time.
+  // The rho_geom used here is the CLAMPED value (matching the density
+  // clamped in the interpolator lookup), not the raw query — otherwise
+  // out-of-range queries would return chi with an inconsistent
+  // pressure/density ratio.
+  const double log_rho_lo = log_rho_grid_.front();
+  const double log_rho_hi = log_rho_grid_.back();
+  Scalar<DataType> result =
+      make_with_value<Scalar<DataType>>(get(rest_mass_density), 0.0);
+  if constexpr (std::is_same_v<DataType, double>) {
+    const double log_rho =
+        clamped_log_rho(get(rest_mass_density), log_rho_lo, log_rho_hi);
+    const auto weights = interpolator_.get_weights(log_rho);
+    const auto interpolated =
+        interpolator_.template interpolate<LogPressure, ChiSlope>(weights);
+    const double p_geom = std::exp(interpolated[0]);
+    const double slope = interpolated[1];
+    get(result) = (p_geom / std::exp(log_rho)) * slope;
+  } else {
+    const auto& rho_arr = get(rest_mass_density);
+    for (size_t i = 0; i < rho_arr.size(); ++i) {
+      const double log_rho =
+          clamped_log_rho(rho_arr[i], log_rho_lo, log_rho_hi);
+      const auto weights = interpolator_.get_weights(log_rho);
+      const auto interpolated =
+          interpolator_.template interpolate<LogPressure, ChiSlope>(weights);
+      const double p_geom = std::exp(interpolated[0]);
+      const double slope = interpolated[1];
+      get(result)[i] = (p_geom / std::exp(log_rho)) * slope;
+    }
+  }
+  return result;
 }
 
 template <bool IsRelativistic>

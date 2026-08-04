@@ -62,13 +62,15 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
   static constexpr size_t thermodynamic_dim = 1;
   static constexpr bool is_relativistic = IsRelativistic;
 
-  /// Index of each field inside `table_data_` (log_pressure, log(eps -
-  /// energy_shift)). Kept as an enum so the compile-time index passed to
+  /// Index of each field inside `table_data_`
+  /// (log_pressure, log(eps - energy_shift), chi_slope). Kept as an enum
+  /// so the compile-time index passed to
   /// `interpolator_.template interpolate<...>` is self-documenting.
   enum InterpolationField : size_t {
     LogPressure = 0,
     LogShiftedEpsilon = 1,
-    NumberOfVars = 2
+    ChiSlope = 2,
+    NumberOfVars = 3
   };
 
   struct TableFilename {
@@ -159,15 +161,15 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
   /// Uniformly log-spaced grid in log(rho_geom). Uniformity is required
   /// by intrp::UniformMultiLinearSpanInterpolation.
   std::vector<double> log_rho_grid_;
-  /// Packed table [log(p_geom), log(eps - energy_shift)] per grid point,
-  /// variable index inner-most (matches SpECTRE's flat C-order convention).
+  /// Packed table [log(p_geom), log(eps - energy_shift), chi_slope] per
+  /// grid point, variable index inner-most (matches SpECTRE's flat
+  /// C-order convention). `chi_slope = d(ln p)/d(ln rho)` is
+  /// dimensionless; the query multiplies by `p_geom/rho_geom` to get
+  /// the dimensional `chi = dp/drho`.
   std::vector<double> table_data_;
   /// h = 1 + eps + p/rho (linear). Kept separate — Stage 5's h -> rho
   /// inversion uses std::lower_bound on this array directly.
   std::vector<double> specific_enthalpy_;
-  /// d(ln p)/d(ln rho), dimensionless. Chi_geom = (p_geom/rho_geom) *
-  /// chi_slope; kept separate for the Stage 4 chi_from_density query.
-  std::vector<double> chi_slope_;
   /// Additive shift on epsilon so that (eps - energy_shift) is strictly
   /// positive and can be stored in log-space. Same convention Tabulated3D
   /// uses. Zero when eps_min >= 0.

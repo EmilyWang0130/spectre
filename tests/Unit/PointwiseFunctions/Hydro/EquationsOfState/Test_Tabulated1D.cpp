@@ -188,6 +188,32 @@ void check_datavector_query_matches_pointwise(
   }
 }
 
+// For the synthetic polytropic slice chi_slope is a constant (=
+// spec.chi_slope_value). Chi_geom at any query rho should equal
+// (p_geom / rho_geom) * chi_slope.
+template <bool IsRelativistic>
+void check_chi_interpolation(
+    const EquationsOfState::Tabulated1D<IsRelativistic>& eos,
+    const SliceSpec& spec) {
+  const double log_lo = std::log(spec.nb_lo_fm3);
+  const double log_hi = std::log(spec.nb_hi_fm3);
+  const size_t n_samples = 25;
+  for (size_t i = 0; i < n_samples; ++i) {
+    const double frac =
+        static_cast<double>(i) / static_cast<double>(n_samples - 1);
+    const double nb = std::exp(log_lo + frac * (log_hi - log_lo));
+    const auto expected = expected_at_nb(nb, spec);
+    const Scalar<double> rho{expected.rho_geom};
+    const auto chi = eos.chi_from_density(rho);
+    const double chi_expected =
+        (expected.p_geom / expected.rho_geom) * spec.chi_slope_value;
+    // chi_slope is stored linearly and constant across the polytropic
+    // slice; log(p) is linear in log(rho); the product is exact to
+    // roundoff.
+    CHECK(get(chi) == approx(chi_expected).epsilon(1e-12));
+  }
+}
+
 // Queries at rho outside the table range should clamp (matching
 // Tabulated3D's convention) — no throw, no NaN.
 template <bool IsRelativistic>
@@ -267,6 +293,8 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated1D",
   check_pressure_and_eps_interpolation(eos_a_rel, spec_a);
   check_pressure_and_eps_interpolation(eos_a_nonrel, spec_a);
   check_datavector_query_matches_pointwise(eos_a_rel, spec_a);
+  check_chi_interpolation(eos_a_rel, spec_a);
+  check_chi_interpolation(eos_a_nonrel, spec_a);
   check_out_of_range_clamps(eos_a_rel);
 
   if (file_system::check_if_file_exists(filename)) {
