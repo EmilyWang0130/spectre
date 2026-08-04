@@ -110,6 +110,102 @@ void check_serialization_and_clone(
   CHECK(clone->is_equal(eos));
 }
 
+// For a synthetic polytropic slice p = A n_b^gamma, eps = B n_b^(gamma-1)
+// in CompOSE-natural units, this predicts the (rho_geom, p_geom, eps)
+// values a query at a given n_b should return through Tabulated1D.
+struct PolytropicExpected {
+  double rho_geom;
+  double p_geom;
+  double eps;
+};
+
+PolytropicExpected expected_at_nb(double nb_fm3, const SliceSpec& spec) {
+  constexpr double nb_fm3_to_geom = hydro::units::nuclear::neutron_mass /
+                                    hydro::units::nuclear::pressure_unit;
+  constexpr double press_MeV_to_geom =
+      1.0 / hydro::units::nuclear::pressure_unit;
+  const double rho_geom = nb_fm3_to_geom * nb_fm3;
+  const double p_MeVfm3 =
+      spec.pressure_amplitude * std::pow(nb_fm3, spec.gamma);
+  const double p_geom = press_MeV_to_geom * p_MeVfm3;
+  const double eps = spec.eps_amplitude * std::pow(nb_fm3, spec.gamma - 1.0);
+  return {rho_geom, p_geom, eps};
+}
+
+// Verify pressure_from_density and specific_internal_energy_from_density
+// return the correct values at grid points (exact interp) and at
+// interior points (linear-in-log-log interpolation error).
+template <bool IsRelativistic>
+void check_pressure_and_eps_interpolation(
+    const EquationsOfState::Tabulated1D<IsRelativistic>& eos,
+    const SliceSpec& spec) {
+  // Sample a range of n_b values inside the grid.
+  const double log_lo = std::log(spec.nb_lo_fm3);
+  const double log_hi = std::log(spec.nb_hi_fm3);
+  const size_t n_samples = 25;
+  for (size_t i = 0; i < n_samples; ++i) {
+    const double frac =
+        static_cast<double>(i) / static_cast<double>(n_samples - 1);
+    const double nb = std::exp(log_lo + frac * (log_hi - log_lo));
+    const auto expected = expected_at_nb(nb, spec);
+    const Scalar<double> rho{expected.rho_geom};
+    const auto p = eos.pressure_from_density(rho);
+    const auto eps = eos.specific_internal_energy_from_density(rho);
+    // For a polytrope, both log(p) and log(eps) are linear in log(rho),
+    // so the log-log linear interp is analytically exact at every point
+    // and agreement should be to roundoff (~1e-14).
+    CHECK(get(p) == approx(expected.p_geom).epsilon(1e-12));
+    CHECK(get(eps) == approx(expected.eps).epsilon(1e-12));
+  }
+}
+
+// DataVector variant: bulk query on 100 random-in-grid densities matches
+// pointwise queries and the analytic expected values.
+template <bool IsRelativistic>
+void check_datavector_query_matches_pointwise(
+    const EquationsOfState::Tabulated1D<IsRelativistic>& eos,
+    const SliceSpec& spec) {
+  const size_t n = 100;
+  DataVector rho(n);
+  DataVector expected_p(n);
+  DataVector expected_eps(n);
+  const double log_lo = std::log(spec.nb_lo_fm3);
+  const double log_hi = std::log(spec.nb_hi_fm3);
+  for (size_t i = 0; i < n; ++i) {
+    const double frac = static_cast<double>(i) / static_cast<double>(n - 1);
+    const double nb = std::exp(log_lo + frac * (log_hi - log_lo));
+    const auto e = expected_at_nb(nb, spec);
+    rho[i] = e.rho_geom;
+    expected_p[i] = e.p_geom;
+    expected_eps[i] = e.eps;
+  }
+  const Scalar<DataVector> rho_scalar{rho};
+  const auto p_bulk = eos.pressure_from_density(rho_scalar);
+  const auto eps_bulk = eos.specific_internal_energy_from_density(rho_scalar);
+  for (size_t i = 0; i < n; ++i) {
+    CHECK(get(p_bulk)[i] == approx(expected_p[i]).epsilon(1e-12));
+    CHECK(get(eps_bulk)[i] == approx(expected_eps[i]).epsilon(1e-12));
+  }
+}
+
+// Queries at rho outside the table range should clamp (matching
+// Tabulated3D's convention) — no throw, no NaN.
+template <bool IsRelativistic>
+void check_out_of_range_clamps(
+    const EquationsOfState::Tabulated1D<IsRelativistic>& eos) {
+  const Scalar<double> rho_lo{0.5 * eos.rest_mass_density_lower_bound()};
+  const Scalar<double> rho_hi{2.0 * eos.rest_mass_density_upper_bound()};
+  const auto p_lo = eos.pressure_from_density(rho_lo);
+  const auto p_hi = eos.pressure_from_density(rho_hi);
+  CHECK(std::isfinite(get(p_lo)));
+  CHECK(std::isfinite(get(p_hi)));
+  // Clamped queries should return the table's endpoint values.
+  const Scalar<double> rho_at_lo{eos.rest_mass_density_lower_bound()};
+  const Scalar<double> rho_at_hi{eos.rest_mass_density_upper_bound()};
+  CHECK(get(p_lo) == approx(get(eos.pressure_from_density(rho_at_lo))));
+  CHECK(get(p_hi) == approx(get(eos.pressure_from_density(rho_at_hi))));
+}
+
 void check_factory_creation(
     const std::string& filename, const std::string& subfilename,
     const EquationsOfState::Tabulated1D<true>& expected) {
@@ -168,6 +264,10 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated1D",
   check_serialization_and_clone(eos_a_nonrel);
   CHECK(eos_a_rel != eos_b_rel);
   check_factory_creation(filename, subfile_a, eos_a_rel);
+  check_pressure_and_eps_interpolation(eos_a_rel, spec_a);
+  check_pressure_and_eps_interpolation(eos_a_nonrel, spec_a);
+  check_datavector_query_matches_pointwise(eos_a_rel, spec_a);
+  check_out_of_range_clamps(eos_a_rel);
 
   if (file_system::check_if_file_exists(filename)) {
     file_system::rm(filename, true);

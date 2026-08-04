@@ -17,6 +17,7 @@
 
 #include "DataStructures/Tensor/TypeAliases.hpp"
 #include "IO/H5/EosTable.hpp"
+#include "NumericalAlgorithms/Interpolation/MultiLinearSpanInterpolation.hpp"
 #include "Options/String.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
 #include "PointwiseFunctions/Hydro/Units.hpp"
@@ -41,26 +42,34 @@ namespace EquationsOfState {
  * conversion (same `nb_fm3_to_geom` and `press_MeV_to_geom` constants
  * used by `Tabulated3D`), computes the specific enthalpy
  * \f$h = 1 + \epsilon + p/\rho\f$ point-wise, and stores the resulting
- * five 1D arrays.
+ * arrays.
  *
- * The intended workflow is symmetric with the 3D pipeline: an offline
- * Python converter (e.g. `ConvertComposeBetaTo1D.py`) reads a CompOSE
- * `.beta` ASCII slice and emits the 1D h5 file. Runtime just consumes
- * it, so the h5 becomes a first-class, inspectable artifact rather than
- * a hidden per-startup projection.
+ * Interpolation at query time uses
+ * `intrp::UniformMultiLinearSpanInterpolation<1, NumberOfVars>` in
+ * `log(\rho_{\rm geom})`, matching the convention of `Tabulated3D`.
+ * Log-space storage of pressure and (shifted) specific internal energy
+ * keeps the interpolation accurate across the many decades DD2 and
+ * similar tables span.
  *
- * \note This is the Stage 2 class: the h5 read + array storage + PUP is
- * in place, but the pointwise field queries (`pressure_from_density`,
- * `chi_from_density`, `rest_mass_density_from_enthalpy`, ...) still
- * throw. Stages 3-5 fill those in with
- * `intrp::UniformMultiLinearSpanInterpolation<1, N>` on the stored
- * arrays and a `std::lower_bound` for the h-inversion.
+ * \note This is the Stage 3 class: `pressure_from_density` and
+ * `specific_internal_energy_from_density` are implemented via the
+ * interpolator. `chi_from_density` (Stage 4) and
+ * `rest_mass_density_from_enthalpy` (Stage 5) still throw.
  */
 template <bool IsRelativistic>
 class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
  public:
   static constexpr size_t thermodynamic_dim = 1;
   static constexpr bool is_relativistic = IsRelativistic;
+
+  /// Index of each field inside `table_data_` (log_pressure, log(eps -
+  /// energy_shift)). Kept as an enum so the compile-time index passed to
+  /// `interpolator_.template interpolate<...>` is self-documenting.
+  enum InterpolationField : size_t {
+    LogPressure = 0,
+    LogShiftedEpsilon = 1,
+    NumberOfVars = 2
+  };
 
   struct TableFilename {
     using type = std::string;
@@ -77,15 +86,15 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
 
   static constexpr Options::String help = {
       "A tabulated 1D barotropic equation of state, loaded from an h5 file "
-      "produced by an offline converter (e.g. ConvertComposeBetaTo1D.py for "
+      "produced by an offline converter (e.g. ConvertComposeBetaTo1D for "
       "cold beta-equilibrium slices from CompOSE .beta ASCII tables). "
       "Structurally analogous to Tabulated3D."};
 
   using options = tmpl::list<TableFilename, TableSubFilename>;
 
   Tabulated1D() = default;
-  Tabulated1D(const Tabulated1D&) = default;
-  Tabulated1D& operator=(const Tabulated1D&) = default;
+  Tabulated1D(const Tabulated1D& rhs);
+  Tabulated1D& operator=(const Tabulated1D& rhs);
   Tabulated1D(Tabulated1D&&) = default;
   Tabulated1D& operator=(Tabulated1D&&) = default;
   ~Tabulated1D() override = default;
@@ -142,17 +151,32 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
 
   void initialize(const h5::EosTable& spectre_eos);
 
-  // Uniformly log-spaced grid in log(rho_geom). Uniformity is required
-  // by intrp::UniformMultiLinearSpanInterpolation at Stage 3.
+  /// Rebuild the non-PUP'd interpolator from the stored grid + table data.
+  /// Called at the end of every path that mutates `log_rho_grid_` or
+  /// `table_data_`: `initialize`, PUP unpack, copy/assign.
+  void initialize_interpolator();
+
+  /// Uniformly log-spaced grid in log(rho_geom). Uniformity is required
+  /// by intrp::UniformMultiLinearSpanInterpolation.
   std::vector<double> log_rho_grid_;
-  // Pressure in geometric units (linear).
-  std::vector<double> pressure_;
-  // Specific internal energy (dimensionless, linear).
-  std::vector<double> specific_internal_energy_;
-  // Specific enthalpy h = 1 + eps + p/rho (dimensionless, linear).
+  /// Packed table [log(p_geom), log(eps - energy_shift)] per grid point,
+  /// variable index inner-most (matches SpECTRE's flat C-order convention).
+  std::vector<double> table_data_;
+  /// h = 1 + eps + p/rho (linear). Kept separate — Stage 5's h -> rho
+  /// inversion uses std::lower_bound on this array directly.
   std::vector<double> specific_enthalpy_;
-  // d(ln p)/d(ln rho), dimensionless. Chi_geom = (p_geom/rho_geom) * chi_slope.
+  /// d(ln p)/d(ln rho), dimensionless. Chi_geom = (p_geom/rho_geom) *
+  /// chi_slope; kept separate for the Stage 4 chi_from_density query.
   std::vector<double> chi_slope_;
+  /// Additive shift on epsilon so that (eps - energy_shift) is strictly
+  /// positive and can be stored in log-space. Same convention Tabulated3D
+  /// uses. Zero when eps_min >= 0.
+  double energy_shift_ = 0.0;
+
+  /// Non-PUP'd; rebuilt from log_rho_grid_ / table_data_ after any state
+  /// change. Docs on the interpolator class note it is intentionally not
+  /// PUPable.
+  intrp::UniformMultiLinearSpanInterpolation<1, NumberOfVars> interpolator_{};
 };
 
 /// \cond

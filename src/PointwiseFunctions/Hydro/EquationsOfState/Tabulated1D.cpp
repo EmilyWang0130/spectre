@@ -3,12 +3,15 @@
 
 #include "PointwiseFunctions/Hydro/EquationsOfState/Tabulated1D.hpp"
 
+#include <algorithm>
+#include <array>
 #include <cmath>
 #include <memory>
 #include <string>
 #include <utility>
 
 #include "DataStructures/DataVector.hpp"
+#include "DataStructures/Index.hpp"
 #include "DataStructures/Tensor/Tensor.hpp"
 #include "IO/H5/AccessType.hpp"
 #include "IO/H5/EosTable.hpp"
@@ -16,6 +19,7 @@
 #include "PointwiseFunctions/Hydro/EquationsOfState/Barotropic2D.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/Barotropic3D.hpp"
 #include "Utilities/ErrorHandling/Error.hpp"
+#include "Utilities/Gsl.hpp"
 
 namespace EquationsOfState {
 
@@ -30,6 +34,32 @@ Tabulated1D<IsRelativistic>::Tabulated1D(const std::string& filename,
 template <bool IsRelativistic>
 Tabulated1D<IsRelativistic>::Tabulated1D(const h5::EosTable& spectre_eos) {
   initialize(spectre_eos);
+}
+
+template <bool IsRelativistic>
+Tabulated1D<IsRelativistic>::Tabulated1D(const Tabulated1D& rhs)
+    : EquationOfState<IsRelativistic, 1>(rhs),
+      log_rho_grid_(rhs.log_rho_grid_),
+      table_data_(rhs.table_data_),
+      specific_enthalpy_(rhs.specific_enthalpy_),
+      chi_slope_(rhs.chi_slope_),
+      energy_shift_(rhs.energy_shift_) {
+  initialize_interpolator();
+}
+
+template <bool IsRelativistic>
+Tabulated1D<IsRelativistic>& Tabulated1D<IsRelativistic>::operator=(
+    const Tabulated1D& rhs) {
+  if (this != &rhs) {
+    EquationOfState<IsRelativistic, 1>::operator=(rhs);
+    log_rho_grid_ = rhs.log_rho_grid_;
+    table_data_ = rhs.table_data_;
+    specific_enthalpy_ = rhs.specific_enthalpy_;
+    chi_slope_ = rhs.chi_slope_;
+    energy_shift_ = rhs.energy_shift_;
+    initialize_interpolator();
+  }
+  return *this;
 }
 
 template <bool IsRelativistic>
@@ -59,13 +89,11 @@ void Tabulated1D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
                                                            << ".");
   }
 
-  // Build the internal log(rho_geom) grid. The h5 stores n_b in fm^-3
-  // (linear or log-spaced per the subfile metadata); we convert to
-  // geometric units by multiplying by nb_fm3_to_geom, then work in
-  // log-space for uniform-in-log interpolation later.
   constexpr double nb_fm3_to_geom = hydro::units::nuclear::neutron_mass /
                                     hydro::units::nuclear::pressure_unit;
   const double log_nb_fm3_to_geom = std::log(nb_fm3_to_geom);
+  constexpr double press_MeV_to_geom =
+      1.0 / hydro::units::nuclear::pressure_unit;
 
   log_rho_grid_.resize(num_grid_points);
   if (grid_uses_log_spacing) {
@@ -78,9 +106,6 @@ void Tabulated1D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
           log_lo + static_cast<double>(i) * dlog + log_nb_fm3_to_geom;
     }
   } else {
-    // Non-log-spaced input grid: keep linear n_b spacing but store log(rho)
-    // for consistency of the query-time transforms. This branch is
-    // supported for completeness; log spacing is the recommended path.
     const double dnb =
         (bounds[1] - bounds[0]) / static_cast<double>(num_grid_points - 1);
     for (size_t i = 0; i < num_grid_points; ++i) {
@@ -89,12 +114,9 @@ void Tabulated1D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
     }
   }
 
-  // Read datasets from the h5 subfile. Same names the offline converter
-  // (Stage 2b) writes.
   const auto pressure_data = spectre_eos.read_quantity("pressure");
   const auto eps_data = spectre_eos.read_quantity("specific internal energy");
   const auto chi_slope_data = spectre_eos.read_quantity("chi slope");
-
   if (pressure_data.size() != num_grid_points or
       eps_data.size() != num_grid_points or
       chi_slope_data.size() != num_grid_points) {
@@ -104,34 +126,41 @@ void Tabulated1D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
           << ", chi slope=" << chi_slope_data.size() << ".");
   }
 
-  constexpr double press_MeV_to_geom =
-      1.0 / hydro::units::nuclear::pressure_unit;
+  // Determine energy_shift so that (eps - energy_shift) is strictly
+  // positive across the table. Matches Tabulated3D::initialize:
+  // if eps_min < 0 the shift is 2 * eps_min (i.e., more negative), else 0.
+  double eps_min = std::numeric_limits<double>::infinity();
+  for (size_t i = 0; i < num_grid_points; ++i) {
+    eps_min = std::min(eps_min, eps_data[i]);
+  }
+  energy_shift_ = (eps_min < 0.0) ? 2.0 * eps_min : 0.0;
 
-  pressure_.resize(num_grid_points);
-  specific_internal_energy_.resize(num_grid_points);
+  // Fill packed [log_pressure, log(eps - energy_shift)] per grid point.
+  table_data_.assign(num_grid_points * NumberOfVars, 0.0);
   specific_enthalpy_.resize(num_grid_points);
   chi_slope_.resize(num_grid_points);
   for (size_t i = 0; i < num_grid_points; ++i) {
-    pressure_[i] = press_MeV_to_geom * pressure_data[i];
-    specific_internal_energy_[i] = eps_data[i];
-    chi_slope_[i] = chi_slope_data[i];
+    const double p_geom = press_MeV_to_geom * pressure_data[i];
+    const double eps = eps_data[i];
     const double rho_geom = std::exp(log_rho_grid_[i]);
+    table_data_[i * NumberOfVars + LogPressure] = std::log(p_geom);
+    table_data_[i * NumberOfVars + LogShiftedEpsilon] =
+        std::log(eps - energy_shift_);
+    chi_slope_[i] = chi_slope_data[i];
     if constexpr (IsRelativistic) {
-      specific_enthalpy_[i] =
-          1.0 + specific_internal_energy_[i] + pressure_[i] / rho_geom;
+      specific_enthalpy_[i] = 1.0 + eps + p_geom / rho_geom;
     } else {
-      specific_enthalpy_[i] =
-          specific_internal_energy_[i] + pressure_[i] / rho_geom;
+      specific_enthalpy_[i] = eps + p_geom / rho_geom;
     }
   }
 
   // Strict-monotonicity checks. p and h must be strictly increasing in rho
   // for log-space pressure interpolation and h -> rho inversion to work.
   for (size_t i = 1; i < num_grid_points; ++i) {
-    if (not(pressure_[i] > pressure_[i - 1])) {
+    if (not(pressure_data[i] > pressure_data[i - 1])) {
       ERROR("Tabulated1D: loaded pressure is not strictly monotonic. p["
-            << i - 1 << "] = " << pressure_[i - 1] << ", p[" << i
-            << "] = " << pressure_[i] << " at log(rho)[" << i
+            << i - 1 << "] = " << pressure_data[i - 1] << ", p[" << i
+            << "] = " << pressure_data[i] << " at log(rho)[" << i
             << "] = " << log_rho_grid_[i]
             << ". Log-space interpolation on p requires positive, "
                "strictly-monotonic p.");
@@ -147,6 +176,23 @@ void Tabulated1D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
              "check the input h5 for physical consistency.");
     }
   }
+
+  initialize_interpolator();
+}
+
+template <bool IsRelativistic>
+void Tabulated1D<IsRelativistic>::initialize_interpolator() {
+  if (log_rho_grid_.size() < 2 or
+      table_data_.size() != log_rho_grid_.size() * NumberOfVars) {
+    return;
+  }
+  Index<1> num_x_points;
+  num_x_points[0] = log_rho_grid_.size();
+  const std::array<gsl::span<const double>, 1> independent_data_view{
+      gsl::span<const double>{log_rho_grid_.data(), log_rho_grid_.size()}};
+  interpolator_ = intrp::UniformMultiLinearSpanInterpolation<1, NumberOfVars>(
+      independent_data_view, {table_data_.data(), table_data_.size()},
+      num_x_points);
 }
 
 EQUATION_OF_STATE_MEMBER_DEFINITIONS(template <bool IsRelativistic>,
@@ -157,10 +203,10 @@ EQUATION_OF_STATE_MEMBER_DEFINITIONS(template <bool IsRelativistic>,
 template <bool IsRelativistic>
 bool Tabulated1D<IsRelativistic>::operator==(
     const Tabulated1D<IsRelativistic>& rhs) const {
-  return log_rho_grid_ == rhs.log_rho_grid_ and pressure_ == rhs.pressure_ and
-         specific_internal_energy_ == rhs.specific_internal_energy_ and
+  return log_rho_grid_ == rhs.log_rho_grid_ and
+         table_data_ == rhs.table_data_ and
          specific_enthalpy_ == rhs.specific_enthalpy_ and
-         chi_slope_ == rhs.chi_slope_;
+         chi_slope_ == rhs.chi_slope_ and energy_shift_ == rhs.energy_shift_;
 }
 
 template <bool IsRelativistic>
@@ -204,10 +250,13 @@ template <bool IsRelativistic>
 void Tabulated1D<IsRelativistic>::pup(PUP::er& p) {
   EquationOfState<IsRelativistic, 1>::pup(p);
   p | log_rho_grid_;
-  p | pressure_;
-  p | specific_internal_energy_;
+  p | table_data_;
   p | specific_enthalpy_;
   p | chi_slope_;
+  p | energy_shift_;
+  if (p.isUnpacking()) {
+    initialize_interpolator();
+  }
 }
 
 template <bool IsRelativistic>
@@ -232,22 +281,89 @@ double Tabulated1D<IsRelativistic>::specific_enthalpy_lower_bound() const {
 template <bool IsRelativistic>
 double Tabulated1D<IsRelativistic>::specific_internal_energy_lower_bound()
     const {
-  return specific_internal_energy_.empty() ? 0.0
-                                           : specific_internal_energy_.front();
+  if (table_data_.size() < NumberOfVars) {
+    return 0.0;
+  }
+  return std::exp(table_data_[LogShiftedEpsilon]) + energy_shift_;
 }
 
 template <bool IsRelativistic>
 double Tabulated1D<IsRelativistic>::specific_internal_energy_upper_bound()
     const {
-  return specific_internal_energy_.empty() ? std::numeric_limits<double>::max()
-                                           : specific_internal_energy_.back();
+  if (table_data_.size() < NumberOfVars) {
+    return std::numeric_limits<double>::max();
+  }
+  const size_t last = log_rho_grid_.size() - 1;
+  return std::exp(table_data_[last * NumberOfVars + LogShiftedEpsilon]) +
+         energy_shift_;
 }
+
+namespace {
+// Clamp rho to the table's density range and take log. Mirrors what
+// Tabulated3D does in convert_to_table_quantities.
+double clamped_log_rho(const double rho, const double log_rho_lo,
+                       const double log_rho_hi) {
+  return std::min(std::max(std::log(rho), log_rho_lo), log_rho_hi);
+}
+}  // namespace
 
 template <bool IsRelativistic>
 template <class DataType>
 Scalar<DataType> Tabulated1D<IsRelativistic>::pressure_from_density_impl(
-    const Scalar<DataType>& /*rest_mass_density*/) const {
-  ERROR("Tabulated1D::pressure_from_density is not implemented yet.");
+    const Scalar<DataType>& rest_mass_density) const {
+  const double log_rho_lo = log_rho_grid_.front();
+  const double log_rho_hi = log_rho_grid_.back();
+  Scalar<DataType> result =
+      make_with_value<Scalar<DataType>>(get(rest_mass_density), 0.0);
+  if constexpr (std::is_same_v<DataType, double>) {
+    const double log_rho =
+        clamped_log_rho(get(rest_mass_density), log_rho_lo, log_rho_hi);
+    const auto weights = interpolator_.get_weights(log_rho);
+    get(result) =
+        std::exp(interpolator_.template interpolate<LogPressure>(weights)[0]);
+  } else {
+    const auto& rho_arr = get(rest_mass_density);
+    for (size_t i = 0; i < rho_arr.size(); ++i) {
+      const double log_rho =
+          clamped_log_rho(rho_arr[i], log_rho_lo, log_rho_hi);
+      const auto weights = interpolator_.get_weights(log_rho);
+      get(result)[i] =
+          std::exp(interpolator_.template interpolate<LogPressure>(weights)[0]);
+    }
+  }
+  return result;
+}
+
+template <bool IsRelativistic>
+template <class DataType>
+Scalar<DataType>
+Tabulated1D<IsRelativistic>::specific_internal_energy_from_density_impl(
+    const Scalar<DataType>& rest_mass_density) const {
+  const double log_rho_lo = log_rho_grid_.front();
+  const double log_rho_hi = log_rho_grid_.back();
+  Scalar<DataType> result =
+      make_with_value<Scalar<DataType>>(get(rest_mass_density), 0.0);
+  if constexpr (std::is_same_v<DataType, double>) {
+    const double log_rho =
+        clamped_log_rho(get(rest_mass_density), log_rho_lo, log_rho_hi);
+    const auto weights = interpolator_.get_weights(log_rho);
+    get(result) =
+        std::exp(
+            interpolator_.template interpolate<LogShiftedEpsilon>(weights)[0]) +
+        energy_shift_;
+  } else {
+    const auto& rho_arr = get(rest_mass_density);
+    for (size_t i = 0; i < rho_arr.size(); ++i) {
+      const double log_rho =
+          clamped_log_rho(rho_arr[i], log_rho_lo, log_rho_hi);
+      const auto weights = interpolator_.get_weights(log_rho);
+      get(result)[i] =
+          std::exp(interpolator_.template interpolate<LogShiftedEpsilon>(
+              weights)[0]) +
+          energy_shift_;
+    }
+  }
+  return result;
 }
 
 template <bool IsRelativistic>
@@ -256,16 +372,6 @@ Scalar<DataType>
 Tabulated1D<IsRelativistic>::rest_mass_density_from_enthalpy_impl(
     const Scalar<DataType>& /*specific_enthalpy*/) const {
   ERROR("Tabulated1D::rest_mass_density_from_enthalpy is not implemented yet.");
-}
-
-template <bool IsRelativistic>
-template <class DataType>
-Scalar<DataType>
-Tabulated1D<IsRelativistic>::specific_internal_energy_from_density_impl(
-    const Scalar<DataType>& /*rest_mass_density*/) const {
-  ERROR(
-      "Tabulated1D::specific_internal_energy_from_density is not implemented "
-      "yet.");
 }
 
 template <bool IsRelativistic>
@@ -279,10 +385,9 @@ template <bool IsRelativistic>
 template <class DataType>
 Scalar<DataType>
 Tabulated1D<IsRelativistic>::kappa_times_p_over_rho_squared_from_density_impl(
-    const Scalar<DataType>& /*rest_mass_density*/) const {
-  ERROR(
-      "Tabulated1D::kappa_times_p_over_rho_squared_from_density is not "
-      "implemented yet.");
+    const Scalar<DataType>& rest_mass_density) const {
+  // Barotropic: p = p(rho), so kappa = dp/deps|_rho = 0.
+  return make_with_value<Scalar<DataType>>(get(rest_mass_density), 0.0);
 }
 }  // namespace EquationsOfState
 
