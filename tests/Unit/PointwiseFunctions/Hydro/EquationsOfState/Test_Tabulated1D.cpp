@@ -214,6 +214,59 @@ void check_chi_interpolation(
   }
 }
 
+// h -> rho inversion. Round-trip test: pick random rho in-grid, get h
+// from specific_internal_energy + pressure, invert h -> rho, verify we
+// recover the original rho.
+template <bool IsRelativistic>
+void check_h_to_rho_roundtrip(
+    const EquationsOfState::Tabulated1D<IsRelativistic>& eos,
+    const SliceSpec& spec) {
+  const double log_lo = std::log(spec.nb_lo_fm3);
+  const double log_hi = std::log(spec.nb_hi_fm3);
+  const size_t n_samples = 25;
+  for (size_t i = 0; i < n_samples; ++i) {
+    const double frac =
+        static_cast<double>(i) / static_cast<double>(n_samples - 1);
+    const double nb = std::exp(log_lo + frac * (log_hi - log_lo));
+    const auto expected = expected_at_nb(nb, spec);
+    // Compute h from the analytic values (matches Tabulated1D::initialize).
+    double h_expected = 0.0;
+    if constexpr (IsRelativistic) {
+      h_expected = 1.0 + expected.eps + expected.p_geom / expected.rho_geom;
+    } else {
+      h_expected = expected.eps + expected.p_geom / expected.rho_geom;
+    }
+    const Scalar<double> h_scalar{h_expected};
+    const auto rho_recovered = eos.rest_mass_density_from_enthalpy(h_scalar);
+    // Linear interp in log(rho) is not analytically exact for a
+    // polytropic h(rho) (which is a nonlinear function of rho),
+    // so we allow a modest interpolation-error tolerance. With 64
+    // log-spaced grid points across 3 decades, the interp error is
+    // O((delta log rho)^2 * curvature), typically < 0.1%.
+    CHECK(get(rho_recovered) == approx(expected.rho_geom).epsilon(2e-3));
+  }
+}
+
+// Out-of-range h queries should clamp to the endpoint density.
+template <bool IsRelativistic>
+void check_h_to_rho_clamps(
+    const EquationsOfState::Tabulated1D<IsRelativistic>& eos) {
+  // h at the upper end of the density grid — larger than any
+  // physically-reachable h inside the table.
+  const Scalar<double> rho_max{eos.rest_mass_density_upper_bound()};
+  const double h_at_rho_max =
+      1.0 + get(eos.specific_internal_energy_from_density(rho_max)) +
+      get(eos.pressure_from_density(rho_max)) / get(rho_max);
+  const double h_below = 0.5 * eos.specific_enthalpy_lower_bound();
+  const double h_above = 2.0 * h_at_rho_max;
+  const auto rho_below =
+      eos.rest_mass_density_from_enthalpy(Scalar<double>{h_below});
+  const auto rho_above =
+      eos.rest_mass_density_from_enthalpy(Scalar<double>{h_above});
+  CHECK(get(rho_below) == approx(eos.rest_mass_density_lower_bound()));
+  CHECK(get(rho_above) == approx(eos.rest_mass_density_upper_bound()));
+}
+
 // Queries at rho outside the table range should clamp (matching
 // Tabulated3D's convention) — no throw, no NaN.
 template <bool IsRelativistic>
@@ -295,6 +348,8 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated1D",
   check_datavector_query_matches_pointwise(eos_a_rel, spec_a);
   check_chi_interpolation(eos_a_rel, spec_a);
   check_chi_interpolation(eos_a_nonrel, spec_a);
+  check_h_to_rho_roundtrip(eos_a_rel, spec_a);
+  check_h_to_rho_clamps(eos_a_rel);
   check_out_of_range_clamps(eos_a_rel);
 
   if (file_system::check_if_file_exists(filename)) {

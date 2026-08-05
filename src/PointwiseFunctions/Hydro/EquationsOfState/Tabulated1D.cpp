@@ -281,7 +281,11 @@ double Tabulated1D<IsRelativistic>::specific_internal_energy_lower_bound()
   if (table_data_.size() < NumberOfVars) {
     return 0.0;
   }
-  return std::exp(table_data_[LogShiftedEpsilon]) + energy_shift_;
+  // Grid point 0's LogShiftedEpsilon slot. Explicit form (instead of
+  // relying on LogShiftedEpsilon == 1) so this stays correct if the
+  // enum order in InterpolationField is ever rearranged.
+  return std::exp(table_data_[0 * NumberOfVars + LogShiftedEpsilon]) +
+         energy_shift_;
 }
 
 template <bool IsRelativistic>
@@ -363,12 +367,52 @@ Tabulated1D<IsRelativistic>::specific_internal_energy_from_density_impl(
   return result;
 }
 
+namespace {
+// Invert h -> rho by bracketing h in the strictly-monotonic
+// `specific_enthalpy_` array with std::lower_bound, then linearly
+// interpolating in `log_rho_grid_`. Out-of-range queries clamp to the
+// endpoint density (matches Tabulated3D's convention for other queries;
+// TovSolution handles the true-vacuum h==1 special case upstream).
+double invert_h_to_rho(const double h_query,
+                       const std::vector<double>& specific_enthalpy,
+                       const std::vector<double>& log_rho_grid) {
+  if (h_query <= specific_enthalpy.front()) {
+    return std::exp(log_rho_grid.front());
+  }
+  if (h_query >= specific_enthalpy.back()) {
+    return std::exp(log_rho_grid.back());
+  }
+  const auto upper = std::lower_bound(specific_enthalpy.begin(),
+                                      specific_enthalpy.end(), h_query);
+  const size_t i_hi = static_cast<size_t>(upper - specific_enthalpy.begin());
+  const size_t i_lo = i_hi - 1;
+  const double h_lo = specific_enthalpy[i_lo];
+  const double h_hi = specific_enthalpy[i_hi];
+  const double frac = (h_query - h_lo) / (h_hi - h_lo);
+  const double log_rho =
+      (1.0 - frac) * log_rho_grid[i_lo] + frac * log_rho_grid[i_hi];
+  return std::exp(log_rho);
+}
+}  // namespace
+
 template <bool IsRelativistic>
 template <class DataType>
 Scalar<DataType>
 Tabulated1D<IsRelativistic>::rest_mass_density_from_enthalpy_impl(
-    const Scalar<DataType>& /*specific_enthalpy*/) const {
-  ERROR("Tabulated1D::rest_mass_density_from_enthalpy is not implemented yet.");
+    const Scalar<DataType>& specific_enthalpy) const {
+  Scalar<DataType> result =
+      make_with_value<Scalar<DataType>>(get(specific_enthalpy), 0.0);
+  if constexpr (std::is_same_v<DataType, double>) {
+    get(result) = invert_h_to_rho(get(specific_enthalpy), specific_enthalpy_,
+                                  log_rho_grid_);
+  } else {
+    const auto& h_arr = get(specific_enthalpy);
+    for (size_t i = 0; i < h_arr.size(); ++i) {
+      get(result)[i] =
+          invert_h_to_rho(h_arr[i], specific_enthalpy_, log_rho_grid_);
+    }
+  }
+  return result;
 }
 
 template <bool IsRelativistic>
