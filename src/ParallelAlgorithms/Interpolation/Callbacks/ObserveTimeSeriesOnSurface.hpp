@@ -40,33 +40,40 @@ namespace callbacks {
 
 namespace detail {
 
-template<typename T>
+template <typename T>
 struct is_array_of_double : std::false_type {};
 
-template<std::size_t N>
+template <std::size_t N>
 struct is_array_of_double<std::array<double, N>> : std::true_type {};
 
 template <typename... Ts>
 auto make_legend(tmpl::list<Ts...> /* meta */) {
-    std::vector<std::string> legend = {"Time"};
+  std::vector<std::string> legend = {"Time"};
 
-    [[maybe_unused]] auto append_tags = [&legend](auto tag) {
-      using TagType = decltype(tag);
-      using ReturnType = typename TagType::type;
+  [[maybe_unused]] auto append_tags = [&legend](auto tag) {
+    using TagType = decltype(tag);
+    using ReturnType = typename TagType::type;
 
-      if constexpr (is_array_of_double<ReturnType>::value) {
+    if constexpr (is_array_of_double<ReturnType>::value) {
+      constexpr size_t array_size = std::tuple_size<ReturnType>::value;
+      if constexpr (array_size == 3) {
         constexpr std::array<const char*, 3> suffix = {"_x", "_y", "_z"};
-        for (size_t i = 0; i < std::tuple_size<ReturnType>::value; ++i) {
+        for (size_t i = 0; i < array_size; ++i) {
           legend.push_back(db::tag_name<TagType>() + gsl::at(suffix, i));
         }
       } else {
-        legend.push_back(db::tag_name<TagType>());
+        for (size_t i = 0; i < array_size; ++i) {
+          legend.push_back(db::tag_name<TagType>() + "_" + std::to_string(i));
+        }
       }
-    };
+    } else {
+      legend.push_back(db::tag_name<TagType>());
+    }
+  };
 
-    (append_tags(Ts{}), ...);
+  (append_tags(Ts{}), ...);
 
-    return legend;
+  return legend;
 }
 
 template <typename DbTags, typename... Ts>

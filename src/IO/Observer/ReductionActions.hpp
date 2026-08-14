@@ -230,9 +230,10 @@ void append_to_reduction_data(
     const gsl::not_null<std::vector<double>*> all_reduction_data,
     const std::vector<T>& t);
 
+template <size_t N>
 void append_to_reduction_data(
     gsl::not_null<std::vector<double>*> all_reduction_data,
-    const std::array<double, 3>& t);
+    const std::array<double, N>& t);
 
 template <typename... Ts, size_t... Is>
 void write_data(const std::string& subfile_name,
