@@ -33,61 +33,29 @@ class er;
 
 namespace grmhd::ValenciaDivClean::BoundaryCorrections {
 /*!
- * \brief An HLL Riemann solver
+ * \brief The HLLD Riemann solver of \cite Mignone2009 (MUB2009).
  *
- * Let \f$U\f$ be the evolved variable, \f$F^i\f$ the flux, and \f$n_i\f$ be the
- * outward directed unit normal to the interface. Denoting \f$F := n_i F^i\f$,
- * the HLL boundary correction is \cite Harten1983
+ * The HLLD solver restores the two Alfv&eacute;n (rotational) waves and the
+ * contact wave on top of the outer fast magnetosonic waves, giving a five-wave
+ * approximation of the Riemann fan. Compared to HLL it resolves contact and
+ * rotational discontinuities much more sharply (at the cost of a non-linear
+ * solve for the total pressure across the fan).
  *
- * \f{align*}
- * G_\text{HLL} = \frac{\lambda_\text{max} F_\text{int} +
- * \lambda_\text{min} F_\text{ext}}{\lambda_\text{max} - \lambda_\text{min}}
- * - \frac{\lambda_\text{min}\lambda_\text{max}}{\lambda_\text{max} -
- *   \lambda_\text{min}} \left(U_\text{int} - U_\text{ext}\right)
- * \f}
+ * The Riemann problem is solved in the frame normal to the interface. In flat
+ * space (lapse \f$\alpha=1\f$, shift \f$\beta^i=0\f$, \f$\sqrt{\gamma}=1\f$)
+ * the densitized conserved variables reduce to the special-relativistic
+ * conserved variables and this reproduces the standard MUB2009 solver; that is
+ * the regime of the Mattia & Mignone (2022) test suite used for validation.
  *
- * where "int" and "ext" stand for interior and exterior.
- * \f$\lambda_\text{min}\f$ and \f$\lambda_\text{max}\f$ are defined as
+ * If the total-pressure solve fails, or the intermediate states are unphysical,
+ * the solver falls back to the HLL flux, so it is at least as robust as HLL.
  *
- * \f{align*}
- * \lambda_\text{min} &=
- * \text{min}\left(\lambda^{-}_\text{int},-\lambda^{+}_\text{ext}, 0\right) \\
- * \lambda_\text{max} &=
- * \text{max}\left(\lambda^{+}_\text{int},-\lambda^{-}_\text{ext}, 0\right)
- * \f}
- *
- * where \f$\lambda^{+}\f$ (\f$\lambda^{-}\f$) is the largest characteristic
- * speed in the outgoing (ingoing) direction. Note the minus signs in front of
- * \f$\lambda^{\pm}_\text{ext}\f$, which is because an outgoing speed w.r.t. the
- * neighboring element is an ingoing speed w.r.t. the local element, and vice
- * versa. Similarly, the \f$F_{\text{ext}}\f$ term in \f$G_\text{HLL}\f$ has a
- * positive sign because the outward directed normal of the neighboring element
- * has the opposite sign, i.e. \f$n_i^{\text{ext}}=-n_i^{\text{int}}\f$.
- *
- * The characteristic/signal speeds are given in the documentation for
- * `grmhd::ValenciaDivClean::characteristic_speeds()`. Since the fluid is
- * travelling slower than the speed of light, the speeds we are interested in
- * are
- *
- * \f{align*}{
- *   \lambda^{\pm}&=\pm\alpha-\beta^i n_i,
- * \f}
- *
- * which correspond to the divergence cleaning field.
- *
- * \note
- * - In the strong form the `dg_boundary_terms` function returns
- *   \f$G - F_\text{int}\f$
- * - For either \f$\lambda_\text{min} = 0\f$ or \f$\lambda_\text{max} = 0\f$
- *   (i.e. all characteristics move in the same direction) the HLL boundary
- *   correction reduces to pure upwinding.
- * - Some references use \f$S\f$ instead of \f$\lambda\f$ for the
- *   signal/characteristic speeds
- * - It may be possible to use the slower speeds for the magnetic field and
- *   fluid part of the system in order to make the flux less dissipative for
- *   those variables.
+ * The characteristic/signal speeds are those of
+ * `grmhd::ValenciaDivClean::characteristic_speeds()`; the divergence-cleaning
+ * field \f$\tilde\Phi\f$ is not part of the HLLD fan and is treated with the
+ * HLL flux.
  */
-class Hll final : public evolution::BoundaryCorrection {
+class Hlld final : public evolution::BoundaryCorrection {
  public:
   struct LargestOutgoingCharSpeed : db::SimpleTag {
     using type = Scalar<DataVector>;
@@ -95,14 +63,15 @@ class Hll final : public evolution::BoundaryCorrection {
   struct LargestIngoingCharSpeed : db::SimpleTag {
     using type = Scalar<DataVector>;
   };
-  /// Interface unit normal (covector), used to project the normal magnetic
-  /// field for the divergence-cleaning (Phi, B_n) subsystem.
+  // The interface unit normal (interior side) is needed in dg_boundary_terms to
+  // solve the 1D Riemann problem in the direction normal to the interface.
   struct InterfaceUnitNormal : db::SimpleTag {
     using type = tnsr::i<DataVector, 3, Frame::Inertial>;
   };
-  /// |lapse - 1| + |shift|, a measure of how far the background is from flat.
-  /// The scalar/MHD split only holds in flat space; where this is nonzero the
-  /// boundary correction falls back to the standard (light-speed) HLL flux.
+  // Departure of the metric from flat space, |lapse-1| + |shift| +
+  // |sqrt(det)-1|. The five-wave fan is reconstructed assuming flat space (the
+  // regime of the relativistic M&M tests); where the metric is curved we fall
+  // back to HLL.
   struct MetricFlatness : db::SimpleTag {
     using type = Scalar<DataVector>;
   };
@@ -122,27 +91,30 @@ class Hll final : public evolution::BoundaryCorrection {
   using options =
       tmpl::list<MagneticFieldMagnitudeForHydro, LightSpeedDensityCutoff>;
   static constexpr Options::String help = {
-      "Computes the HLL boundary correction term for the GRMHD system."};
+      "Computes the HLLD boundary correction term for the GRMHD system."};
 
-  Hll() = default;
-  Hll(const Hll&) = default;
-  Hll& operator=(const Hll&) = default;
-  Hll(Hll&&) = default;
-  Hll& operator=(Hll&&) = default;
-  ~Hll() override = default;
+  Hlld() = default;
+  Hlld(const Hlld&) = default;
+  Hlld& operator=(const Hlld&) = default;
+  Hlld(Hlld&&) = default;
+  Hlld& operator=(Hlld&&) = default;
+  ~Hlld() override = default;
 
-  Hll(double magnetic_field_magnitude_for_hydro,
-      double light_speed_density_cutoff);
+  Hlld(double magnetic_field_magnitude_for_hydro,
+       double light_speed_density_cutoff);
 
   /// \cond
-  explicit Hll(CkMigrateMessage* /*unused*/);
+  explicit Hlld(CkMigrateMessage* /*unused*/);
   using PUP::able::register_constructor;
-  WRAPPED_PUPable_decl_template(Hll);  // NOLINT
+  WRAPPED_PUPable_decl_template(Hlld);  // NOLINT
   /// \endcond
   void pup(PUP::er& p) override;  // NOLINT
 
   std::unique_ptr<BoundaryCorrection> get_clone() const override;
 
+  // In addition to what HLL packages (conserved vars, their normal fluxes, and
+  // the two extreme char speeds) HLLD needs the primitive state on each side to
+  // reconstruct the Alfven/contact fan.
   using dg_package_field_tags = tmpl::list<
       Tags::TildeD, Tags::TildeYe, Tags::TildeTau,
       Tags::TildeS<Frame::Inertial>, Tags::TildeB<Frame::Inertial>,
@@ -170,10 +142,7 @@ class Hll final : public evolution::BoundaryCorrection {
                  hydro::Tags::LorentzFactor<DataVector>>;
   using dg_package_data_volume_tags =
       tmpl::list<hydro::Tags::GrmhdEquationOfState>;
-  // The equation of state is needed in dg_boundary_terms to compute the
-  // fast-magnetosonic HLL bounds at the averaged interface state.
-  using dg_boundary_terms_volume_tags =
-      tmpl::list<hydro::Tags::GrmhdEquationOfState>;
+  using dg_boundary_terms_volume_tags = tmpl::list<>;
 
   double dg_package_data(
       gsl::not_null<Scalar<DataVector>*> packaged_tilde_d,
@@ -290,16 +259,15 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& pressure_ext,
       const Scalar<DataVector>& lorentz_factor_ext,
       const Scalar<DataVector>& specific_internal_energy_ext,
-      dg::Formulation dg_formulation,
-      const EquationsOfState::EquationOfState<true, 3>& equation_of_state);
+      dg::Formulation dg_formulation);
 
  private:
-  friend bool operator==(const Hll& lhs, const Hll& rhs);
+  friend bool operator==(const Hlld& lhs, const Hlld& rhs);
 
   double magnetic_field_magnitude_for_hydro_{
       std::numeric_limits<double>::signaling_NaN()};
   double light_speed_density_cutoff_{
       std::numeric_limits<double>::signaling_NaN()};
 };
-bool operator!=(const Hll& lhs, const Hll& rhs);
+bool operator!=(const Hlld& lhs, const Hlld& rhs);
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections

@@ -4,6 +4,7 @@
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/TimeDerivativeTerms.hpp"
 
 #include <cstddef>
+#include <utility>
 
 #include "DataStructures/DataVector.hpp"
 #include "DataStructures/Tensor/EagerMath/DotProduct.hpp"
@@ -101,6 +102,14 @@ evolution::dg::TimeDerivativeDecisions<3> TimeDerivativeTerms::apply(
   *temp_shift = shift;
   *temp_spatial_metric = spatial_metric;
   *temp_inverse_spatial_metric = inv_spatial_metric;
+  const size_t number_of_points = get(lapse).size();
+  for (size_t i = 0; i < 3; ++i) {
+    for (size_t j = i; j < 3; ++j) {
+      make_const_view(
+          make_not_null(&std::as_const(*temp_spatial_metric).get(i, j)),
+          spatial_metric.get(i, j), 0, number_of_points);
+    }
+  }
 
   raise_or_lower_index(spatial_velocity_one_form, spatial_velocity,
                        spatial_metric);

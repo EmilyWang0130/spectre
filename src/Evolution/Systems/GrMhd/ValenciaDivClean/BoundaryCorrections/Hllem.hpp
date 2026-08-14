@@ -29,65 +29,82 @@ class not_null;
 namespace PUP {
 class er;
 }  // namespace PUP
+namespace Options {
+class Option;
+template <typename T>
+struct create_from_yaml;
+}  // namespace Options
 /// \endcond
 
 namespace grmhd::ValenciaDivClean::BoundaryCorrections {
+/// Which intermediate waves the HLLEM anti-diffusion restores on top of HLL.
+/// This is the central knob of the solver: Mattia & Mignone (2022) show (their
+/// Fig 13) that for the Kelvin-Helmholtz instability restoring contact+slow
+/// resolves the secondary vortices while contact+Alfven smooths them out.
+enum class HllemWaves {
+  /// Only the contact/entropy wave (HLLC-like).
+  Contact,
+  /// Contact + the two Alfven (rotational) waves.
+  ContactAlfven,
+  /// Contact + the two slow-magnetosonic waves.
+  ContactSlow,
+  /// All five fluid internal waves (contact + 2 Alfven + 2 slow).
+  All,
+  /// Contact + 2 Alfven + 2 fast, EXCLUDING the slow waves. This is the
+  /// SpECTRE analog of M&M's "5-wave" HLLEM (contact + Alfven) -- here the two
+  /// fast waves are also restored via their eigenvectors, because in the GLM
+  /// system the outermost (HLL) waves are the divergence-cleaning modes at the
+  /// light speed, so the fast waves are interior to the HLL fan (unlike M&M,
+  /// where the HLL bounds ARE the fast speeds). "7 waves" = 2 GLM (outer) +
+  /// 2 fast + 2 Alfven + contact.
+  ContactAlfvenFast,
+  /// All seven interior waves (contact + 2 Alfven + 2 slow + 2 fast); only the
+  /// two GLM/divergence waves remain as the outer HLL bounds. "9 waves" -- the
+  /// most complete HLLEM, enabled by having the full Teukolsky characteristic
+  /// decomposition (M&M cannot afford the fast/slow eigenvectors).
+  AllWithFast
+};
+std::ostream& operator<<(std::ostream& os, HllemWaves waves);
+
 /*!
- * \brief An HLL Riemann solver
+ * \brief The HLLEM Riemann solver (Einfeldt-Munz-Roe-Sjogreen 1991; Dumbser &
+ * Balsara 2016) for the GRMHD GLM-Valencia system.
  *
- * Let \f$U\f$ be the evolved variable, \f$F^i\f$ the flux, and \f$n_i\f$ be the
- * outward directed unit normal to the interface. Denoting \f$F := n_i F^i\f$,
- * the HLL boundary correction is \cite Harten1983
- *
- * \f{align*}
- * G_\text{HLL} = \frac{\lambda_\text{max} F_\text{int} +
- * \lambda_\text{min} F_\text{ext}}{\lambda_\text{max} - \lambda_\text{min}}
- * - \frac{\lambda_\text{min}\lambda_\text{max}}{\lambda_\text{max} -
- *   \lambda_\text{min}} \left(U_\text{int} - U_\text{ext}\right)
- * \f}
- *
- * where "int" and "ext" stand for interior and exterior.
- * \f$\lambda_\text{min}\f$ and \f$\lambda_\text{max}\f$ are defined as
- *
- * \f{align*}
- * \lambda_\text{min} &=
- * \text{min}\left(\lambda^{-}_\text{int},-\lambda^{+}_\text{ext}, 0\right) \\
- * \lambda_\text{max} &=
- * \text{max}\left(\lambda^{+}_\text{int},-\lambda^{-}_\text{ext}, 0\right)
- * \f}
- *
- * where \f$\lambda^{+}\f$ (\f$\lambda^{-}\f$) is the largest characteristic
- * speed in the outgoing (ingoing) direction. Note the minus signs in front of
- * \f$\lambda^{\pm}_\text{ext}\f$, which is because an outgoing speed w.r.t. the
- * neighboring element is an ingoing speed w.r.t. the local element, and vice
- * versa. Similarly, the \f$F_{\text{ext}}\f$ term in \f$G_\text{HLL}\f$ has a
- * positive sign because the outward directed normal of the neighboring element
- * has the opposite sign, i.e. \f$n_i^{\text{ext}}=-n_i^{\text{int}}\f$.
- *
- * The characteristic/signal speeds are given in the documentation for
- * `grmhd::ValenciaDivClean::characteristic_speeds()`. Since the fluid is
- * travelling slower than the speed of light, the speeds we are interested in
- * are
- *
+ * HLLEM starts from the diffusive two-wave HLL flux and adds an anti-diffusive
+ * correction that restores selected intermediate waves via the characteristic
+ * decomposition,
  * \f{align*}{
- *   \lambda^{\pm}&=\pm\alpha-\beta^i n_i,
+ *   G_\text{HLLEM} = G_\text{HLL}
+ *     - \frac{\lambda_+\lambda_-}{\lambda_+-\lambda_-}
+ *       \sum_{k\in\text{restored}} \delta_k\,(\ell_k\cdot\Delta U)\,r_k ,
  * \f}
+ * where \f$r_k,\ell_k\f$ are the right/left eigenvectors of wave \f$k\f$,
+ * \f$\Delta U=U_\text{ext}-U_\text{int}\f$, and \f$\delta_k\f$ is the Einfeldt
+ * anti-diffusion coefficient. Unlike HLLC/HLLD (which reconstruct the fan
+ * nonlinearly and cannot restore slow waves), HLLEM restores any wave for which
+ * an eigenvector is available -- including the slow modes -- which is why it is
+ * the natural vehicle for the slow-mode Kelvin-Helmholtz test.
  *
- * which correspond to the divergence cleaning field.
- *
- * \note
- * - In the strong form the `dg_boundary_terms` function returns
- *   \f$G - F_\text{int}\f$
- * - For either \f$\lambda_\text{min} = 0\f$ or \f$\lambda_\text{max} = 0\f$
- *   (i.e. all characteristics move in the same direction) the HLL boundary
- *   correction reduces to pure upwinding.
- * - Some references use \f$S\f$ instead of \f$\lambda\f$ for the
- *   signal/characteristic speeds
- * - It may be possible to use the slower speeds for the magnetic field and
- *   fluid part of the system in order to make the flux less dissipative for
- *   those variables.
+ * This uses the (compact, corrected) GRMHD eigenvectors of
+ * `grmhd::ValenciaDivClean::characteristic_eigenvectors_mhd`, so its quality is
+ * a direct function of the eigenvector quality -- the point of the comparison
+ * against classical (Anile/Komissarov/Anton) HLLEM. The eigensystem is
+ * evaluated at the arithmetic-average state so the flux is conservative. Each
+ * restored wave carries its own Einfeldt coefficient and is skipped where it
+ * leaves the HLL fan or collapses onto a neighbour (its analytic eigenvector is
+ * then ill-conditioned) -- matching PLUTO's per-wave HLLEM. As a consequence,
+ * where the slow/Alfven modes sit on the contact (e.g. the weakly magnetized 2D
+ * Kelvin-Helmholtz test) they are dropped and HLLEM reduces to HLL, exactly the
+ * behaviour reported by M&M; a field strong enough to separate the slow modes
+ * is needed to see them restored. The optional complementary projection
+ * (`UseComplementaryProjection`) that would instead restore the collapsed
+ * subspace as a block is disabled by default because it removes the dissipation
+ * that stabilizes those transverse modes at sharp shears (see its help string).
+ * The fan is reconstructed assuming flat space (the regime of the relativistic
+ * M&M tests) with an HLL fallback for curved backgrounds and non-finite
+ * results.
  */
-class Hll final : public evolution::BoundaryCorrection {
+class Hllem final : public evolution::BoundaryCorrection {
  public:
   struct LargestOutgoingCharSpeed : db::SimpleTag {
     using type = Scalar<DataVector>;
@@ -95,18 +112,39 @@ class Hll final : public evolution::BoundaryCorrection {
   struct LargestIngoingCharSpeed : db::SimpleTag {
     using type = Scalar<DataVector>;
   };
-  /// Interface unit normal (covector), used to project the normal magnetic
-  /// field for the divergence-cleaning (Phi, B_n) subsystem.
   struct InterfaceUnitNormal : db::SimpleTag {
     using type = tnsr::i<DataVector, 3, Frame::Inertial>;
   };
-  /// |lapse - 1| + |shift|, a measure of how far the background is from flat.
-  /// The scalar/MHD split only holds in flat space; where this is nonzero the
-  /// boundary correction falls back to the standard (light-speed) HLL flux.
   struct MetricFlatness : db::SimpleTag {
     using type = Scalar<DataVector>;
   };
 
+  struct WavesToRestore {
+    using type = HllemWaves;
+    static constexpr Options::String help = {
+        "Which intermediate waves the anti-diffusion restores: Contact, "
+        "ContactAlfven, ContactSlow, or All."};
+  };
+  struct DegeneracyTolerance {
+    static constexpr Options::String help = {
+        "Speed-gap below which neighbouring waves are treated as degenerate "
+        "and "
+        "handled by the complementary projection."};
+    using type = double;
+  };
+  struct UseComplementaryProjection {
+    static constexpr Options::String help = {
+        "If true, at points where a restored wave collapses onto a neighbour "
+        "(its individual analytic eigenvector is ill-conditioned) restore the "
+        "whole fluid subspace as one block via the complement of the "
+        "well-conditioned fast eigenvectors, instead of dropping the wave (HLL "
+        "there). Composes with WavesToRestore. WARNING: unlike Marquina (whose "
+        "complement is upwind/dissipative), the HLLEM block complement removes "
+        "the numerical dissipation from the collapsed slow/Alfven transverse "
+        "modes, which is unstable at sharp relativistic shear layers -- leave "
+        "false and rely on the per-wave path (which matches PLUTO's HLLEM)."};
+    using type = bool;
+  };
   struct MagneticFieldMagnitudeForHydro {
     static constexpr Options::String help = {
         "When the magnetic field is below this value we use the hydro "
@@ -120,24 +158,27 @@ class Hll final : public evolution::BoundaryCorrection {
     using type = double;
   };
   using options =
-      tmpl::list<MagneticFieldMagnitudeForHydro, LightSpeedDensityCutoff>;
+      tmpl::list<WavesToRestore, UseComplementaryProjection,
+                 DegeneracyTolerance, MagneticFieldMagnitudeForHydro,
+                 LightSpeedDensityCutoff>;
   static constexpr Options::String help = {
-      "Computes the HLL boundary correction term for the GRMHD system."};
+      "Computes the HLLEM boundary correction term for the GRMHD system."};
 
-  Hll() = default;
-  Hll(const Hll&) = default;
-  Hll& operator=(const Hll&) = default;
-  Hll(Hll&&) = default;
-  Hll& operator=(Hll&&) = default;
-  ~Hll() override = default;
+  Hllem() = default;
+  Hllem(const Hllem&) = default;
+  Hllem& operator=(const Hllem&) = default;
+  Hllem(Hllem&&) = default;
+  Hllem& operator=(Hllem&&) = default;
+  ~Hllem() override = default;
 
-  Hll(double magnetic_field_magnitude_for_hydro,
-      double light_speed_density_cutoff);
+  Hllem(HllemWaves waves_to_restore, bool use_complementary_projection,
+        double degeneracy_tolerance, double magnetic_field_magnitude_for_hydro,
+        double light_speed_density_cutoff);
 
   /// \cond
-  explicit Hll(CkMigrateMessage* /*unused*/);
+  explicit Hllem(CkMigrateMessage* /*unused*/);
   using PUP::able::register_constructor;
-  WRAPPED_PUPable_decl_template(Hll);  // NOLINT
+  WRAPPED_PUPable_decl_template(Hllem);  // NOLINT
   /// \endcond
   void pup(PUP::er& p) override;  // NOLINT
 
@@ -170,8 +211,8 @@ class Hll final : public evolution::BoundaryCorrection {
                  hydro::Tags::LorentzFactor<DataVector>>;
   using dg_package_data_volume_tags =
       tmpl::list<hydro::Tags::GrmhdEquationOfState>;
-  // The equation of state is needed in dg_boundary_terms to compute the
-  // fast-magnetosonic HLL bounds at the averaged interface state.
+  // The equation of state is needed in dg_boundary_terms to build the
+  // eigensystem at the averaged interface state.
   using dg_boundary_terms_volume_tags =
       tmpl::list<hydro::Tags::GrmhdEquationOfState>;
 
@@ -235,7 +276,7 @@ class Hll final : public evolution::BoundaryCorrection {
       const EquationsOfState::EquationOfState<true, 3>& equation_of_state)
       const;
 
-  static void dg_boundary_terms(
+  void dg_boundary_terms(
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_tau,
@@ -291,15 +332,35 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& lorentz_factor_ext,
       const Scalar<DataVector>& specific_internal_energy_ext,
       dg::Formulation dg_formulation,
-      const EquationsOfState::EquationOfState<true, 3>& equation_of_state);
+      const EquationsOfState::EquationOfState<true, 3>& equation_of_state)
+      const;
 
  private:
-  friend bool operator==(const Hll& lhs, const Hll& rhs);
+  friend bool operator==(const Hllem& lhs, const Hllem& rhs);
 
+  HllemWaves waves_to_restore_{HllemWaves::All};
+  bool use_complementary_projection_{false};
+  double degeneracy_tolerance_{std::numeric_limits<double>::signaling_NaN()};
   double magnetic_field_magnitude_for_hydro_{
       std::numeric_limits<double>::signaling_NaN()};
   double light_speed_density_cutoff_{
       std::numeric_limits<double>::signaling_NaN()};
 };
-bool operator!=(const Hll& lhs, const Hll& rhs);
+bool operator!=(const Hllem& lhs, const Hllem& rhs);
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections
+
+/// \cond
+template <>
+struct Options::create_from_yaml<
+    grmhd::ValenciaDivClean::BoundaryCorrections::HllemWaves> {
+  template <typename Metavariables>
+  static grmhd::ValenciaDivClean::BoundaryCorrections::HllemWaves create(
+      const Options::Option& options) {
+    return create<void>(options);
+  }
+};
+template <>
+grmhd::ValenciaDivClean::BoundaryCorrections::HllemWaves Options::
+    create_from_yaml<grmhd::ValenciaDivClean::BoundaryCorrections::HllemWaves>::
+        create<void>(const Options::Option& options);
+/// \endcond

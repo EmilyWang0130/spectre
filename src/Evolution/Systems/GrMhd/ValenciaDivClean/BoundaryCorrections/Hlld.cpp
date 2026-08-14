@@ -1,8 +1,9 @@
 // Distributed under the MIT License.
 // See LICENSE.txt for details.
 
-#include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Hll.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Hlld.hpp"
 
+#include <array>
 #include <cmath>
 #include <pup.h>
 
@@ -14,35 +15,51 @@
 #include "DataStructures/Tensor/EagerMath/DotProduct.hpp"
 #include "DataStructures/Tensor/EagerMath/Magnitude.hpp"
 #include "DataStructures/Tensor/Tensor.hpp"
-#include "Evolution/Systems/GrMhd/ValenciaDivClean/Characteristics.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/HlldImpl.hpp"
 #include "NumericalAlgorithms/DiscontinuousGalerkin/Formulation.hpp"
 #include "NumericalAlgorithms/DiscontinuousGalerkin/NormalDotFlux.hpp"
-#include "PointwiseFunctions/Hydro/SoundSpeedSquared.hpp"
 #include "PointwiseFunctions/Hydro/SpecificEnthalpy.hpp"
 #include "Utilities/ErrorHandling/CaptureForError.hpp"
 #include "Utilities/ErrorHandling/FloatingPointExceptions.hpp"
-#include "Utilities/GenerateInstantiations.hpp"
 #include "Utilities/Gsl.hpp"
 
 namespace grmhd::ValenciaDivClean::BoundaryCorrections {
-Hll::Hll(const double magnetic_field_magnitude_for_hydro,
-         const double light_speed_density_cutoff)
+namespace {
+// Orthonormal triad (n, t1, t2) from a unit normal, in flat (Euclidean) space.
+void make_triad(const std::array<double, 3>& n, std::array<double, 3>* t1,
+                std::array<double, 3>* t2) {
+  const std::array<double, 3> helper =
+      std::abs(n[0]) < 0.9 ? std::array<double, 3>{1.0, 0.0, 0.0}
+                           : std::array<double, 3>{0.0, 1.0, 0.0};
+  const double hdotn = helper[0] * n[0] + helper[1] * n[1] + helper[2] * n[2];
+  std::array<double, 3> a{helper[0] - hdotn * n[0], helper[1] - hdotn * n[1],
+                          helper[2] - hdotn * n[2]};
+  const double inv = 1.0 / std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+  *t1 = {a[0] * inv, a[1] * inv, a[2] * inv};
+  // t2 = n x t1
+  *t2 = {n[1] * (*t1)[2] - n[2] * (*t1)[1], n[2] * (*t1)[0] - n[0] * (*t1)[2],
+         n[0] * (*t1)[1] - n[1] * (*t1)[0]};
+}
+}  // namespace
+
+Hlld::Hlld(const double magnetic_field_magnitude_for_hydro,
+           const double light_speed_density_cutoff)
     : magnetic_field_magnitude_for_hydro_(magnetic_field_magnitude_for_hydro),
       light_speed_density_cutoff_(light_speed_density_cutoff) {}
 
-Hll::Hll(CkMigrateMessage* /*unused*/) {}
+Hlld::Hlld(CkMigrateMessage* /*unused*/) {}
 
-std::unique_ptr<evolution::BoundaryCorrection> Hll::get_clone() const {
-  return std::make_unique<Hll>(*this);
+std::unique_ptr<evolution::BoundaryCorrection> Hlld::get_clone() const {
+  return std::make_unique<Hlld>(*this);
 }
 
-void Hll::pup(PUP::er& p) {
+void Hlld::pup(PUP::er& p) {
   BoundaryCorrection::pup(p);
   p | magnetic_field_magnitude_for_hydro_;
   p | light_speed_density_cutoff_;
 }
 
-double Hll::dg_package_data(
+double Hlld::dg_package_data(
     const gsl::not_null<Scalar<DataVector>*> packaged_tilde_d,
     const gsl::not_null<Scalar<DataVector>*> packaged_tilde_ye,
     const gsl::not_null<Scalar<DataVector>*> packaged_tilde_tau,
@@ -91,7 +108,7 @@ double Hll::dg_package_data(
     const tnsr::i<DataVector, 3, Frame::Inertial>& spatial_velocity_one_form,
 
     const Scalar<DataVector>& rest_mass_density,
-    const Scalar<DataVector>& electron_fraction,
+    const Scalar<DataVector>& /*electron_fraction*/,
     const Scalar<DataVector>& temperature,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity,
     const Scalar<DataVector>& specific_internal_energy,
@@ -107,9 +124,6 @@ double Hll::dg_package_data(
   {
     Scalar<DataVector> shift_dot_normal = tilde_d;
     dot_product(make_not_null(&shift_dot_normal), shift, normal_covector);
-
-    // Initialize characteristic speeds to light speed
-    // (default choice)
     get(*packaged_largest_outgoing_char_speed) =
         get(lapse) - get(shift_dot_normal);
     get(*packaged_largest_ingoing_char_speed) =
@@ -119,11 +133,6 @@ double Hll::dg_package_data(
             max(get(magnitude(tilde_b))) > magnetic_field_magnitude_for_hydro_;
         not has_b_field and
         (max(get(rest_mass_density)) > light_speed_density_cutoff_)) {
-      // Since we have no magnetic field (and we have grid points not in the
-      // atmosphere), we can reduce the char speeds to the hydro speeds only.
-      // This makes the scheme less dissipative.
-      //
-      // Calculate sound speed squared
       const size_t num_points = get(rest_mass_density).size();
       Variables<tmpl::list<::Tags::TempScalar<0>, ::Tags::TempScalar<1>,
                            ::Tags::TempScalar<2>, ::Tags::TempScalar<3>,
@@ -139,36 +148,17 @@ double Hll::dg_package_data(
           get<::Tags::TempScalar<5>>(temp_buffer);
       auto& v_dot_normal_times_one_minus_cs2 =
           get<::Tags::TempScalar<6>>(temp_buffer);
-
-      const Scalar<DataVector> specific_internal_energy =
-          equation_of_state
-              .specific_internal_energy_from_density_and_temperature(
-                  rest_mass_density, temperature, electron_fraction);
-      const Scalar<DataVector> pressure =
-          equation_of_state.pressure_from_density_and_energy(
-              rest_mass_density, specific_internal_energy, electron_fraction);
-      const Scalar<DataVector> specific_enthalpy =
-          hydro::relativistic_specific_enthalpy(
-              rest_mass_density, specific_internal_energy, pressure);
-      const Scalar<DataVector> sound_speed_squared{
-          clamp(get(equation_of_state
-                        .sound_speed_squared_from_density_and_temperature(
-                            rest_mass_density, temperature, electron_fraction)),
-                0.0, 1.0)};
-
-      // Compute v_dot_normal, v^i n_i
+      const Scalar<DataVector> sound_speed_squared{clamp(
+          get(equation_of_state
+                  .sound_speed_squared_from_density_and_temperature(
+                      rest_mass_density, temperature,
+                      Scalar<DataVector>{get(rest_mass_density).size(), 0.0})),
+          0.0, 1.0)};
       dot_product(make_not_null(&v_dot_normal), spatial_velocity,
                   normal_covector);
-
-      // Compute v^2=v^i v_i
       dot_product(make_not_null(&v_squared), spatial_velocity,
                   spatial_velocity_one_form);
       get(v_squared) = clamp(get(v_squared), 0.0, 1.0 - 1.0e-8);
-
-      // Calculate characteristic speeds in inertial frame
-      //
-      // Ideally we'd use the Lorentz factor instead of 1-v^2, but I (Nils
-      // Deppe) don't have the bandwidth to change this right now.
       get(one_minus_v2_cs2) = 1.0 - get(v_squared) * get(sound_speed_squared);
       get(one_minus_cs2) = 1.0 - get(sound_speed_squared);
       discriminant =
@@ -177,11 +167,9 @@ double Hll::dg_package_data(
            get(v_dot_normal) * get(v_dot_normal) * get(one_minus_cs2));
       discriminant = max(discriminant, 0.0);
       discriminant = sqrt(discriminant);
-
       get(lapse_over_one_minus_v2_cs2) = get(lapse) / get(one_minus_v2_cs2);
       get(v_dot_normal_times_one_minus_cs2) =
           get(v_dot_normal) * get(one_minus_cs2);
-
       for (size_t i = 0; i < num_points; ++i) {
         if (get(rest_mass_density)[i] > light_speed_density_cutoff_) {
           get(*packaged_largest_outgoing_char_speed)[i] =
@@ -195,8 +183,6 @@ double Hll::dg_package_data(
         }
       }
     }
-
-    // Correct for mesh velocity
     if (normal_dot_mesh_velocity.has_value()) {
       get(*packaged_largest_outgoing_char_speed) -=
           get(*normal_dot_mesh_velocity);
@@ -205,33 +191,28 @@ double Hll::dg_package_data(
     }
   }
 
-  // Package the interface unit normal (for the scalar/MHD field split) and the
-  // metric-flatness measure (the split only holds in flat space). The
-  // fast-magnetosonic HLL bounds are no longer computed per-side here; they are
-  // computed at the AVERAGED interface state inside dg_boundary_terms
-  // (mirroring the HLLEM boundary correction), which fixes a top/bottom
-  // asymmetry that the per-side, sign-of-v_n-dependent bounds seeded in the
-  // Kelvin-Helmholtz test.
-  *packaged_interface_unit_normal = normal_covector;
-  get(*packaged_metric_flatness) = abs(get(lapse) - 1.0) + abs(get<0>(shift)) +
-                                   abs(get<1>(shift)) + abs(get<2>(shift));
-
-  // Package the primitives needed to reconstruct the averaged fast-magnetosonic
-  // bounds in dg_boundary_terms.
-  *packaged_rest_mass_density = rest_mass_density;
-  for (size_t i = 0; i < 3; ++i) {
-    packaged_spatial_velocity->get(i) = spatial_velocity.get(i);
-  }
-  *packaged_pressure = pressure;
-  *packaged_lorentz_factor = lorentz_factor;
-  *packaged_specific_internal_energy = specific_internal_energy;
-
   *packaged_tilde_d = tilde_d;
   *packaged_tilde_ye = tilde_ye;
   *packaged_tilde_tau = tilde_tau;
   *packaged_tilde_s = tilde_s;
   *packaged_tilde_b = tilde_b;
   *packaged_tilde_phi = tilde_phi;
+  *packaged_interface_unit_normal = normal_covector;
+  // Flatness indicator: the five-wave fan below assumes flat space, so measure
+  // the metric's departure from Minkowski using the (analytic,
+  // un-reconstructed) background lapse and shift -- zero for the Minkowski
+  // backgrounds of the relativistic M&M tests, nonzero otherwise (where we fall
+  // back to HLL). We deliberately do NOT use sqrt(det gamma)=TildeD/(rho W): at
+  // reconstructed FD faces TildeD and rho,W are reconstructed independently so
+  // that ratio is not 1 even in flat space. A curved spatial metric with
+  // lapse=1, shift=0 is not a target regime and is not separately guarded here.
+  get(*packaged_metric_flatness) = abs(get(lapse) - 1.0) + abs(get<0>(shift)) +
+                                   abs(get<1>(shift)) + abs(get<2>(shift));
+  *packaged_rest_mass_density = rest_mass_density;
+  *packaged_spatial_velocity = spatial_velocity;
+  *packaged_pressure = pressure;
+  *packaged_lorentz_factor = lorentz_factor;
+  *packaged_specific_internal_energy = specific_internal_energy;
 
   normal_dot_flux(packaged_normal_dot_flux_tilde_d, normal_covector,
                   flux_tilde_d);
@@ -251,7 +232,7 @@ double Hll::dg_package_data(
              max(abs(get(*packaged_largest_ingoing_char_speed))));
 }
 
-void Hll::dg_boundary_terms(
+void Hlld::dg_boundary_terms(
     const gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
     const gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
     const gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_tau,
@@ -279,7 +260,7 @@ void Hll::dg_boundary_terms(
     const Scalar<DataVector>& rest_mass_density_int,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
     const Scalar<DataVector>& pressure_int,
-    const Scalar<DataVector>& /*lorentz_factor_int*/,
+    const Scalar<DataVector>& lorentz_factor_int,
     const Scalar<DataVector>& specific_internal_energy_int,
     const Scalar<DataVector>& tilde_d_ext,
     const Scalar<DataVector>& tilde_ye_ext,
@@ -300,173 +281,165 @@ void Hll::dg_boundary_terms(
     const Scalar<DataVector>& rest_mass_density_ext,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
     const Scalar<DataVector>& pressure_ext,
-    const Scalar<DataVector>& /*lorentz_factor_ext*/,
+    const Scalar<DataVector>& lorentz_factor_ext,
     const Scalar<DataVector>& specific_internal_energy_ext,
-    const dg::Formulation dg_formulation,
-    const EquationsOfState::EquationOfState<true, 3>& equation_of_state) {
+    const dg::Formulation dg_formulation) {
   const size_t num_points = get(tilde_d_int).size();
   const bool weak = dg_formulation == dg::Formulation::WeakInertial;
 
-  // Light-speed (divergence-cleaning) HLL bounds: used for Phi and the normal
-  // magnetic field, which form the decoupled GLM subsystem at +/-c.
-  const DataVector lambda_max = max(0., get(largest_outgoing_char_speed_int),
-                                    -get(largest_ingoing_char_speed_ext));
-  const DataVector lambda_min = min(0., get(largest_ingoing_char_speed_int),
-                                    -get(largest_outgoing_char_speed_ext));
-  // Fast-magnetosonic HLL bounds: used for the MHD variables (D, Ye, Tau, S and
-  // the tangential magnetic field), which travel slower than light.
-  //
-  // The bounds are computed from the fast-magnetosonic characteristic speeds
-  // evaluated at the ARITHMETIC-AVERAGE interface state (exactly like the HLLEM
-  // boundary correction). Evaluating a single interface eigensystem -- rather
-  // than the previous per-side, sign-of-v_n-dependent packaged fast speeds --
-  // makes the bounds identical on mirror-image faces (invariant under
-  // v_n -> -v_n) and removes a small top/bottom asymmetry that the per-side
-  // approach seeded in the Kelvin-Helmholtz test. In curved space the flat
-  // decomposition does not hold, so we fall back to the light bounds and the
-  // scheme reduces to the standard HLL flux there.
-  DataVector fast_max = lambda_max;
-  DataVector fast_min = lambda_min;
-  // characteristic_speeds_mhd interprets the primitives in flat space and
-  // asserts on superluminal velocities; only call it where the background is
-  // flat. (M&M backgrounds are uniform, so a face is either all-flat or
-  // all-curved.)
-  if (max(get(metric_flatness_int)) <= 1.0e-12 and
-      max(get(metric_flatness_ext)) <= 1.0e-12) {
-    // FP exceptions are disabled around the flat-space computation for
-    // consistency with the eigensystem-based corrections.
-    const ScopedFpeState fpe(false);
-    // Averaged primitive state (B = TildeB in flat space).
-    const Scalar<DataVector> rho_avg{
-        0.5 * (get(rest_mass_density_int) + get(rest_mass_density_ext))};
-    const Scalar<DataVector> eps_avg{0.5 * (get(specific_internal_energy_int) +
-                                            get(specific_internal_energy_ext))};
-    const Scalar<DataVector> p_avg{0.5 *
-                                   (get(pressure_int) + get(pressure_ext))};
-    tnsr::I<DataVector, 3, Frame::Inertial> v_avg{num_points};
-    tnsr::I<DataVector, 3, Frame::Inertial> b_avg{num_points};
-    for (size_t i = 0; i < 3; ++i) {
-      v_avg.get(i) =
-          0.5 * (spatial_velocity_int.get(i) + spatial_velocity_ext.get(i));
-      b_avg.get(i) = 0.5 * (tilde_b_int.get(i) + tilde_b_ext.get(i));
-    }
-    // Lorentz factor consistent with the averaged velocity (flat).
-    DataVector v_sq_avg{num_points, 0.0};
-    for (size_t i = 0; i < 3; ++i) {
-      v_sq_avg += v_avg.get(i) * v_avg.get(i);
-    }
-    v_sq_avg = clamp(v_sq_avg, 0.0, 1.0 - 1.0e-10);
-    const Scalar<DataVector> w_avg{1.0 / sqrt(1.0 - v_sq_avg)};
-    const Scalar<DataVector> enthalpy_avg =
-        hydro::relativistic_specific_enthalpy(rho_avg, eps_avg, p_avg);
-    tnsr::ii<DataVector, 3, Frame::Inertial> flat_metric{num_points, 0.0};
-    for (size_t i = 0; i < 3; ++i) {
-      flat_metric.get(i, i) = 1.0;
-    }
-    tnsr::i<DataVector, 9> mhd_speeds{num_points, 0.0};
-    characteristic_speeds_mhd(make_not_null(&mhd_speeds), v_avg, b_avg, rho_avg,
-                              eps_avg, w_avg, enthalpy_avg, flat_metric,
-                              interface_unit_normal_int, equation_of_state);
-    fast_max = max(0.0, mhd_speeds.get(7));  // v_n + c_fast
-    fast_min = min(0.0, mhd_speeds.get(1));  // v_n - c_fast
-  }
-
-  // HLL flux for one conserved component given the bounds l_max, l_min.
-  const auto hll = [&weak, &num_points](
-                       const DataVector& l_max, const DataVector& l_min,
-                       const DataVector& u_int, const DataVector& nf_int,
-                       const DataVector& u_ext,
-                       const DataVector& nf_ext) -> DataVector {
-    DataVector dl = l_max - l_min;
-    for (size_t pt = 0; pt < num_points; ++pt) {
-      if (dl[pt] < 1.0e-30) {
-        dl[pt] = 1.0e-30;
-      }
-    }
-    const DataVector lprod = l_max * l_min;
+  // --- HLL baseline (used for TildeYe, TildePhi, and as a fallback) ---
+  DataVector lambda_max = max(0.0, get(largest_outgoing_char_speed_int),
+                              -get(largest_ingoing_char_speed_ext));
+  DataVector lambda_min = min(0.0, get(largest_ingoing_char_speed_int),
+                              -get(largest_outgoing_char_speed_ext));
+  const DataVector inv_dl = 1.0 / (lambda_max - lambda_min);
+  const DataVector lprod = lambda_max * lambda_min;
+  auto hll = [&](const Scalar<DataVector>& nf_int,
+                 const Scalar<DataVector>& u_int,
+                 const Scalar<DataVector>& nf_ext,
+                 const Scalar<DataVector>& u_ext) -> DataVector {
     if (weak) {
-      return (l_max * nf_int + l_min * nf_ext + lprod * (u_ext - u_int)) / dl;
+      return DataVector{(lambda_max * get(nf_int) + lambda_min * get(nf_ext) +
+                         lprod * (get(u_ext) - get(u_int))) *
+                        inv_dl};
     }
-    return (l_min * (nf_int + nf_ext) + lprod * (u_ext - u_int)) / dl;
+    return DataVector{(lambda_min * (get(nf_int) + get(nf_ext)) +
+                       lprod * (get(u_ext) - get(u_int))) *
+                      inv_dl};
   };
-
-  // Fluid scalars: pure MHD -> fast bounds.
-  get(*boundary_correction_tilde_d) = hll(
-      fast_max, fast_min, get(tilde_d_int), get(normal_dot_flux_tilde_d_int),
-      get(tilde_d_ext), get(normal_dot_flux_tilde_d_ext));
-  get(*boundary_correction_tilde_ye) = hll(
-      fast_max, fast_min, get(tilde_ye_int), get(normal_dot_flux_tilde_ye_int),
-      get(tilde_ye_ext), get(normal_dot_flux_tilde_ye_ext));
-  get(*boundary_correction_tilde_tau) =
-      hll(fast_max, fast_min, get(tilde_tau_int),
-          get(normal_dot_flux_tilde_tau_int), get(tilde_tau_ext),
-          get(normal_dot_flux_tilde_tau_ext));
-  // Divergence-cleaning scalar Phi: light speed.
+  get(*boundary_correction_tilde_ye) =
+      hll(normal_dot_flux_tilde_ye_int, tilde_ye_int,
+          normal_dot_flux_tilde_ye_ext, tilde_ye_ext);
   get(*boundary_correction_tilde_phi) =
-      hll(lambda_max, lambda_min, get(tilde_phi_int),
-          get(normal_dot_flux_tilde_phi_int), get(tilde_phi_ext),
-          get(normal_dot_flux_tilde_phi_ext));
-  // Momentum: pure MHD -> fast bounds.
-  for (size_t i = 0; i < 3; ++i) {
-    boundary_correction_tilde_s->get(i) =
-        hll(fast_max, fast_min, tilde_s_int.get(i),
-            normal_dot_flux_tilde_s_int.get(i), tilde_s_ext.get(i),
-            normal_dot_flux_tilde_s_ext.get(i));
-  }
-  // Magnetic field: the NORMAL component is part of the GLM subsystem (light
-  // speed), the TANGENTIAL component is MHD (fast bounds). Decompose along the
-  // interface normal, treat each part with its own bounds, and recombine
-  // G(B^i) = G(B_n) n^i + G(B_t^i). (In flat space n is a unit covector and the
-  // metric is the identity, so raising/lowering the normal is trivial.)
-  {
-    const auto& n = interface_unit_normal_int;
-    DataVector bn_int{num_points, 0.0};
-    DataVector bn_ext{num_points, 0.0};
-    DataVector nfbn_int{num_points, 0.0};
-    DataVector nfbn_ext{num_points, 0.0};
-    for (size_t i = 0; i < 3; ++i) {
-      bn_int += tilde_b_int.get(i) * n.get(i);
-      bn_ext += tilde_b_ext.get(i) * n.get(i);
-      nfbn_int += normal_dot_flux_tilde_b_int.get(i) * n.get(i);
-      nfbn_ext += normal_dot_flux_tilde_b_ext.get(i) * n.get(i);
+      hll(normal_dot_flux_tilde_phi_int, tilde_phi_int,
+          normal_dot_flux_tilde_phi_ext, tilde_phi_ext);
+  // HLLD overrides TildeD/S/B/Tau below; seed with HLL so any skipped point is
+  // still filled.
+  get(*boundary_correction_tilde_d) =
+      hll(normal_dot_flux_tilde_d_int, tilde_d_int, normal_dot_flux_tilde_d_ext,
+          tilde_d_ext);
+  get(*boundary_correction_tilde_tau) =
+      hll(normal_dot_flux_tilde_tau_int, tilde_tau_int,
+          normal_dot_flux_tilde_tau_ext, tilde_tau_ext);
+  for (size_t k = 0; k < 3; ++k) {
+    if (weak) {
+      boundary_correction_tilde_s->get(k) =
+          (lambda_max * normal_dot_flux_tilde_s_int.get(k) +
+           lambda_min * normal_dot_flux_tilde_s_ext.get(k) +
+           lprod * (tilde_s_ext.get(k) - tilde_s_int.get(k))) *
+          inv_dl;
+      boundary_correction_tilde_b->get(k) =
+          (lambda_max * normal_dot_flux_tilde_b_int.get(k) +
+           lambda_min * normal_dot_flux_tilde_b_ext.get(k) +
+           lprod * (tilde_b_ext.get(k) - tilde_b_int.get(k))) *
+          inv_dl;
+    } else {
+      boundary_correction_tilde_s->get(k) =
+          (lambda_min * (normal_dot_flux_tilde_s_int.get(k) +
+                         normal_dot_flux_tilde_s_ext.get(k)) +
+           lprod * (tilde_s_ext.get(k) - tilde_s_int.get(k))) *
+          inv_dl;
+      boundary_correction_tilde_b->get(k) =
+          (lambda_min * (normal_dot_flux_tilde_b_int.get(k) +
+                         normal_dot_flux_tilde_b_ext.get(k)) +
+           lprod * (tilde_b_ext.get(k) - tilde_b_int.get(k))) *
+          inv_dl;
     }
-    const DataVector g_bn =
-        hll(lambda_max, lambda_min, bn_int, nfbn_int, bn_ext, nfbn_ext);
-    // The decomposition uses n as both covector and (raised) vector, which is
-    // only valid in flat space; where the background is curved fall back to the
-    // plain (light-speed) HLL flux for B, which keeps the scheme conservative.
-    for (size_t i = 0; i < 3; ++i) {
-      const DataVector bt_int = tilde_b_int.get(i) - bn_int * n.get(i);
-      const DataVector bt_ext = tilde_b_ext.get(i) - bn_ext * n.get(i);
-      const DataVector nfbt_int =
-          normal_dot_flux_tilde_b_int.get(i) - nfbn_int * n.get(i);
-      const DataVector nfbt_ext =
-          normal_dot_flux_tilde_b_ext.get(i) - nfbn_ext * n.get(i);
-      const DataVector g_bt =
-          hll(fast_max, fast_min, bt_int, nfbt_int, bt_ext, nfbt_ext);
-      const DataVector g_split = g_bn * n.get(i) + g_bt;
-      const DataVector g_plain =
-          hll(lambda_max, lambda_min, tilde_b_int.get(i),
-              normal_dot_flux_tilde_b_int.get(i), tilde_b_ext.get(i),
-              normal_dot_flux_tilde_b_ext.get(i));
-      for (size_t pt = 0; pt < num_points; ++pt) {
-        boundary_correction_tilde_b->get(i)[pt] =
-            (get(metric_flatness_int)[pt] > 1.0e-12 or
-             get(metric_flatness_ext)[pt] > 1.0e-12)
-                ? g_plain[pt]
-                : g_split[pt];
-      }
+  }
+
+  // --- pointwise HLLD for TildeD, TildeS, TildeB, TildeTau ---
+  // The five-wave solver internally produces inf/nan for unphysical trial
+  // states (handled by its own masks + the isfinite fallback below), so disable
+  // FP exception trapping for the duration of the fan reconstruction.
+  const ScopedFpeState hlld_fpe_scope(false);
+  namespace hd = hlld_detail;
+  for (size_t i = 0; i < num_points; ++i) {
+    if (get(metric_flatness_int)[i] > 1.0e-12 or
+        get(metric_flatness_ext)[i] > 1.0e-12) {
+      continue;  // curved metric: keep the (conservative) HLL flux
+    }
+    const double rho_i = get(rest_mass_density_int)[i];
+    const double eps_i = get(specific_internal_energy_int)[i];
+    const double p_i = get(pressure_int)[i];
+    if (rho_i <= 0.0 or eps_i <= 0.0 or p_i <= 0.0) {
+      continue;  // keep HLL where the ideal-gas relation is undefined
+    }
+    // ideal-gas index from the interior primitives (constant for an ideal EoS)
+    const double gamma = 1.0 + p_i / (rho_i * eps_i);
+
+    const std::array<double, 3> n{get<0>(interface_unit_normal_int)[i],
+                                  get<1>(interface_unit_normal_int)[i],
+                                  get<2>(interface_unit_normal_int)[i]};
+    std::array<double, 3> t1{}, t2{};
+    make_triad(n, &t1, &t2);
+    auto proj = [&](const tnsr::I<DataVector, 3, Frame::Inertial>& v,
+                    size_t comp) {
+      const std::array<double, 3> vv{v.get(0)[i], v.get(1)[i], v.get(2)[i]};
+      const std::array<double, 3>& e = comp == 0 ? n : (comp == 1 ? t1 : t2);
+      return vv[0] * e[0] + vv[1] * e[1] + vv[2] * e[2];
+    };
+    auto build = [&](const Scalar<DataVector>& rho,
+                     const Scalar<DataVector>& eps,
+                     const tnsr::I<DataVector, 3, Frame::Inertial>& vel,
+                     const tnsr::I<DataVector, 3, Frame::Inertial>& bfield,
+                     const Scalar<DataVector>& w) {
+      const double lorentz = get(w)[i];
+      return std::array<double, 9>{get(rho)[i],
+                                   get(eps)[i],
+                                   lorentz * proj(vel, 0),
+                                   lorentz * proj(vel, 1),
+                                   lorentz * proj(vel, 2),
+                                   proj(bfield, 0),
+                                   proj(bfield, 1),
+                                   proj(bfield, 2),
+                                   0.0};
+    };
+    const auto p_int_arr =
+        build(rest_mass_density_int, specific_internal_energy_int,
+              spatial_velocity_int, tilde_b_int, lorentz_factor_int);
+    const auto p_ext_arr =
+        build(rest_mass_density_ext, specific_internal_energy_ext,
+              spatial_velocity_ext, tilde_b_ext, lorentz_factor_ext);
+    const auto [flux, cons] =
+        hd::HLLDSolver<0>(p_int_arr, p_ext_arr, gamma).solve(0.0);
+    bool all_finite = true;
+    for (size_t k = 0; k < hd::NUM; ++k) {
+      all_finite = all_finite and std::isfinite(flux[k]);
+    }
+    if (not all_finite) {
+      continue;  // keep HLL if the fan solve produced a non-finite result
+    }
+    // numerical flux G = n . F_HLLD, rotated back to the inertial frame
+    const double g_d = flux[hd::DENS];
+    const double g_tau = flux[hd::TAUE];
+    std::array<double, 3> g_s{}, g_b{};
+    for (size_t k = 0; k < 3; ++k) {
+      g_s[k] =
+          flux[hd::SCX] * n[k] + flux[hd::SCY] * t1[k] + flux[hd::SCZ] * t2[k];
+      g_b[k] =
+          flux[hd::BBX] * n[k] + flux[hd::BBY] * t1[k] + flux[hd::BBZ] * t2[k];
+    }
+    // strong form returns G - F_int; weak form returns G
+    const double sub_d = weak ? 0.0 : get(normal_dot_flux_tilde_d_int)[i];
+    const double sub_tau = weak ? 0.0 : get(normal_dot_flux_tilde_tau_int)[i];
+    get(*boundary_correction_tilde_d)[i] = g_d - sub_d;
+    get(*boundary_correction_tilde_tau)[i] = g_tau - sub_tau;
+    for (size_t k = 0; k < 3; ++k) {
+      boundary_correction_tilde_s->get(k)[i] =
+          g_s[k] - (weak ? 0.0 : normal_dot_flux_tilde_s_int.get(k)[i]);
+      boundary_correction_tilde_b->get(k)[i] =
+          g_b[k] - (weak ? 0.0 : normal_dot_flux_tilde_b_int.get(k)[i]);
     }
   }
 }
 
-bool operator==(const Hll& lhs, const Hll& rhs) {
+bool operator==(const Hlld& lhs, const Hlld& rhs) {
   return lhs.magnetic_field_magnitude_for_hydro_ ==
              rhs.magnetic_field_magnitude_for_hydro_ and
          lhs.light_speed_density_cutoff_ == rhs.light_speed_density_cutoff_;
 }
-bool operator!=(const Hll& lhs, const Hll& rhs) { return not(lhs == rhs); }
+bool operator!=(const Hlld& lhs, const Hlld& rhs) { return not(lhs == rhs); }
 
 // NOLINTNEXTLINE
-PUP::able::PUP_ID Hll::my_PUP_ID = 0;
+PUP::able::PUP_ID Hlld::my_PUP_ID = 0;
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections

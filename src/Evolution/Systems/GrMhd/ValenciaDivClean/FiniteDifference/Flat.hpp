@@ -18,8 +18,6 @@
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/FiniteDifference/ReconstructWork.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/FiniteDifference/Reconstructor.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/Tags.hpp"
-#include "Evolution/VariableFixing/FixToAtmosphere.hpp"
-#include "Evolution/VariableFixing/Tags.hpp"
 #include "Options/String.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Tags.hpp"
 #include "PointwiseFunctions/Hydro/Tags.hpp"
@@ -56,16 +54,10 @@ class GhostData;
 
 namespace grmhd::ValenciaDivClean::fd {
 /*!
- * \brief First-order (piecewise-constant) reconstruction. See
- * ::fd::reconstruction::first_order() for details.
- *
- * This is the most diffusive reconstruction; the reconstructed value on both
- * faces of a cell equals the cell-centered value. It reproduces a first-order
- * finite-volume scheme, useful for shock-tube benchmarks that compare Riemann
- * solvers at first order (where the solver's treatment of the contact wave is
- * not masked by a higher-order reconstruction).
+ * \brief First-order (piecewise-constant / flat) reconstruction. See
+ * ::fd::reconstruction::flat() for details.
  */
-class FirstOrderPrim : public Reconstructor {
+class FlatPrim : public Reconstructor {
  private:
   // pressure -> temperature
   using prims_to_reconstruct_tags =
@@ -88,21 +80,21 @@ class FirstOrderPrim : public Reconstructor {
 
   using options = tmpl::list<ReconstructRhoTimesTemperature>;
   static constexpr Options::String help{
-      "First-order (piecewise-constant) reconstruction scheme using primitive "
-      "variables."};
+      "First-order (piecewise-constant / flat) reconstruction using primitive "
+      "variables. Mimics PLUTO's flat reconstruction."};
 
-  FirstOrderPrim() = default;
-  FirstOrderPrim(FirstOrderPrim&&) = default;
-  FirstOrderPrim& operator=(FirstOrderPrim&&) = default;
-  FirstOrderPrim(const FirstOrderPrim&) = default;
-  FirstOrderPrim& operator=(const FirstOrderPrim&) = default;
-  ~FirstOrderPrim() override = default;
+  FlatPrim() = default;
+  FlatPrim(FlatPrim&&) = default;
+  FlatPrim& operator=(FlatPrim&&) = default;
+  FlatPrim(const FlatPrim&) = default;
+  FlatPrim& operator=(const FlatPrim&) = default;
+  ~FlatPrim() override = default;
 
-  explicit FirstOrderPrim(bool reconstruct_rho_times_temperature);
+  explicit FlatPrim(bool reconstruct_rho_times_temperature);
 
-  explicit FirstOrderPrim(CkMigrateMessage* msg);
+  explicit FlatPrim(CkMigrateMessage* msg);
 
-  WRAPPED_PUPable_decl_base_template(Reconstructor, FirstOrderPrim);
+  WRAPPED_PUPable_decl_base_template(Reconstructor, FlatPrim);
 
   auto get_clone() const -> std::unique_ptr<Reconstructor> override;
 
@@ -116,8 +108,7 @@ class FirstOrderPrim : public Reconstructor {
       tmpl::list<::Tags::Variables<hydro::grmhd_tags<DataVector>>,
                  hydro::Tags::GrmhdEquationOfState, domain::Tags::Element<dim>,
                  evolution::dg::subcell::Tags::GhostDataForReconstruction<dim>,
-                 evolution::dg::subcell::Tags::Mesh<dim>,
-                 ::Tags::VariableFixer<VariableFixing::FixToAtmosphere<dim>>>;
+                 evolution::dg::subcell::Tags::Mesh<dim>>;
 
   template <size_t ThermodynamicDim>
   void reconstruct(
@@ -130,8 +121,7 @@ class FirstOrderPrim : public Reconstructor {
       const Element<dim>& element,
       const DirectionalIdMap<dim, evolution::dg::subcell::GhostData>&
           ghost_data,
-      const Mesh<dim>& subcell_mesh,
-      const VariableFixing::FixToAtmosphere<dim>& fix_to_atmosphere) const;
+      const Mesh<dim>& subcell_mesh) const;
 
   /// Called by an element doing DG when the neighbor is doing subcell.
   template <size_t ThermodynamicDim>
@@ -143,7 +133,6 @@ class FirstOrderPrim : public Reconstructor {
       const DirectionalIdMap<dim, evolution::dg::subcell::GhostData>&
           ghost_data,
       const Mesh<dim>& subcell_mesh,
-      const VariableFixing::FixToAtmosphere<dim>& fix_to_atmosphere,
       Direction<dim> direction_to_reconstruct) const;
 
   bool reconstruct_rho_times_temperature() const override;
@@ -152,7 +141,7 @@ class FirstOrderPrim : public Reconstructor {
   bool reconstruct_rho_times_temperature_{false};
 };
 
-bool operator==(const FirstOrderPrim& lhs, const FirstOrderPrim& rhs);
+bool operator==(const FlatPrim& lhs, const FlatPrim& rhs);
 
-bool operator!=(const FirstOrderPrim& lhs, const FirstOrderPrim& rhs);
+bool operator!=(const FlatPrim& lhs, const FlatPrim& rhs);
 }  // namespace grmhd::ValenciaDivClean::fd

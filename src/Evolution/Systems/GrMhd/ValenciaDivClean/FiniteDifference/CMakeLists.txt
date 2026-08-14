@@ -4,7 +4,7 @@
 spectre_target_sources(
   ${LIBRARY}
   PRIVATE
-  FirstOrder.cpp
+  Flat.cpp
   MonotonicityPreserving5.cpp
   MonotonisedCentral.cpp
   PositivityPreservingAdaptiveOrder.cpp
@@ -20,7 +20,7 @@ spectre_target_headers(
   BoundaryConditionGhostData.hpp
   Factory.hpp
   FiniteDifference.hpp
-  FirstOrder.hpp
+  Flat.hpp
   MonotonicityPreserving5.hpp
   MonotonisedCentral.hpp
   PositivityPreservingAdaptiveOrder.hpp
