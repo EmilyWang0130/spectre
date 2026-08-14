@@ -49,6 +49,8 @@
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/Subcell/NeighborPackagedData.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/System.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/Tags.hpp"
+#include "Evolution/VariableFixing/FixToAtmosphere.hpp"
+#include "Evolution/VariableFixing/Tags.hpp"
 #include "NumericalAlgorithms/Spectral/LogicalCoordinates.hpp"
 #include "NumericalAlgorithms/Spectral/Mesh.hpp"
 #include "PointwiseFunctions/AnalyticSolutions/GrMhd/BondiMichel.hpp"
@@ -258,7 +260,8 @@ double test(const size_t num_dg_pts) {
           Tags::ConstraintDampingParameter, evolution::dg::Tags::MortarData<3>,
           domain::Tags::MeshVelocity<3>,
           evolution::dg::Tags::NormalCovectorAndMagnitude<3>,
-          evolution::dg::subcell::Tags::SubcellOptions<3>>,
+          evolution::dg::subcell::Tags::SubcellOptions<3>,
+          ::Tags::VariableFixer<VariableFixing::FixToAtmosphere<3>>>,
       db::AddComputeTags<
           evolution::dg::subcell::Tags::LogicalCoordinatesCompute<3>>>(
       element, dg_mesh, subcell_mesh,
@@ -278,7 +281,9 @@ double test(const size_t num_dg_pts) {
       evolution::dg::subcell::SubcellOptions{
           4.0, 1_st, 1.0e-3, 1.0e-4, false, false,
           evolution::dg::subcell::fd::ReconstructionMethod::DimByDim, false,
-          std::nullopt, ::fd::DerivativeOrder::Two, 1, 1, 1});
+          std::nullopt, ::fd::DerivativeOrder::Two, 1, 1, 1},
+      VariableFixing::FixToAtmosphere<3>{1.0e-30, 1.0e-30, std::nullopt,
+                                         std::nullopt});
   db::mutate_apply<ConservativeFromPrimitive>(make_not_null(&box));
 
   std::vector<DirectionalId<3>> mortars_to_reconstruct_to{};
