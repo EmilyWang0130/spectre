@@ -114,14 +114,15 @@ void Tabulated1D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
 
   const auto pressure_data = spectre_eos.read_quantity("pressure");
   const auto eps_data = spectre_eos.read_quantity("specific internal energy");
-  const auto chi_slope_data = spectre_eos.read_quantity("chi slope");
+  const auto adiabatic_index_data =
+      spectre_eos.read_quantity("adiabatic index");
   if (pressure_data.size() != num_grid_points or
       eps_data.size() != num_grid_points or
-      chi_slope_data.size() != num_grid_points) {
+      adiabatic_index_data.size() != num_grid_points) {
     ERROR("Tabulated1D h5 dataset length mismatch: expected "
           << num_grid_points << " points, got pressure=" << pressure_data.size()
           << ", specific internal energy=" << eps_data.size()
-          << ", chi slope=" << chi_slope_data.size() << ".");
+          << ", adiabatic index=" << adiabatic_index_data.size() << ".");
   }
 
   // Determine energy_shift so that (eps - energy_shift) is strictly
@@ -133,7 +134,7 @@ void Tabulated1D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
   }
   energy_shift_ = (eps_min < 0.0) ? 2.0 * eps_min : 0.0;
 
-  // Fill packed [log_pressure, log(eps - energy_shift), chi_slope]
+  // Fill packed [log_pressure, log(eps - energy_shift), adiabatic_index]
   // per grid point.
   table_data_.assign(num_grid_points * NumberOfVars, 0.0);
   specific_enthalpy_.resize(num_grid_points);
@@ -144,7 +145,7 @@ void Tabulated1D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
     table_data_[i * NumberOfVars + LogPressure] = std::log(p_geom);
     table_data_[i * NumberOfVars + LogShiftedEpsilon] =
         std::log(eps - energy_shift_);
-    table_data_[i * NumberOfVars + ChiSlope] = chi_slope_data[i];
+    table_data_[i * NumberOfVars + AdiabaticIndex] = adiabatic_index_data[i];
     if constexpr (IsRelativistic) {
       specific_enthalpy_[i] = 1.0 + eps + p_geom / rho_geom;
     } else {
@@ -302,8 +303,16 @@ double Tabulated1D<IsRelativistic>::specific_internal_energy_upper_bound()
 namespace {
 // Clamp rho to the table's density range and take log. Mirrors what
 // Tabulated3D does in convert_to_table_quantities.
+//
+// Guards against rho <= 0 (e.g., vacuum ghost points from TovStar's
+// analytic prescription at r > R) so log() isn't called on 0 or a
+// negative value, which would raise an FPE under SpECTRE's floating-
+// point trap.
 double clamped_log_rho(const double rho, const double log_rho_lo,
                        const double log_rho_hi) {
+  if (rho <= 0.0) {
+    return log_rho_lo;
+  }
   return std::min(std::max(std::log(rho), log_rho_lo), log_rho_hi);
 }
 }  // namespace
@@ -419,12 +428,12 @@ template <bool IsRelativistic>
 template <class DataType>
 Scalar<DataType> Tabulated1D<IsRelativistic>::chi_from_density_impl(
     const Scalar<DataType>& rest_mass_density) const {
-  // chi = dp/drho at fixed epsilon. We stored the dimensionless log-log
-  // slope chi_slope = d(ln p)/d(ln rho) in the packed table and
-  // reconstruct chi = (p_geom / rho_geom) * chi_slope at query time.
-  // The rho_geom used here is the CLAMPED value (matching the density
-  // clamped in the interpolator lookup), not the raw query — otherwise
-  // out-of-range queries would return chi with an inconsistent
+  // chi = dp/drho at fixed epsilon. We stored the dimensionless
+  // effective adiabatic index Gamma_eff = d(ln p)/d(ln rho) in the packed
+  // table and reconstruct chi = (p_geom / rho_geom) * Gamma_eff at query
+  // time. The rho_geom used here is the CLAMPED value (matching the
+  // density clamped in the interpolator lookup), not the raw query —
+  // otherwise out-of-range queries would return chi with an inconsistent
   // pressure/density ratio.
   const double log_rho_lo = log_rho_grid_.front();
   const double log_rho_hi = log_rho_grid_.back();
@@ -435,7 +444,8 @@ Scalar<DataType> Tabulated1D<IsRelativistic>::chi_from_density_impl(
         clamped_log_rho(get(rest_mass_density), log_rho_lo, log_rho_hi);
     const auto weights = interpolator_.get_weights(log_rho);
     const auto interpolated =
-        interpolator_.template interpolate<LogPressure, ChiSlope>(weights);
+        interpolator_.template interpolate<LogPressure, AdiabaticIndex>(
+            weights);
     const double p_geom = std::exp(interpolated[0]);
     const double slope = interpolated[1];
     get(result) = (p_geom / std::exp(log_rho)) * slope;
@@ -446,7 +456,8 @@ Scalar<DataType> Tabulated1D<IsRelativistic>::chi_from_density_impl(
           clamped_log_rho(rho_arr[i], log_rho_lo, log_rho_hi);
       const auto weights = interpolator_.get_weights(log_rho);
       const auto interpolated =
-          interpolator_.template interpolate<LogPressure, ChiSlope>(weights);
+          interpolator_.template interpolate<LogPressure, AdiabaticIndex>(
+              weights);
       const double p_geom = std::exp(interpolated[0]);
       const double slope = interpolated[1];
       get(result)[i] = (p_geom / std::exp(log_rho)) * slope;

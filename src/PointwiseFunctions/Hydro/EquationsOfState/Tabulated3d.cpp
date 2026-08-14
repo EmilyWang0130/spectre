@@ -8,6 +8,7 @@
 #include "DataStructures/DataVector.hpp"
 #include "DataStructures/Tensor/Tensor.hpp"
 #include "NumericalAlgorithms/RootFinding/TOMS748.hpp"
+#include "Parallel/Printf/Printf.hpp"
 #include "PointwiseFunctions/Hydro/Units.hpp"
 #include "Utilities/ConstantExpressions.hpp"
 
@@ -365,6 +366,15 @@ Tabulated3D<IsRelativistic>::pressure_from_density_and_temperature_impl(
       auto interpolated_state =
           interpolator_.template interpolate<Pressure>(weights);
       get(pressure)[s] = std::exp(interpolated_state[0]);
+      if (get(pressure)[s] > 1.0e5) {
+        Parallel::printf(
+            "[DEBUG T3D p_from_rho_T] s=%zu  input(rho=%.3e T=%.3e Ye=%.4f)"
+            "  clamped(logrho=%.3f logT=%.3f Ye=%.4f)  p_out=%.3e\n",
+            s, get(rest_mass_density)[s], get(temperature)[s],
+            get(electron_fraction)[s], get(log_rest_mass_density)[s],
+            get(log_temperature)[s], get(converted_electron_fraction)[s],
+            get(pressure)[s]);
+      }
     }
   }
 
@@ -453,7 +463,7 @@ Tabulated3D<IsRelativistic>::temperature_from_density_and_energy_impl(
       need_root_finding = false;
     }
 
-    if (fabs(f(upper_bound_tolerance_ * table_log_temperature_.back())) <=
+    if (fabs(f(log(upper_bound_tolerance_ * temperature_upper_bound()))) <=
         1.0e-14) {
       root_from_lambda = table_log_temperature_.back();
       need_root_finding = false;
@@ -462,7 +472,7 @@ Tabulated3D<IsRelativistic>::temperature_from_density_and_energy_impl(
     if (need_root_finding) {
       root_from_lambda = RootFinder::toms748(
           f, table_log_temperature_.front(),
-          upper_bound_tolerance_ * table_log_temperature_.back(), 1.0e-14,
+          log(upper_bound_tolerance_ * temperature_upper_bound()), 1.0e-14,
           1.0e-15);
     }
 
@@ -491,7 +501,7 @@ Tabulated3D<IsRelativistic>::temperature_from_density_and_energy_impl(
         need_root_finding = false;
       }
 
-      if (fabs(f(upper_bound_tolerance_ * table_log_temperature_.back())) <=
+      if (fabs(f(log(upper_bound_tolerance_ * temperature_upper_bound()))) <=
           1.0e-14) {
         root_from_lambda = table_log_temperature_.back();
         need_root_finding = false;
@@ -499,7 +509,7 @@ Tabulated3D<IsRelativistic>::temperature_from_density_and_energy_impl(
       if (need_root_finding) {
         root_from_lambda = RootFinder::toms748(
             f, table_log_temperature_.front(),
-            upper_bound_tolerance_ * table_log_temperature_.back(), 1.0e-14,
+            log(upper_bound_tolerance_ * temperature_upper_bound()), 1.0e-14,
             1.0e-15);
       }
 
@@ -591,6 +601,14 @@ Scalar<DataType> Tabulated3D<IsRelativistic>::
         interpolator_.template interpolate<Epsilon>(weights);
     get(specific_internal_energy) =
         std::exp(interpolated_state[0]) + energy_shift_;
+    if (get(specific_internal_energy) > 1.0e5) {
+      Parallel::printf(
+          "[DEBUG T3D eps_from_rho_T double] input(rho=%.3e T=%.3e Ye=%.4f)"
+          "  clamped(logrho=%.3f logT=%.3f Ye=%.4f)  eps_out=%.3e\n",
+          get(rest_mass_density), get(temperature), get(electron_fraction),
+          get(log_rest_mass_density), get(log_temperature),
+          get(converted_electron_fraction), get(specific_internal_energy));
+    }
   } else if constexpr (std::is_same_v<DataType, DataVector>) {
     for (size_t s = 0; s < get(electron_fraction).size(); ++s) {
       auto weights = interpolator_.get_weights(
@@ -600,6 +618,20 @@ Scalar<DataType> Tabulated3D<IsRelativistic>::
           interpolator_.template interpolate<Epsilon>(weights);
       get(specific_internal_energy)[s] =
           std::exp(interpolated_state[0]) + energy_shift_;
+      // TNTYST-diagnostic: catch unphysical high-T corner queries. The
+      // failing static state has eps ~ 6.8e10 which only lives at the
+      // (T_max, low n_b) corner of the TNTYST table. If we hit it here we
+      // want to know the caller's raw inputs.
+      if (get(specific_internal_energy)[s] > 1.0e5) {
+        Parallel::printf(
+            "[DEBUG T3D eps_from_rho_T] s=%zu  input(rho=%.3e T=%.3e "
+            "Ye=%.4f)  clamped(logrho=%.3f logT=%.3f Ye=%.4f)  "
+            "eps_out=%.3e\n",
+            s, get(rest_mass_density)[s], get(temperature)[s],
+            get(electron_fraction)[s], get(log_rest_mass_density)[s],
+            get(log_temperature)[s], get(converted_electron_fraction)[s],
+            get(specific_internal_energy)[s]);
+      }
     }
   }
 

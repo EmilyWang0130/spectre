@@ -98,6 +98,7 @@ struct DerivedClasses<true, 3> {
   using type = tmpl::list<
       Tabulated3D<true>, Barotropic3D<PolytropicFluid<true>>,
       Barotropic3D<PiecewisePolytropicFluid<true>>, Barotropic3D<Spectral>,
+      Barotropic3D<Tabulated1D<true>>,
       Barotropic3D<Enthalpy<PolytropicFluid<true>>>,
       Barotropic3D<Enthalpy<Enthalpy<Enthalpy<PolytropicFluid<true>>>>>,
       Barotropic3D<Enthalpy<Spectral>>,
@@ -119,6 +120,7 @@ struct DerivedClasses<false, 3> {
   using type =
       tmpl::list<Tabulated3D<false>, Barotropic3D<PolytropicFluid<false>>,
                  Barotropic3D<PiecewisePolytropicFluid<false>>,
+                 Barotropic3D<Tabulated1D<false>>,
                  Equilibrium3D<IdealFluid<false>>,
                  Equilibrium3D<HybridEos<PolytropicFluid<false>>>>;
 };

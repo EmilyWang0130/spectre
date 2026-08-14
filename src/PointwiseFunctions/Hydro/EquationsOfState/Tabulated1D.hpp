@@ -37,11 +37,11 @@ namespace EquationsOfState {
  * `"number density"` as the single independent variable (in
  * fm\f$^{-3}\f$) and the standard CompOSE-natural datasets
  * `"pressure"` (MeV/fm\f$^{3}\f$), `"specific internal energy"`
- * (dimensionless), and `"chi slope"` (\f$d\ln p / d\ln n_b\f$,
- * dimensionless). Applies the runtime nuclear-to-geometric unit
- * conversion (same `nb_fm3_to_geom` and `press_MeV_to_geom` constants
- * used by `Tabulated3D`), computes the specific enthalpy
- * \f$h = 1 + \epsilon + p/\rho\f$ point-wise, and stores the resulting
+ * (dimensionless), and `"adiabatic index"` (\f$\Gamma_{\rm eff} =
+ * d\ln p / d\ln n_b\f$, dimensionless). Applies the runtime
+ * nuclear-to-geometric unit conversion (same `nb_fm3_to_geom` and
+ * `press_MeV_to_geom` constants used by `Tabulated3D`), computes the specific
+ * enthalpy \f$h = 1 + \epsilon + p/\rho\f$ point-wise, and stores the resulting
  * arrays.
  *
  * Interpolation at query time uses
@@ -63,13 +63,13 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
   static constexpr bool is_relativistic = IsRelativistic;
 
   /// Index of each field inside `table_data_`
-  /// (log_pressure, log(eps - energy_shift), chi_slope). Kept as an enum
-  /// so the compile-time index passed to
+  /// (log_pressure, log(eps - energy_shift), adiabatic_index). Kept as an
+  /// enum so the compile-time index passed to
   /// `interpolator_.template interpolate<...>` is self-documenting.
   enum InterpolationField : size_t {
     LogPressure = 0,
     LogShiftedEpsilon = 1,
-    ChiSlope = 2,
+    AdiabaticIndex = 2,
     NumberOfVars = 3
   };
 
@@ -161,9 +161,9 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
   /// Uniformly log-spaced grid in log(rho_geom). Uniformity is required
   /// by intrp::UniformMultiLinearSpanInterpolation.
   std::vector<double> log_rho_grid_;
-  /// Packed table [log(p_geom), log(eps - energy_shift), chi_slope] per
-  /// grid point, variable index inner-most (matches SpECTRE's flat
-  /// C-order convention). `chi_slope = d(ln p)/d(ln rho)` is
+  /// Packed table [log(p_geom), log(eps - energy_shift), adiabatic_index]
+  /// per grid point, variable index inner-most (matches SpECTRE's flat
+  /// C-order convention). `adiabatic_index = d(ln p)/d(ln rho)` is
   /// dimensionless; the query multiplies by `p_geom/rho_geom` to get
   /// the dimensional `chi = dp/drho`.
   std::vector<double> table_data_;

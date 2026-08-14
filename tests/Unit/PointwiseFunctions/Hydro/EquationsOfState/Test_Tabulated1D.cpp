@@ -35,7 +35,7 @@ struct SliceSpec {
   size_t num_points;
   double pressure_amplitude;
   double eps_amplitude;
-  double chi_slope_value;
+  double adiabatic_index_value;
   double gamma;
 };
 
@@ -50,7 +50,7 @@ void write_slice_subfile(h5::H5File<h5::AccessType::ReadWrite>& eos_file,
 
   DataVector pressure(spec.num_points);
   DataVector eps(spec.num_points);
-  DataVector chi_slope(spec.num_points);
+  DataVector adiabatic_index(spec.num_points);
   const double log_lo = std::log(spec.nb_lo_fm3);
   const double log_hi = std::log(spec.nb_hi_fm3);
   const double dlog =
@@ -59,7 +59,7 @@ void write_slice_subfile(h5::H5File<h5::AccessType::ReadWrite>& eos_file,
     const double nb = std::exp(log_lo + static_cast<double>(i) * dlog);
     pressure[i] = spec.pressure_amplitude * std::pow(nb, spec.gamma);
     eps[i] = spec.eps_amplitude * std::pow(nb, spec.gamma - 1.0);
-    chi_slope[i] = spec.chi_slope_value;
+    adiabatic_index[i] = spec.adiabatic_index_value;
   }
 
   auto& eos_table = eos_file.insert<h5::EosTable>(
@@ -67,7 +67,7 @@ void write_slice_subfile(h5::H5File<h5::AccessType::ReadWrite>& eos_file,
       /*beta_equilibrium=*/true, /*version=*/uint32_t{1});
   eos_table.write_quantity("pressure", pressure);
   eos_table.write_quantity("specific internal energy", eps);
-  eos_table.write_quantity("chi slope", chi_slope);
+  eos_table.write_quantity("adiabatic index", adiabatic_index);
   eos_file.close_current_object();
 }
 
@@ -77,7 +77,7 @@ SliceSpec default_spec() {
                    /*num_points=*/64,
                    /*pressure_amplitude=*/1.0e5,
                    /*eps_amplitude=*/1.0e3,
-                   /*chi_slope_value=*/2.0,
+                   /*adiabatic_index_value=*/2.0,
                    /*gamma=*/2.0};
 }
 
@@ -188,9 +188,9 @@ void check_datavector_query_matches_pointwise(
   }
 }
 
-// For the synthetic polytropic slice chi_slope is a constant (=
-// spec.chi_slope_value). Chi_geom at any query rho should equal
-// (p_geom / rho_geom) * chi_slope.
+// For the synthetic polytropic slice adiabatic_index is a constant (=
+// spec.adiabatic_index_value). Chi_geom at any query rho should equal
+// (p_geom / rho_geom) * adiabatic_index.
 template <bool IsRelativistic>
 void check_chi_interpolation(
     const EquationsOfState::Tabulated1D<IsRelativistic>& eos,
@@ -206,8 +206,8 @@ void check_chi_interpolation(
     const Scalar<double> rho{expected.rho_geom};
     const auto chi = eos.chi_from_density(rho);
     const double chi_expected =
-        (expected.p_geom / expected.rho_geom) * spec.chi_slope_value;
-    // chi_slope is stored linearly and constant across the polytropic
+        (expected.p_geom / expected.rho_geom) * spec.adiabatic_index_value;
+    // adiabatic_index is stored linearly and constant across the polytropic
     // slice; log(p) is linear in log(rho); the product is exact to
     // roundoff.
     CHECK(get(chi) == approx(chi_expected).epsilon(1e-12));
