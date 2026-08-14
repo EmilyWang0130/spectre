@@ -55,6 +55,12 @@ add_grmhd_executable(
 )
 
 add_grmhd_executable(
+  RadialProbes
+  RadialProbes
+  false
+)
+
+add_grmhd_executable(
   ""
   ""
   false

@@ -441,8 +441,7 @@ struct EvolutionMetavars<tmpl::list<InterpolationTargetTags...>,
       Actions::MutateApply<evolution::dg::CleanMortarHistory<volume_dim>>,
       dg::Actions::SpectralFilter,
       tmpl::conditional_t<
-          use_dg_subcell,
-          tmpl::list<>,
+          use_dg_subcell, tmpl::list<>,
           tmpl::list<VariableFixing::Actions::FixVariables<
               grmhd::ValenciaDivClean::Flattener<
                   ordered_list_of_primitive_recovery_schemes>>>>,
@@ -691,6 +690,103 @@ struct CenterOfStar : tt::ConformsTo<intrp::protocols::InterpolationTargetTag> {
                                                               CenterOfStar>>;
   using compute_target_points =
       intrp::TargetPoints::SpecifiedPoints<CenterOfStar, 3>;
+  using compute_items_on_target = tags_to_observe;
+
+  template <typename Metavariables>
+  using interpolating_component =
+      typename Metavariables::dg_element_array_component;
+};
+
+// RadialProbes: a SpecifiedPoints interpolation target with N=24 fixed
+// Cartesian probes for radial-oscillation diagnostics on isolated TOV runs.
+// The 24 point coordinates are supplied in the yaml `InterpolationTargets:`
+// block; see spectre_runs/tov/run1_tntyst_static/probe_index_map.txt for the
+// intended layout (1 origin + 19 on +x axis at r/R = 0.05..0.95 + 4 angular
+// cross-check on +z axis at r/R = 0.2, 0.4, 0.6, 0.8).
+struct RadialProbes : tt::ConformsTo<intrp::protocols::InterpolationTargetTag> {
+  static constexpr size_t number_of_probe_points = 24;
+  using ProbeArray = std::array<double, number_of_probe_points>;
+
+  // Per-observable output tag. Distinct types per source scalar so each
+  // gets its own name in the Reductions.h5 legend
+  // (RestMassDensity, Pressure, ElectronFraction, ...).
+  template <typename TagOfScalar>
+  struct ScalarAtProbes : db::SimpleTag {
+    using type = ProbeArray;
+    static std::string name() { return db::tag_name<TagOfScalar>(); }
+  };
+
+  template <typename TagOfScalar>
+  struct ScalarAtProbesCompute : db::ComputeTag, ScalarAtProbes<TagOfScalar> {
+    using base = ScalarAtProbes<TagOfScalar>;
+    using return_type = ProbeArray;
+    static void function(const gsl::not_null<ProbeArray*> result,
+                         const Scalar<DataVector>& scalar) {
+      const auto& v = get(scalar);
+      for (size_t i = 0; i < number_of_probe_points; ++i) {
+        (*result)[i] = v[i];
+      }
+    }
+    using argument_tags = tmpl::list<TagOfScalar>;
+  };
+
+  // Per-observable output tag for one component of a rank-1 tensor.
+  // Suffix (_x/_y/_z) is applied here so each of the three components
+  // ends up as a distinct column group in the reduction file.
+  template <typename TagOfVector, size_t Component>
+  struct VectorComponentAtProbes : db::SimpleTag {
+    using type = ProbeArray;
+    static std::string name() {
+      constexpr std::array<const char*, 3> suffix = {"_x", "_y", "_z"};
+      return db::tag_name<TagOfVector>() +
+             std::string{gsl::at(suffix, Component)};
+    }
+  };
+
+  template <typename TagOfVector, size_t Component>
+  struct VectorComponentAtProbesCompute
+      : db::ComputeTag,
+        VectorComponentAtProbes<TagOfVector, Component> {
+    using base = VectorComponentAtProbes<TagOfVector, Component>;
+    using return_type = ProbeArray;
+    static void function(const gsl::not_null<ProbeArray*> result,
+                         const tnsr::I<DataVector, 3, ::Frame::Inertial>& vec) {
+      const auto& c = vec.get(Component);
+      for (size_t i = 0; i < number_of_probe_points; ++i) {
+        (*result)[i] = c[i];
+      }
+    }
+    using argument_tags = tmpl::list<TagOfVector>;
+  };
+
+  using temporal_id = ::Tags::Time;
+
+  using vars_to_interpolate_to_target = tmpl::list<
+      hydro::Tags::RestMassDensity<DataVector>,
+      hydro::Tags::Pressure<DataVector>,
+      hydro::Tags::ElectronFraction<DataVector>,
+      hydro::Tags::Temperature<DataVector>,
+      hydro::Tags::SpecificInternalEnergy<DataVector>,
+      hydro::Tags::SpatialVelocity<DataVector, 3, ::Frame::Inertial>>;
+
+  using tags_to_observe = tmpl::list<
+      ScalarAtProbesCompute<hydro::Tags::RestMassDensity<DataVector>>,
+      ScalarAtProbesCompute<hydro::Tags::Pressure<DataVector>>,
+      ScalarAtProbesCompute<hydro::Tags::ElectronFraction<DataVector>>,
+      ScalarAtProbesCompute<hydro::Tags::Temperature<DataVector>>,
+      ScalarAtProbesCompute<hydro::Tags::SpecificInternalEnergy<DataVector>>,
+      VectorComponentAtProbesCompute<
+          hydro::Tags::SpatialVelocity<DataVector, 3, ::Frame::Inertial>, 0>,
+      VectorComponentAtProbesCompute<
+          hydro::Tags::SpatialVelocity<DataVector, 3, ::Frame::Inertial>, 1>,
+      VectorComponentAtProbesCompute<
+          hydro::Tags::SpatialVelocity<DataVector, 3, ::Frame::Inertial>, 2>>;
+
+  using post_interpolation_callbacks =
+      tmpl::list<intrp::callbacks::ObserveTimeSeriesOnSurface<tags_to_observe,
+                                                              RadialProbes>>;
+  using compute_target_points =
+      intrp::TargetPoints::SpecifiedPoints<RadialProbes, 3>;
   using compute_items_on_target = tags_to_observe;
 
   template <typename Metavariables>
