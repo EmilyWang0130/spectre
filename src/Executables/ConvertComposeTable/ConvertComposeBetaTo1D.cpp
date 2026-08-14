@@ -99,8 +99,8 @@ std::pair<double, double> check_log_spacing(const std::vector<double>& n_b) {
   return {log_lo, log_hi};
 }
 
-std::vector<double> compute_chi_slope(const std::vector<double>& n_b,
-                                      const std::vector<double>& pressure) {
+std::vector<double> compute_adiabatic_index(
+    const std::vector<double>& n_b, const std::vector<double>& pressure) {
   const size_t n = n_b.size();
   std::vector<double> log_n_b(n);
   for (size_t i = 0; i < n; ++i) {
@@ -173,8 +173,8 @@ void convert_file(const std::string& compose_beta_path,
   const auto log_bounds = check_log_spacing(slice.n_b);
   verify_monotonicity(slice.n_b, slice.pressure,
                       slice.specific_internal_energy);
-  const std::vector<double> chi_slope =
-      compute_chi_slope(slice.n_b, slice.pressure);
+  const std::vector<double> adiabatic_index =
+      compute_adiabatic_index(slice.n_b, slice.pressure);
 
   h5::H5File<h5::AccessType::ReadWrite> spectre_file(spectre_eos_filename,
                                                      true);
@@ -187,14 +187,14 @@ void convert_file(const std::string& compose_beta_path,
   spectre_eos.write_quantity("pressure", to_datavector(slice.pressure));
   spectre_eos.write_quantity("specific internal energy",
                              to_datavector(slice.specific_internal_energy));
-  spectre_eos.write_quantity("chi slope", to_datavector(chi_slope));
+  spectre_eos.write_quantity("adiabatic index", to_datavector(adiabatic_index));
   spectre_eos.write_quantity("electron fraction",
                              to_datavector(slice.electron_fraction));
 
   Parallel::printf(
       "Wrote 1D beta-equilibrium EosTable to %s:/%s\n"
       "  %zu grid points, n_b in [%.4e, %.4e] fm^-3 (log-spaced)\n"
-      "  Quantities: pressure, specific internal energy, chi slope, "
+      "  Quantities: pressure, specific internal energy, adiabatic index, "
       "electron fraction\n"
       "  log(n_b) bounds: [%.6f, %.6f]\n",
       spectre_eos_filename, spectre_eos_subfile, slice.n_b.size(),
@@ -224,13 +224,14 @@ int main(int argc, char** argv) {
         "  quantities:\n"
         "    'pressure' [MeV/fm^3, linear]\n"
         "    'specific internal energy' [dimensionless, linear]\n"
-        "    'chi slope' [dimensionless d(ln p)/d(ln n_b), linear]\n"
+        "    'adiabatic index' [dimensionless Gamma_eff = d(ln p)/d(ln n_b), "
+        "linear]\n"
         "    'electron fraction' [dimensionless, linear — provenance only]\n\n"
-        "chi_slope is computed by a 3-point centered log-log finite "
+        "adiabatic_index is computed by a 3-point centered log-log finite "
         "difference (io::log_log_derivative) with 2-point one-sided stencils "
         "at the endpoints. The runtime Tabulated1D converts n_b -> rho and "
         "p -> geometric units, computes h = 1 + eps + p/rho, and reconstructs "
-        "chi = (p/rho) * chi_slope.\n\n"
+        "chi = (p/rho) * Gamma_eff.\n\n"
         "Both p and the computed h are checked for strict monotonicity "
         "before writing; a non-monotonic input file fails the conversion.\n\n"
         "Available options are");
