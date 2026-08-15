@@ -1036,6 +1036,7 @@ void bench_marquina_flux() {
 }
 }  // namespace
 
+// [[TimeOut, 30]]
 SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.Marquina",
                   "[Unit][GrMhd]") {
   PUPable_reg(grmhd::ValenciaDivClean::BoundaryCorrections::Marquina);
