@@ -17,7 +17,6 @@ set(SPECTRE_FORMALINE_LOCATIONS
   .github
   .gitignore
   AGENTS.md
-  bench
   citation.bib
   CITATION.cff
   CLAUDE.md
