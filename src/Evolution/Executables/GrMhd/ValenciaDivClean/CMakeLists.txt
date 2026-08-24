@@ -61,6 +61,12 @@ add_grmhd_executable(
 )
 
 add_grmhd_executable(
+  CenterDensity
+  CenterOfStar
+  false
+)
+
+add_grmhd_executable(
   ""
   ""
   false
