@@ -22,6 +22,12 @@
 #include "Utilities/Simd/Simd.hpp"
 
 namespace RootFinder {
+/// Controls error reporting for scalar TOMS748 failures. The default traced
+/// behavior is appropriate for unexpected failures. `ThrowWithoutStacktrace`
+/// is intended only for callers that deliberately catch the exception and
+/// recover, where constructing a stack trace would be unnecessary work.
+enum class Toms748ErrorHandling { Trace, ThrowWithoutStacktrace };
+
 namespace toms748_detail {
 // Original implementation of TOMS748 is from Boost:
 //  (C) Copyright John Maddock 2006.
@@ -67,6 +73,12 @@ T safe_div(const T& num, const T& denom, const T& r) {
     const auto new_denom = simd::select(mask, static_cast<T>(1), denom);
     return simd::select(mask, r, num / new_denom);
   }
+}
+
+template <typename Exception>
+[[noreturn]] void throw_without_stacktrace(const std::string& message) {
+  const ScopedFpeState disable_fpes(false);
+  throw Exception(message);
 }
 
 template <typename T>
@@ -565,7 +577,9 @@ std::pair<T, T> toms748_solve(F f, const T& ax, const T& bx, const T& fax,
  * \throws `convergence_error` if the requested tolerance is not met after
  *                            `max_iterations` iterations.
  */
-template <bool AssumeFinite = false, typename Function, typename T>
+template <bool AssumeFinite = false,
+          Toms748ErrorHandling ErrorHandling = Toms748ErrorHandling::Trace,
+          typename Function, typename T>
 T toms748(const Function& f, const T lower_bound, const T upper_bound,
           const T f_at_lower_bound, const T f_at_upper_bound,
           const simd::scalar_type_t<T> absolute_tolerance,
@@ -579,9 +593,17 @@ T toms748(const Function& f, const T lower_bound, const T upper_bound,
              << relative_tolerance << " but must be at least "
              << std::numeric_limits<simd::scalar_type_t<T>>::epsilon());
   if (simd::any(f_at_lower_bound * f_at_upper_bound > 0.0)) {
-    ERROR("Root not bracketed: f(" << lower_bound << ") = " << f_at_lower_bound
-                                   << ", f(" << upper_bound
-                                   << ") = " << f_at_upper_bound);
+    if constexpr (ErrorHandling == Toms748ErrorHandling::Trace) {
+      ERROR("Root not bracketed: f("
+            << lower_bound << ") = " << f_at_lower_bound << ", f("
+            << upper_bound << ") = " << f_at_upper_bound);
+    } else {
+      toms748_detail::throw_without_stacktrace<SpectreError>(
+          MakeString{} << std::setprecision(18) << std::scientific
+                       << "Root not bracketed: f(" << lower_bound
+                       << ") = " << f_at_lower_bound << ", f(" << upper_bound
+                       << ") = " << f_at_upper_bound);
+    }
   }
 
   std::size_t max_iters = max_iterations;
@@ -600,13 +622,24 @@ T toms748(const Function& f, const T lower_bound, const T upper_bound,
       f, lower_bound, upper_bound, f_at_lower_bound, f_at_upper_bound, tol,
       ignore_filter, max_iters);
   if (max_iters >= max_iterations) {
-    ERROR_AS(
-        "toms748 reached max iterations without converging.\nAbsolute "
-        "tolerance: "
-            << absolute_tolerance << "\nRelative tolerance: "
-            << relative_tolerance << "\nResult: " << get_output(result.first)
-            << " " << get_output(result.second),
-        convergence_error);
+    if constexpr (ErrorHandling == Toms748ErrorHandling::Trace) {
+      ERROR_AS(
+          "toms748 reached max iterations without converging.\nAbsolute "
+          "tolerance: "
+              << absolute_tolerance << "\nRelative tolerance: "
+              << relative_tolerance << "\nResult: " << get_output(result.first)
+              << " " << get_output(result.second),
+          convergence_error);
+    } else {
+      toms748_detail::throw_without_stacktrace<convergence_error>(
+          MakeString{}
+          << std::setprecision(18) << std::scientific
+          << "toms748 reached max iterations without converging.\nAbsolute "
+             "tolerance: "
+          << absolute_tolerance << "\nRelative tolerance: "
+          << relative_tolerance << "\nResult: " << get_output(result.first)
+          << " " << get_output(result.second));
+    }
   }
   return simd::fma(static_cast<T>(0.5), (result.second - result.first),
                    result.first);
@@ -622,14 +655,16 @@ T toms748(const Function& f, const T lower_bound, const T upper_bound,
  * runtime but will cause bugs if the numbers aren't finite. It also assumes
  * that products like `fa * fb` are also finite.
  */
-template <bool AssumeFinite = false, typename Function, typename T>
+template <bool AssumeFinite = false,
+          Toms748ErrorHandling ErrorHandling = Toms748ErrorHandling::Trace,
+          typename Function, typename T>
 T toms748(const Function& f, const T lower_bound, const T upper_bound,
           const simd::scalar_type_t<T> absolute_tolerance,
           const simd::scalar_type_t<T> relative_tolerance,
           const size_t max_iterations = 100,
           const simd::mask_type_t<T> ignore_filter =
               static_cast<simd::mask_type_t<T>>(0)) {
-  return toms748<AssumeFinite>(
+  return toms748<AssumeFinite, ErrorHandling>(
       f, lower_bound, upper_bound, f(lower_bound), f(upper_bound),
       absolute_tolerance, relative_tolerance, max_iterations, ignore_filter);
 }

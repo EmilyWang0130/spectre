@@ -141,6 +141,39 @@ void test_convergence_error_double() {
       convergence_error);
 }
 
+void test_recoverable_error_handling() {
+  constexpr auto recoverable =
+      RootFinder::Toms748ErrorHandling::ThrowWithoutStacktrace;
+  const double abs_tol = 1e-15;
+  const double rel_tol = 1e-15;
+  const auto f = [](const double x) { return 2.0 - square(x); };
+
+  // The opt-in reporting policy must not alter successful roots in either
+  // scalar overload.
+  const double traced_root = RootFinder::toms748(f, 0.0, 2.0, abs_tol, rel_tol);
+  CHECK(RootFinder::toms748<false, recoverable>(f, 0.0, 2.0, abs_tol,
+                                                rel_tol) == traced_root);
+  CHECK(RootFinder::toms748<false, recoverable>(
+            f, 0.0, 2.0, f(0.0), f(2.0), abs_tol, rel_tol) == traced_root);
+
+  // Recoverable failures preserve both the exception category and useful
+  // diagnostic text from the default traced behavior.
+  CHECK_THROWS_AS(RootFinder::toms748(f, -1.0, 1.0, abs_tol, rel_tol),
+                  SpectreError);
+  CHECK_THROWS_MATCHES(
+      (RootFinder::toms748<false, recoverable>(f, -1.0, 1.0, abs_tol, rel_tol)),
+      SpectreError,
+      Catch::Matchers::MessageMatches(
+          Catch::Matchers::ContainsSubstring("Root not bracketed") &&
+          Catch::Matchers::ContainsSubstring("f(-1")));
+  CHECK_THROWS_MATCHES(
+      (RootFinder::toms748<false, recoverable>(f, 0.0, 2.0, abs_tol, rel_tol,
+                                               2)),
+      convergence_error,
+      Catch::Matchers::MessageMatches(Catch::Matchers::ContainsSubstring(
+          "toms748 reached max iterations without converging")));
+}
+
 void test_convergence_error_datavector() {
   CHECK_THROWS_AS(
       ([]() {
@@ -210,7 +243,7 @@ void benchmark_root_find(const bool enable) {
     BENCHMARK_ADVANCED(std::string("advanced ") + std::to_string(i))
     (Catch::Benchmark::Chronometer meter) { benchmark(0, meter); };
   }
-#endif // SPECTRE_USE_XSIMD
+#endif  // SPECTRE_USE_XSIMD
 }
 
 SPECTRE_TEST_CASE("Unit.Numerical.RootFinding.TOMS748",
@@ -220,6 +253,7 @@ SPECTRE_TEST_CASE("Unit.Numerical.RootFinding.TOMS748",
   test_datavector();
   test_convergence_error_double();
   test_convergence_error_datavector();
+  test_recoverable_error_handling();
   benchmark_root_find(false);
 
 #ifdef SPECTRE_DEBUG
