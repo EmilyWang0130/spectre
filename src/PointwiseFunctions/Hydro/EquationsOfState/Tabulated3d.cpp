@@ -188,8 +188,9 @@ void Tabulated3D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
         double* table_point = &(table_data[index_tab3D * NumberOfVars]);
 
         // NOLINTBEGIN(cppcoreguidelines-pro-bounds-pointer-arithmetic)
-        table_point[Pressure] =
-            std::log(press_MeV_to_geom * pressure[index_spectre]);
+        const double pressure_geom =
+            press_MeV_to_geom * pressure[index_spectre];
+        table_point[Pressure] = std::log(pressure_geom);
         table_point[Epsilon] = std::log(eps[index_spectre] - energy_shift);
         table_point[CsSquared] = cs2[index_spectre];
         table_point[DeltaMu] = mu_l[index_spectre];
@@ -199,8 +200,8 @@ void Tabulated3D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
             std::log(specific_entropy[index_spectre]);
 
         // Determine specific enthalpy minimum
-        double h = 1. + table_point[Epsilon] +
-                   table_point[Pressure] / std::exp(log_density[iR]);
+        const double h =
+            1. + eps[index_spectre] + pressure_geom / std::exp(log_density[iR]);
         enthalpy_minimum = std::min(enthalpy_minimum, h);
         // NOLINTEND(cppcoreguidelines-pro-bounds-pointer-arithmetic)
       }
