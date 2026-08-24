@@ -1421,34 +1421,28 @@ void characteristic_eigenvectors_hydro(
                  square(get(rest_mass_density));
     get(zeta) = 0.0;
   } else if constexpr (ThermodynamicDim == 3) {
-    // For non-equilibrium 3D EoSs we do not have direct access to kappa and we
-    // don't know how to specify zeta, so we currently only support equilibrium
-    // 3D EoSs, for which kappa comes from the underlying 2D EoS and zeta = 0.
-    // This matches characteristic_speeds_{hydro,mhd}, flux_jacobian_hydro, and
-    // characteristic_eigenvectors_mhd; it replaces an earlier placeholder that
-    // hard-coded the adiabatic index (only valid when the EoS happened to use
-    // that same index).
-    if (not equation_of_state.is_equilibrium()) {
-      ERROR(
-          "characteristic_eigenvectors_hydro currently only supports 3D EoSs "
-          "in equilibrium.");
-    }
-    Scalar<DataVector>& kappa_times_p_over_rho_squared =
-        get<::Tags::TempScalar<8>>(temp_tensors);
-    get(kappa_times_p_over_rho_squared) =
-        get(equation_of_state
-                .kappa_times_p_over_rho_squared_from_density_and_energy(
-                    rest_mass_density, specific_internal_energy));
+    // Restored 2026-08-20: pull kappa and zeta directly from the tabulated
+    // 3D EoS (as done on tov-2d-axi / marquina-hydro). The earlier
+    // kappa_times_p_over_rho_squared / pressure indirection is dangerous at
+    // low pressure, and hard-coding zeta = 0 drops the ∂p/∂Y_e coupling in
+    // the acoustic left eigenvectors. This is a regression from the
+    // 2026-08-14 Iago merge (`b86d943e1`) that silently dropped
+    // commit `cc1eaf7ce "Use tabulated kappa and zeta in GRMHD
+    // characteristics"`.
+    Scalar<DataVector>& temperature =
+        get<hydro::Tags::Temperature<DataVector>>(temp_tensors);
+    get(temperature) =
+        get(equation_of_state.temperature_from_density_and_energy(
+            rest_mass_density, specific_internal_energy, electron_fraction));
     get(sound_speed_squared) =
-        (get(equation_of_state.chi_from_density_and_energy(
-             rest_mass_density, specific_internal_energy)) +
-         get(kappa_times_p_over_rho_squared)) /
-        get(specific_enthalpy);
-    get(pressure) = get(equation_of_state.pressure_from_density_and_energy(
-        rest_mass_density, specific_internal_energy, electron_fraction));
-    get(kappa) = get(kappa_times_p_over_rho_squared) / get(pressure) *
-                 square(get(rest_mass_density));
-    get(zeta) = 0.0;
+        get(equation_of_state.sound_speed_squared_from_density_and_temperature(
+            rest_mass_density, temperature, electron_fraction));
+    get(pressure) = get(equation_of_state.pressure_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
+    get(kappa) = get(equation_of_state.kappa_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
+    get(zeta) = get(equation_of_state.zeta_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
   }
 
   // This is for the case for zeta = 0.
@@ -1789,34 +1783,22 @@ void flux_jacobian_hydro(
                  square(get(rest_mass_density));
     get(zeta) = 0.0;
   } else if constexpr (ThermodynamicDim == 3) {
-    // For non-equilibrium 3D EoSs we do not have direct access to kappa and we
-    // don't know how to specify zeta, both of which are needed
-    // for the expressions here. So, we currently only support equilibrium 3D
-    // EoSs, for which we get kappa from the underlying 2D EoS and set zeta to
-    // 0.
-    if (not equation_of_state.is_equilibrium()) {
-      ERROR(
-          "flux_jacobian_hydro currently only supports 3D EoSs in "
-          "equilibrium.");
-    }
-    Scalar<DataVector>& kappa_times_p_over_rho_squared =
-        get<::Tags::TempScalar<2>>(temp_tensors);
-    get(kappa_times_p_over_rho_squared) =
-        get(equation_of_state
-                .kappa_times_p_over_rho_squared_from_density_and_energy(
-                    rest_mass_density, specific_internal_energy));
+    // Restored 2026-08-20: same regression as characteristic_eigenvectors_hydro
+    // above (Iago-merge dropped commit cc1eaf7ce). Pull kappa and zeta
+    // directly from the tabulated 3D EoS instead of computing kappa via
+    // kappa_times_p_over_rho_squared / pressure and hard-coding zeta = 0.
+    const auto temperature =
+        equation_of_state.temperature_from_density_and_energy(
+            rest_mass_density, specific_internal_energy, electron_fraction);
     get(sound_speed_squared) =
-        (get(equation_of_state.chi_from_density_and_energy(
-             rest_mass_density, specific_internal_energy)) +
-         get(kappa_times_p_over_rho_squared)) /
-        get(specific_enthalpy);
-    get(pressure) = get(equation_of_state.pressure_from_density_and_energy(
-        rest_mass_density, specific_internal_energy, electron_fraction));
-    get(kappa) = get(kappa_times_p_over_rho_squared) / get(pressure) *
-                 square(get(rest_mass_density));
-    // For now, we assume that we are at compositional equilibrium, so we set
-    // zeta to zero.
-    get(zeta) = 0.0;
+        get(equation_of_state.sound_speed_squared_from_density_and_temperature(
+            rest_mass_density, temperature, electron_fraction));
+    get(pressure) = get(equation_of_state.pressure_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
+    get(kappa) = get(equation_of_state.kappa_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
+    get(zeta) = get(equation_of_state.zeta_from_density_and_temperature(
+        rest_mass_density, temperature, electron_fraction));
   }
 
   // The expressions in this function have been iteratively optimized by Codex

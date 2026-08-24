@@ -36,10 +36,15 @@
 #include "Helpers/Domain/DomainTestHelpers.hpp"
 #include "Helpers/PointwiseFunctions/GeneralRelativity/TestHelpers.hpp"
 #include "Helpers/PointwiseFunctions/Hydro/TestHelpers.hpp"
+#include "IO/H5/AccessType.hpp"
+#include "IO/H5/EosTable.hpp"
+#include "IO/H5/File.hpp"
+#include "Informer/InfoFromBuild.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/Equilibrium3D.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/IdealFluid.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/PolytropicFluid.hpp"
+#include "PointwiseFunctions/Hydro/EquationsOfState/Tabulated3d.hpp"
 #include "PointwiseFunctions/Hydro/SpecificEnthalpy.hpp"
 #include "PointwiseFunctions/Hydro/Tags.hpp"
 #include "Utilities/ConstantExpressions.hpp"
@@ -705,6 +710,141 @@ void test_hydro_analytic_eigenvectors(const DataVector& used_for_size) {
       }
     }
   }
+}
+
+// Restored 2026-08-20 from tov-2d-axi (dropped by the 2026-08-14 Iago merge,
+// see the paired restore in Characteristics.cpp). Validates that
+// `characteristic_eigenvectors_hydro` and `flux_jacobian_hydro` produce a
+// consistent eigensystem when the tabulated 3D EoS actually supplies a
+// non-zero \f$\zeta = \partial p/\partial Y_e |_{\rho, \epsilon}\f$. This
+// exercises the composition-coupling branches (`zeta_max_abs >= 1e-14`) of
+// the analytic left eigenvectors, which are otherwise dead code when
+// \f$\zeta\f$ is hard-coded to zero.
+void test_tabulated3d_kappa_and_zeta_in_characteristics() {
+  const size_t num_points = 3;
+  const DataVector used_for_size(num_points, 0.0);
+
+  const std::string eos_file_name{
+      unit_test_src_path() +
+      "PointwiseFunctions/Hydro/EquationsOfState/dd2_unit_test.h5"};
+  h5::H5File<h5::AccessType::ReadOnly> eos_file{eos_file_name};
+  const auto& compose_eos = eos_file.get<h5::EosTable>("/dd2");
+  EquationsOfState::Tabulated3D<true> equation_of_state;
+  equation_of_state.initialize(compose_eos);
+
+  Scalar<DataVector> temperature{DataVector(num_points, 0.1)};
+  Scalar<DataVector> rest_mass_density{DataVector(num_points, 1.0e-4)};
+  Scalar<DataVector> electron_fraction{DataVector(num_points, 0.01)};
+
+  const auto specific_internal_energy =
+      equation_of_state.specific_internal_energy_from_density_and_temperature(
+          rest_mass_density, temperature, electron_fraction);
+  const auto pressure = equation_of_state.pressure_from_density_and_temperature(
+      rest_mass_density, temperature, electron_fraction);
+  const auto specific_enthalpy = hydro::relativistic_specific_enthalpy(
+      rest_mass_density, specific_internal_energy, pressure);
+  const auto kappa = equation_of_state.kappa_from_density_and_temperature(
+      rest_mass_density, temperature, electron_fraction);
+  const auto zeta = equation_of_state.zeta_from_density_and_temperature(
+      rest_mass_density, temperature, electron_fraction);
+
+  // Confirm the tabulated EoS actually supplies non-zero derivatives.
+  CHECK(max(abs(get(kappa))) > 1.0e-12);
+  CHECK(max(abs(get(zeta))) > 1.0e-12);
+
+  tnsr::ii<DataVector, 3, Frame::Inertial> spatial_metric{
+      make_with_value<tnsr::ii<DataVector, 3, Frame::Inertial>>(used_for_size,
+                                                                0.0)};
+  for (size_t i = 0; i < 3; ++i) {
+    spatial_metric.get(i, i) = 1.0;
+  }
+  const auto inv_spatial_metric =
+      determinant_and_inverse(spatial_metric).second;
+
+  tnsr::I<DataVector, 3, Frame::Inertial> spatial_velocity{
+      make_with_value<tnsr::I<DataVector, 3, Frame::Inertial>>(used_for_size,
+                                                               0.0)};
+  spatial_velocity.get(0) = 0.1;
+  spatial_velocity.get(1) = 0.02;
+  spatial_velocity.get(2) = -0.03;
+
+  const double velocity_squared = 0.1 * 0.1 + 0.02 * 0.02 + 0.03 * 0.03;
+  Scalar<DataVector> lorentz_factor{
+      DataVector(num_points, 1.0 / sqrt(1.0 - velocity_squared))};
+
+  const auto unit_normal =
+      unit_basis_form(Direction<3>::upper_xi(), inv_spatial_metric);
+
+  constexpr size_t matrix_size = 6;
+
+  // Analytic eigenvectors, standardized modes/projectors layout.
+  tnsr::ij<DataVector, matrix_size> characteristic_modes{num_points};
+  tnsr::IJ<DataVector, matrix_size> characteristic_projectors{num_points};
+  grmhd::ValenciaDivClean::characteristic_eigenvectors_hydro(
+      make_not_null(&characteristic_modes),
+      make_not_null(&characteristic_projectors), spatial_velocity,
+      rest_mass_density, specific_internal_energy, specific_enthalpy,
+      electron_fraction, lorentz_factor, unit_normal, spatial_metric,
+      equation_of_state);
+
+  // Analytic speeds, packed to match the HydroVectorR ordering.
+  tnsr::i<DataVector, 3> hydro_speeds{num_points};
+  grmhd::ValenciaDivClean::characteristic_speeds_hydro(
+      make_not_null(&hydro_speeds), spatial_velocity, rest_mass_density,
+      specific_internal_energy, electron_fraction, lorentz_factor,
+      specific_enthalpy, spatial_metric, unit_normal, equation_of_state);
+  tnsr::i<DataVector, matrix_size> eigenvalues{num_points};
+  for (size_t i = 0; i < 4; ++i) {
+    eigenvalues.get(i) = hydro_speeds.get(
+        grmhd::ValenciaDivClean::HydroSpeed::NormalDotVelocity);
+  }
+  eigenvalues.get(grmhd::ValenciaDivClean::HydroVectorR::Rplus) =
+      hydro_speeds.get(grmhd::ValenciaDivClean::HydroSpeed::LambdaPlus);
+  eigenvalues.get(grmhd::ValenciaDivClean::HydroVectorR::Rminus) =
+      hydro_speeds.get(grmhd::ValenciaDivClean::HydroSpeed::LambdaMinus);
+
+  // Flux Jacobian for the eigensystem consistency check.
+  tnsr::iJ<DataVector, matrix_size> characteristic_matrix{num_points};
+  grmhd::ValenciaDivClean::flux_jacobian_hydro(
+      make_not_null(&characteristic_matrix), spatial_velocity,
+      rest_mass_density, specific_internal_energy, electron_fraction,
+      lorentz_factor, specific_enthalpy, spatial_metric, inv_spatial_metric,
+      unit_normal, equation_of_state);
+
+  // Eigensystem relation A.R = lambda R and L.A = lambda L for each wave.
+  constexpr double tolerance = 1.0e-10;
+  for (size_t i = 0; i < matrix_size; ++i) {
+    const Scalar<DataVector> eigenvalue{};
+    const tnsr::i<DataVector, matrix_size> right_eigenvector{};
+    const tnsr::I<DataVector, matrix_size> left_eigenvector{};
+    make_const_view(make_not_null(&get(eigenvalue)), eigenvalues.get(i), 0,
+                    num_points);
+    for (size_t k = 0; k < matrix_size; ++k) {
+      make_const_view(make_not_null(&right_eigenvector.get(k)),
+                      characteristic_modes.get(i, k), 0, num_points);
+      make_const_view(make_not_null(&left_eigenvector.get(k)),
+                      characteristic_projectors.get(i, k), 0, num_points);
+    }
+    const Scalar<DataVector> right_residual = magnitude(tenex::evaluate<ti::k>(
+        characteristic_matrix(ti::k, ti::J) * right_eigenvector(ti::j) -
+        eigenvalue() * right_eigenvector(ti::k)));
+    const Scalar<DataVector> left_residual = magnitude(tenex::evaluate<ti::K>(
+        left_eigenvector(ti::J) * characteristic_matrix(ti::j, ti::K) -
+        eigenvalue() * left_eigenvector(ti::K)));
+    CHECK(max(get(right_residual)) < tolerance);
+    CHECK(max(get(left_residual)) < tolerance);
+  }
+
+  // When zeta != 0 the composition eigenvector must depart from the trivial
+  // passive-advection form. In the zeta = 0 limit `R4[5] = 1` and
+  // `L4[5] = 1`, `L4[0] = -Y_e`. Verify that neither collapses to the
+  // trivial values.
+  CHECK(max(abs(characteristic_modes.get(
+                    grmhd::ValenciaDivClean::HydroVectorR::R4, 5) -
+                1.0)) > 1.0e-12);
+  CHECK(max(abs(characteristic_projectors.get(
+                    grmhd::ValenciaDivClean::HydroVectorL::L4, 5) -
+                1.0)) > 1.0e-12);
 }
 
 void test_hydro_characteristics_match_unoptimized_version(
@@ -3584,6 +3724,7 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.Characteristics",
   test_hydro_characteristic_speed(dv);
   test_hydro_numerical_characteristics(dv);
   test_hydro_analytic_eigenvectors(dv);
+  test_tabulated3d_kappa_and_zeta_in_characteristics();
   test_hydro_characteristics_match_unoptimized_version(dv);
   test_quartic_rootfinding(dv);
   // Run data-producing sweeps — quartic_shape and typical_vn_sweep first
