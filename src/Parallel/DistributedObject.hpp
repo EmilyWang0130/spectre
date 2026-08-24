@@ -45,6 +45,9 @@
 #include "Parallel/Tags/ArrayIndex.hpp"
 #include "Parallel/Tags/DistributedObjectTags.hpp"
 #include "Parallel/TypeTraits.hpp"
+#ifdef SPECTRE_PHASE3_ACTION_TIMING
+#include "Parallel/Phase3ActionTiming.hpp"
+#endif
 #include "ParallelAlgorithms/Initialization/MutateAssign.hpp"
 #include "Utilities/Algorithm.hpp"
 #include "Utilities/ErrorHandling/Assert.hpp"
@@ -434,8 +437,8 @@ class DistributedObject<ParallelComponent,
                                std::index_sequence<Is...> /*meta*/);
 
   template <typename Action, typename... Args, size_t... Is>
-  void forward_tuple_to_threaded_action(
-      std::tuple<Args...>&& args, std::index_sequence<Is...> /*meta*/);
+  void forward_tuple_to_threaded_action(std::tuple<Args...>&& args,
+                                        std::index_sequence<Is...> /*meta*/);
 
   size_t number_of_actions_in_phase(const Parallel::Phase phase) const;
 
@@ -462,6 +465,10 @@ class DistributedObject<ParallelComponent,
   // Records the name of the next action to be called so that during deadlock
   // analysis we can print this out.
   std::string deadlock_analysis_next_iterable_action_{};
+
+#ifdef SPECTRE_PHASE3_ACTION_TIMING
+  bool phase3_chare_registered_{false};
+#endif
 
   databox_type box_;
   inbox_type inboxes_{};
@@ -937,6 +944,19 @@ void DistributedObject<
         halt_algorithm_until_next_phase_) {
       return;
     }
+#ifdef SPECTRE_PHASE3_ACTION_TIMING
+    const uint64_t phase3_component_id =
+        phase3_action_timing::component_id<parallel_component>();
+    if (not phase3_chare_registered_) {
+      phase3_action_timing::recorder().register_chare(phase3_component_id,
+                                                      array_index_);
+      phase3_chare_registered_ = true;
+    }
+    const uint64_t phase3_perform_start_ns =
+        phase3_action_timing::timestamp_ns();
+    const uint16_t phase3_perform_start_step =
+        static_cast<uint16_t>(algorithm_step_);
+#endif
 #ifdef SPECTRE_CHARM_PROJECTIONS
     non_action_time_start_ = sys::wall_time();
 #endif
@@ -975,6 +995,20 @@ void DistributedObject<
 #ifdef SPECTRE_CHARM_PROJECTIONS
     traceUserBracketEvent(SPECTRE_CHARM_NON_ACTION_WALLTIME_EVENT_ID,
                           non_action_time_start_, sys::wall_time());
+#endif
+#ifdef SPECTRE_PHASE3_ACTION_TIMING
+    const auto phase3_perform_result =
+        halt_algorithm_until_next_phase_
+            ? phase3_action_timing::ExecutionResult::Halt
+            : (terminate_ ? phase3_action_timing::ExecutionResult::Pause
+                          : phase3_action_timing::ExecutionResult::Retry);
+    phase3_action_timing::recorder().add_record(
+        phase3_perform_start_ns, phase3_action_timing::timestamp_ns(),
+        phase3_component_id, phase3_action_timing::chare_id(array_index_), 0,
+        static_cast<uint16_t>(phase_), std::numeric_limits<uint16_t>::max(),
+        phase3_perform_start_step, static_cast<uint16_t>(algorithm_step_),
+        phase3_action_timing::RecordKind::PerformAlgorithm,
+        phase3_perform_result);
 #endif
   } catch (const std::exception& exception) {
     initiate_shutdown(exception);
@@ -1071,6 +1105,14 @@ DistributedObject<ParallelComponent, tmpl::list<PhaseDepActionListsPack...>>::
         tmpl::index_of<phase_dependent_action_lists, PhaseDepActions>::value;
     performing_action_ = true;
     ++algorithm_step_;
+#ifdef SPECTRE_PHASE3_ACTION_TIMING
+    const uint64_t phase3_component_id =
+        phase3_action_timing::component_id<parallel_component>();
+    const uint64_t phase3_action_id =
+        phase3_action_timing::action_id<this_action>();
+    const uint64_t phase3_action_start_ns =
+        phase3_action_timing::timestamp_ns();
+#endif
     // While the overhead from using the local entry method to enable
     // profiling is fairly small (<2%), we still avoid it when we aren't
     // tracing.
@@ -1095,6 +1137,23 @@ DistributedObject<ParallelComponent, tmpl::list<PhaseDepActionListsPack...>>::
     }
 #endif  // SPECTRE_CHARM_PROJECTIONS
     performing_action_ = false;
+#ifdef SPECTRE_PHASE3_ACTION_TIMING
+    const auto phase3_action_result =
+        halt_algorithm_until_next_phase_
+            ? phase3_action_timing::ExecutionResult::Halt
+            : (terminate_
+                   ? phase3_action_timing::ExecutionResult::Pause
+                   : (take_next_action
+                          ? phase3_action_timing::ExecutionResult::Continue
+                          : phase3_action_timing::ExecutionResult::Retry));
+    phase3_action_timing::recorder().add_record(
+        phase3_action_start_ns, phase3_action_timing::timestamp_ns(),
+        phase3_component_id, phase3_action_timing::chare_id(array_index_),
+        phase3_action_id, static_cast<uint16_t>(phase_),
+        static_cast<uint16_t>(phase_index), static_cast<uint16_t>(iter),
+        static_cast<uint16_t>(algorithm_step_),
+        phase3_action_timing::RecordKind::Action, phase3_action_result);
+#endif
     // Wrap counter if necessary
     if (algorithm_step_ >= tmpl::size<actions_list>::value) {
       algorithm_step_ = 0;
@@ -1167,7 +1226,7 @@ bool DistributedObject<
     (void)Parallel::charmxx::RegisterInvokeIterableAction<
         ParallelComponent, ThisAction, PhaseIndex, DataBoxIndex>::registrar;
   }
-#endif // SPECTRE_CHARM_PROJECTIONS
+#endif  // SPECTRE_CHARM_PROJECTIONS
 
   AlgorithmExecution requested_execution{};
   std::optional<std::size_t> next_action_step{};
