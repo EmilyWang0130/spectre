@@ -14,6 +14,7 @@
 
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/PrimitiveFromConservativeOptions.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/PrimitiveRecoveryData.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/PrimitiveRecoveryDiagnostics.hpp"
 #include "NumericalAlgorithms/RootFinding/TOMS748.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
 #include "Utilities/ConstantExpressions.hpp"
@@ -60,8 +61,7 @@ class FunctionOfZ {
       eps_min =
           equation_of_state_.specific_internal_energy_lower_bound(rho_min);
     } else {
-      eps_min =
-          equation_of_state_.specific_internal_energy_lower_bound();
+      eps_min = equation_of_state_.specific_internal_energy_lower_bound();
     }
 
     if constexpr (EnforcePhysicality) {
@@ -142,8 +142,7 @@ Primitives FunctionOfZ<EosType, EnforcePhysicality>::primitives(
         equation_of_state_.specific_internal_energy_upper_bound(rho_hat));
   } else {
     epsilon_hat = std::clamp(
-        epsilon_hat,
-        equation_of_state_.specific_internal_energy_lower_bound(),
+        epsilon_hat, equation_of_state_.specific_internal_energy_lower_bound(),
         equation_of_state_.specific_internal_energy_upper_bound());
   }
 
@@ -204,6 +203,9 @@ std::optional<PrimitiveRecoveryData> KastaunEtAlHydro::apply(
           primitive_from_conservative_options.kastaun_max_lorentz_factor()};
 
   if (f_of_z.has_no_root()) {
+    primitive_recovery_diagnostics::record_failure_reason(
+        primitive_recovery_diagnostics::Scheme::KastaunHydro,
+        primitive_recovery_diagnostics::FailureReason::RejectedState);
     return std::nullopt;
   };
 
@@ -219,7 +221,20 @@ std::optional<PrimitiveRecoveryData> KastaunEtAlHydro::apply(
         RootFinder::toms748(f_of_z, lower_bound, upper_bound,
                             absolute_tolerance_, relative_tolerance_,
                             max_iterations_);
-  } catch (std::exception& exception) {
+  } catch (const SpectreError&) {
+    primitive_recovery_diagnostics::record_failure_reason(
+        primitive_recovery_diagnostics::Scheme::KastaunHydro,
+        primitive_recovery_diagnostics::FailureReason::UnbracketedRoot);
+    return std::nullopt;
+  } catch (const convergence_error&) {
+    primitive_recovery_diagnostics::record_failure_reason(
+        primitive_recovery_diagnostics::Scheme::KastaunHydro,
+        primitive_recovery_diagnostics::FailureReason::Nonconvergence);
+    return std::nullopt;
+  } catch (const std::exception&) {
+    primitive_recovery_diagnostics::record_failure_reason(
+        primitive_recovery_diagnostics::Scheme::KastaunHydro,
+        primitive_recovery_diagnostics::FailureReason::OtherException);
     return std::nullopt;
   }
 

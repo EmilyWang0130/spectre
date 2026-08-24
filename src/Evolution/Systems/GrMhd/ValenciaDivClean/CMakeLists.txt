@@ -13,8 +13,10 @@ spectre_target_sources(
   ConservativeFromPrimitive.cpp
   FixConservatives.cpp
   Flattener.cpp
+  FlushPrimitiveRecoveryDiagnostics.cpp
   Fluxes.cpp
   PrimitiveFromConservative.cpp
+  PrimitiveRecoveryDiagnostics.cpp
   PrimitiveFromConservativeOptions.cpp
   SetVariablesNeededFixingToFalse.cpp
   Sources.cpp
@@ -33,6 +35,7 @@ spectre_target_headers(
   ConservativeFromPrimitive.hpp
   FixConservatives.hpp
   Flattener.hpp
+  FlushPrimitiveRecoveryDiagnostics.hpp
   Fluxes.hpp
   KastaunEtAl.hpp
   KastaunEtAl.tpp
@@ -44,6 +47,7 @@ spectre_target_headers(
   PalenzuelaEtAl.tpp
   PrimitiveFromConservative.hpp
   PrimitiveFromConservativeOptions.hpp
+  PrimitiveRecoveryDiagnostics.hpp
   PrimitiveRecoveryData.hpp
   QuadrupoleFormula.hpp
   SetVariablesNeededFixingToFalse.hpp

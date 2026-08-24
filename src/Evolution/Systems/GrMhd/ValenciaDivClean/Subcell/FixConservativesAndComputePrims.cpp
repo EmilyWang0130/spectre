@@ -17,6 +17,7 @@
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
 #include "PointwiseFunctions/Hydro/Tags.hpp"
 #include "Utilities/GenerateInstantiations.hpp"
+#include "Utilities/GetOutput.hpp"
 #include "Utilities/Gsl.hpp"
 
 namespace grmhd::ValenciaDivClean::subcell {
@@ -33,7 +34,10 @@ void FixConservativesAndComputePrims<OrderedListOfRecoverySchemes>::apply(
     const tnsr::II<DataVector, 3, Frame::Inertial>& inv_spatial_metric,
     const Scalar<DataVector>& sqrt_det_spatial_metric,
     const grmhd::ValenciaDivClean::PrimitiveFromConservativeOptions&
-        primitive_from_conservative_options) {
+        primitive_from_conservative_options,
+    const double time, const Element<3>& element,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& subcell_coordinates) {
+  primitive_recovery_diagnostics::set_time(time);
   *needed_fixing = fix_conservatives(
       make_not_null(&get<Tags::TildeD>(*conserved_vars_ptr)),
       make_not_null(&get<Tags::TildeYe>(*conserved_vars_ptr)),
@@ -41,6 +45,10 @@ void FixConservativesAndComputePrims<OrderedListOfRecoverySchemes>::apply(
       make_not_null(&get<Tags::TildeS<Frame::Inertial>>(*conserved_vars_ptr)),
       get<Tags::TildeB<Frame::Inertial>>(*conserved_vars_ptr), spatial_metric,
       inv_spatial_metric, sqrt_det_spatial_metric);
+  if (primitive_recovery_diagnostics::detailed_failure_logging_enabled()) {
+    primitive_recovery_diagnostics::set_grid_context(
+        get_output(element.id()), subcell_coordinates, *needed_fixing);
+  }
   grmhd::ValenciaDivClean::
       PrimitiveFromConservative<OrderedListOfRecoverySchemes, true>::apply(
           make_not_null(&get<hydro::Tags::RestMassDensity<DataVector>>(

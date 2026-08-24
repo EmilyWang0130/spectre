@@ -6,13 +6,17 @@
 #include <cstddef>
 
 #include "DataStructures/Tensor/TypeAliases.hpp"
+#include "Domain/Tags.hpp"
+#include "Evolution/DgSubcell/Tags/Coordinates.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/FixConservatives.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/PrimitiveFromConservativeOptions.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/PrimitiveRecoveryDiagnostics.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/System.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/Tags.hpp"
 #include "Evolution/VariableFixing/Tags.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Tags.hpp"
 #include "PointwiseFunctions/Hydro/Tags.hpp"
+#include "Time/Tags/Time.hpp"
 #include "Utilities/TMPL.hpp"
 
 /// \cond
@@ -46,7 +50,9 @@ struct FixConservativesAndComputePrims {
       hydro::Tags::GrmhdEquationOfState, gr::Tags::SpatialMetric<DataVector, 3>,
       gr::Tags::InverseSpatialMetric<DataVector, 3>,
       gr::Tags::SqrtDetSpatialMetric<DataVector>,
-      grmhd::ValenciaDivClean::Tags::PrimitiveFromConservativeOptions>;
+      grmhd::ValenciaDivClean::Tags::PrimitiveFromConservativeOptions,
+      ::Tags::Time, domain::Tags::Element<3>,
+      evolution::dg::subcell::Tags::Coordinates<3, Frame::Inertial>>;
 
   static void apply(
       gsl::not_null<bool*> needed_fixing,
@@ -59,6 +65,8 @@ struct FixConservativesAndComputePrims {
       const tnsr::II<DataVector, 3, Frame::Inertial>& inv_spatial_metric,
       const Scalar<DataVector>& sqrt_det_spatial_metric,
       const grmhd::ValenciaDivClean::PrimitiveFromConservativeOptions&
-          primitive_from_conservative_options);
+          primitive_from_conservative_options,
+      double time, const Element<3>& element,
+      const tnsr::I<DataVector, 3, Frame::Inertial>& subcell_coordinates);
 };
 }  // namespace grmhd::ValenciaDivClean::subcell

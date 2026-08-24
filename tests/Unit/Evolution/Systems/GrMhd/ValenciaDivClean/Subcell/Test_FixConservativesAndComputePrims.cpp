@@ -4,6 +4,10 @@
 #include "Framework/TestingFramework.hpp"
 
 #include "DataStructures/DataBox/DataBox.hpp"
+#include "Domain/Structure/Element.hpp"
+#include "Domain/Structure/ElementId.hpp"
+#include "Domain/Tags.hpp"
+#include "Evolution/DgSubcell/Tags/Coordinates.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/FixConservatives.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/KastaunEtAl.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/PrimitiveFromConservativeOptions.hpp"
@@ -17,6 +21,7 @@
 #include "PointwiseFunctions/Hydro/EquationsOfState/PolytropicFluid.hpp"
 #include "PointwiseFunctions/Hydro/MagneticFieldTreatment.hpp"
 #include "PointwiseFunctions/Hydro/Tags.hpp"
+#include "Time/Tags/Time.hpp"
 
 SPECTRE_TEST_CASE(
     "Unit.Evolution.Systems.ValenciaDivClean.Subcell.FixConsAndComputePrims",
@@ -27,6 +32,9 @@ SPECTRE_TEST_CASE(
   // fixed. We're really only testing that the mutator calls the correct
   // functions.
   const size_t num_pts = 1;
+  const Element<3> element{ElementId<3>{0}, {}};
+  const tnsr::I<DataVector, 3, Frame::Inertial> subcell_coordinates{num_pts,
+                                                                    0.0};
   tnsr::ii<DataVector, 3, Frame::Inertial> spatial_metric{num_pts, 0.0};
   tnsr::II<DataVector, 3, Frame::Inertial> inverse_spatial_metric{num_pts, 0.0};
   for (size_t i = 0; i < 3; ++i) {
@@ -63,11 +71,14 @@ SPECTRE_TEST_CASE(
       hydro::Tags::GrmhdEquationOfState, gr::Tags::SpatialMetric<DataVector, 3>,
       gr::Tags::InverseSpatialMetric<DataVector, 3>,
       gr::Tags::SqrtDetSpatialMetric<DataVector>,
-      grmhd::ValenciaDivClean::Tags::PrimitiveFromConservativeOptions>>(
+      grmhd::ValenciaDivClean::Tags::PrimitiveFromConservativeOptions,
+      ::Tags::Time, domain::Tags::Element<3>,
+      evolution::dg::subcell::Tags::Coordinates<3, Frame::Inertial>>>(
       false, cons_vars,
       typename System::primitive_variables_tag::type{num_pts, 1.0e-4},
       variable_fixer, eos.get_clone(), spatial_metric, inverse_spatial_metric,
-      sqrt_det_spatial_metric, primitive_from_conservative_options);
+      sqrt_det_spatial_metric, primitive_from_conservative_options, 0.0,
+      element, subcell_coordinates);
 
   using recovery_schemes = tmpl::list<
       grmhd::ValenciaDivClean::PrimitiveRecoverySchemes::KastaunEtAl>;

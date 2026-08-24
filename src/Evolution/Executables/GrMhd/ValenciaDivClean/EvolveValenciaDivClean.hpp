@@ -64,6 +64,7 @@
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/FiniteDifference/Tag.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/FixConservatives.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/Flattener.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/FlushPrimitiveRecoveryDiagnostics.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/Fluxes.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/KastaunEtAl.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/NewmanHamlin.hpp"
@@ -333,6 +334,8 @@ struct EvolutionMetavars<tmpl::list<InterpolationTargetTags...>,
             Event,
             tmpl::flatten<tmpl::list<
                 Events::Completion,
+                grmhd::ValenciaDivClean::Events::
+                    FlushPrimitiveRecoveryDiagnostics,
                 dg::Events::field_observations<volume_dim, observe_fields,
                                                non_tensor_compute_tags>,
                 Events::time_events<system>,

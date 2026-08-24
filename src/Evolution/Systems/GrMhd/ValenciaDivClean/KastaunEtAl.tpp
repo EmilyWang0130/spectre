@@ -15,6 +15,7 @@
 #include "DataStructures/Tensor/Tensor.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/PrimitiveFromConservativeOptions.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/PrimitiveRecoveryData.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/PrimitiveRecoveryDiagnostics.hpp"
 #include "NumericalAlgorithms/RootFinding/TOMS748.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
 #include "Utilities/ConstantExpressions.hpp"
@@ -113,6 +114,36 @@ class AuxiliaryFunction {
   const double r_dot_b_squared_;
 };
 
+template <primitive_recovery_diagnostics::KastaunRootSolve RootSolve,
+          typename Function>
+double toms748_with_failure_diagnostics(const Function& function,
+                                        const double lower_bound,
+                                        const double upper_bound,
+                                        const double absolute_tolerance,
+                                        const double relative_tolerance,
+                                        const size_t max_iterations) {
+  try {
+    return RootFinder::toms748<
+        false, RootFinder::Toms748ErrorHandling::ThrowWithoutStacktrace>(
+        function, lower_bound, upper_bound, absolute_tolerance,
+        relative_tolerance, max_iterations);
+  } catch (...) {
+    if (primitive_recovery_diagnostics::detailed_failure_logging_enabled()) {
+      const auto evaluate_or_nan = [&function](const double x) {
+        try {
+          return function(x);
+        } catch (...) {
+          return std::numeric_limits<double>::quiet_NaN();
+        }
+      };
+      primitive_recovery_diagnostics::record_kastaun_root_failure(
+          RootSolve, lower_bound, upper_bound, evaluate_or_nan(lower_bound),
+          evaluate_or_nan(upper_bound));
+    }
+    throw;
+  }
+}
+
 // Master function, see Equation (44) in Sec. II.E
 template <bool EnforcePhysicality, typename EosType>
 class FunctionOfMu {
@@ -204,11 +235,10 @@ FunctionOfMu<EnforcePhysicality, EosType>::root_bracket(
     // be the upper bound for the master function bracket
     const auto auxiliary_function =
         AuxiliaryFunction{h_0_, r_squared_, b_squared_, r_dot_b_squared_};
-    upper_bound =
-        // NOLINTNEXTLINE(clang-analyzer-core)
-        RootFinder::toms748(auxiliary_function, lower_bound, upper_bound,
-                            absolute_tolerance, relative_tolerance,
-                            max_iterations);
+    upper_bound = toms748_with_failure_diagnostics<
+        primitive_recovery_diagnostics::KastaunRootSolve::AuxiliaryBracket>(
+        auxiliary_function, lower_bound, upper_bound, absolute_tolerance,
+        relative_tolerance, max_iterations);
   }
 
   // Determine if the corner case discussed in Appendix A occurs where the
@@ -246,10 +276,13 @@ FunctionOfMu<EnforcePhysicality, EosType>::root_bracket(
     const auto corner_case_function =
         CornerCaseFunction{rest_mass_density_times_lorentz_factor / rho_max,
                            r_squared_, b_squared_, r_dot_b_squared_};
-    lower_bound = std::max(
-        lower_bound, RootFinder::toms748(corner_case_function, lower_bound,
-                                         upper_bound, absolute_tolerance,
-                                         relative_tolerance, max_iterations));
+    lower_bound =
+        std::max(lower_bound,
+                 toms748_with_failure_diagnostics<
+                     primitive_recovery_diagnostics::KastaunRootSolve::
+                         LowerDensityCorner>(
+                     corner_case_function, lower_bound, upper_bound,
+                     absolute_tolerance, relative_tolerance, max_iterations));
   }
 
   if (rho_max < rest_mass_density_times_lorentz_factor) {
@@ -257,10 +290,13 @@ FunctionOfMu<EnforcePhysicality, EosType>::root_bracket(
     const auto corner_case_function =
         CornerCaseFunction{rest_mass_density_times_lorentz_factor / rho_min,
                            r_squared_, b_squared_, r_dot_b_squared_};
-    upper_bound = std::min(
-        upper_bound, RootFinder::toms748(corner_case_function, lower_bound,
-                                         upper_bound, absolute_tolerance,
-                                         relative_tolerance, max_iterations));
+    upper_bound =
+        std::min(upper_bound,
+                 toms748_with_failure_diagnostics<
+                     primitive_recovery_diagnostics::KastaunRootSolve::
+                         UpperDensityCorner>(
+                     corner_case_function, lower_bound, upper_bound,
+                     absolute_tolerance, relative_tolerance, max_iterations));
   }
 
   return {lower_bound, upper_bound};
@@ -304,8 +340,7 @@ Primitives FunctionOfMu<EnforcePhysicality, EosType>::primitives(
         equation_of_state_.specific_internal_energy_upper_bound(rho_hat));
   } else {
     epsilon_hat = std::clamp(
-        epsilon_hat,
-        equation_of_state_.specific_internal_energy_lower_bound(),
+        epsilon_hat, equation_of_state_.specific_internal_energy_lower_bound(),
         equation_of_state_.specific_internal_energy_upper_bound());
   }
   // Pressure from EOS
@@ -367,6 +402,9 @@ std::optional<PrimitiveRecoveryData> KastaunEtAl::apply(
           equation_of_state,
           primitive_from_conservative_options.kastaun_max_lorentz_factor()};
   if (f_of_mu.state_is_unphysical()) {
+    primitive_recovery_diagnostics::record_failure_reason(
+        primitive_recovery_diagnostics::Scheme::Kastaun,
+        primitive_recovery_diagnostics::FailureReason::RejectedState);
     return std::nullopt;
   }
 
@@ -381,11 +419,24 @@ std::optional<PrimitiveRecoveryData> KastaunEtAl::apply(
 
     // Try to recover primitves
     one_over_specific_enthalpy_times_lorentz_factor =
-        // NOLINTNEXTLINE(clang-analyzer-core)
-        RootFinder::toms748(f_of_mu, lower_bound, upper_bound,
-                            absolute_tolerance_, relative_tolerance_,
-                            max_iterations_);
-  } catch (std::exception& exception) {
+        toms748_with_failure_diagnostics<
+            primitive_recovery_diagnostics::KastaunRootSolve::Master>(
+            f_of_mu, lower_bound, upper_bound, absolute_tolerance_,
+            relative_tolerance_, max_iterations_);
+  } catch (const SpectreError&) {
+    primitive_recovery_diagnostics::record_failure_reason(
+        primitive_recovery_diagnostics::Scheme::Kastaun,
+        primitive_recovery_diagnostics::FailureReason::UnbracketedRoot);
+    return std::nullopt;
+  } catch (const convergence_error&) {
+    primitive_recovery_diagnostics::record_failure_reason(
+        primitive_recovery_diagnostics::Scheme::Kastaun,
+        primitive_recovery_diagnostics::FailureReason::Nonconvergence);
+    return std::nullopt;
+  } catch (const std::exception&) {
+    primitive_recovery_diagnostics::record_failure_reason(
+        primitive_recovery_diagnostics::Scheme::Kastaun,
+        primitive_recovery_diagnostics::FailureReason::OtherException);
     return std::nullopt;
   }
 

@@ -24,6 +24,7 @@
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/PalenzuelaEtAl.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/PalenzuelaEtAl.tpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/PrimitiveRecoveryData.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/PrimitiveRecoveryDiagnostics.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/Tags.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Tags.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
@@ -190,17 +191,24 @@ bool PrimitiveFromConservative<OrderedListOfPrimitiveRecoverySchemes,
   rest_mass_density_times_lorentz_factor =
       get(tilde_d) / get(sqrt_det_spatial_metric);
 
+  const bool log_detailed_failures =
+      primitive_recovery_diagnostics::detailed_failure_logging_enabled();
+  const bool force_hydro_for_zero_magnetic_field =
+      primitive_recovery_diagnostics::
+          force_hydro_recovery_for_zero_magnetic_field();
+
   for (size_t s = 0; s < number_of_points; ++s) {
     get(*electron_fraction)[s] =
         std::min(equation_of_state.electron_fraction_upper_bound(),
-            std::max(get(tilde_ye)[s] / get(tilde_d)[s],
-                equation_of_state.electron_fraction_lower_bound()));
+                 std::max(get(tilde_ye)[s] / get(tilde_d)[s],
+                          equation_of_state.electron_fraction_lower_bound()));
 
     std::optional<PrimitiveRecoverySchemes::PrimitiveRecoveryData>
         primitive_data = std::nullopt;
     // Quick exit from inversion in low-density regions where we will
     // apply atmosphere corrections anyways.
     if (rest_mass_density_times_lorentz_factor[s] < cutoffD) {
+      primitive_recovery_diagnostics::record_point(true);
       double specific_energy_at_point =
           equation_of_state.specific_internal_energy_lower_bound(
               floorD, get(*electron_fraction)[s]);
@@ -225,6 +233,15 @@ bool PrimitiveFromConservative<OrderedListOfPrimitiveRecoverySchemes,
           enthalpy_density_at_point,
           get(*electron_fraction)[s]};
     } else {
+      primitive_recovery_diagnostics::record_point(false);
+      if (log_detailed_failures) {
+        primitive_recovery_diagnostics::set_point_context(
+            s, rest_mass_density_times_lorentz_factor[s], tau[s],
+            get(momentum_density_squared)[s],
+            get(momentum_density_dot_magnetic_field)[s],
+            get(magnetic_field_squared)[s], get(*electron_fraction)[s]);
+      }
+      size_t attempted_schemes = 0;
       // not in atmosphere.
       auto apply_scheme = [&pressure, &primitive_data, &tau,
                            &momentum_density_squared,
@@ -232,9 +249,32 @@ bool PrimitiveFromConservative<OrderedListOfPrimitiveRecoverySchemes,
                            &magnetic_field_squared,
                            &rest_mass_density_times_lorentz_factor,
                            &equation_of_state, &s, &electron_fraction,
+                           &attempted_schemes,
                            &primitive_from_conservative_options](auto scheme) {
         using primitive_recovery_scheme = tmpl::type_from<decltype(scheme)>;
         if (not primitive_data.has_value()) {
+          constexpr auto diagnostic_scheme = []() {
+            if constexpr (std::is_same_v<
+                              primitive_recovery_scheme,
+                              PrimitiveRecoverySchemes::KastaunEtAl>) {
+              return primitive_recovery_diagnostics::Scheme::Kastaun;
+            } else if constexpr (std::is_same_v<
+                                     primitive_recovery_scheme,
+                                     PrimitiveRecoverySchemes::NewmanHamlin>) {
+              return primitive_recovery_diagnostics::Scheme::NewmanHamlin;
+            } else if constexpr (std::is_same_v<primitive_recovery_scheme,
+                                                PrimitiveRecoverySchemes::
+                                                    PalenzuelaEtAl>) {
+              return primitive_recovery_diagnostics::Scheme::Palenzuela;
+            } else {
+              static_assert(
+                  std::is_same_v<primitive_recovery_scheme,
+                                 PrimitiveRecoverySchemes::KastaunEtAlHydro>);
+              return primitive_recovery_diagnostics::Scheme::KastaunHydro;
+            }
+          }();
+          const bool is_fallback = attempted_schemes > 0;
+          ++attempted_schemes;
           primitive_data =
               primitive_recovery_scheme::template apply<EnforcePhysicality>(
                   get(*pressure)[s], tau[s], get(momentum_density_squared)[s],
@@ -243,12 +283,17 @@ bool PrimitiveFromConservative<OrderedListOfPrimitiveRecoverySchemes,
                   rest_mass_density_times_lorentz_factor[s],
                   get(*electron_fraction)[s], equation_of_state,
                   primitive_from_conservative_options);
+          primitive_recovery_diagnostics::record_scheme_result(
+              diagnostic_scheme, primitive_data.has_value(), is_fallback,
+              rest_mass_density_times_lorentz_factor[s]);
         }
       };
       // Check consistency
       if (use_hydro_optimization and
-          (get(magnetic_field_squared)[s] <
-           100.0 * std::numeric_limits<double>::epsilon() * tau[s])) {
+          ((get(magnetic_field_squared)[s] <
+            100.0 * std::numeric_limits<double>::epsilon() * tau[s]) or
+           (force_hydro_for_zero_magnetic_field and
+            get(magnetic_field_squared)[s] == 0.0))) {
         tmpl::for_each<
             tmpl::list<grmhd::ValenciaDivClean::PrimitiveRecoverySchemes::
                            KastaunEtAlHydro>>(apply_scheme);
@@ -288,6 +333,7 @@ bool PrimitiveFromConservative<OrderedListOfPrimitiveRecoverySchemes,
             primitive_data.value().specific_internal_energy;
       }
     } else {
+      primitive_recovery_diagnostics::record_all_schemes_failed();
       if constexpr (ErrorOnFailure) {
         ERROR("All primitive inversion schemes failed at s = "
               << s << ".\n"

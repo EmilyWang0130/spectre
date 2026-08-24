@@ -11,6 +11,7 @@
 
 #include "DataStructures/Tensor/Tensor.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/PrimitiveRecoveryData.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/PrimitiveRecoveryDiagnostics.hpp"
 #include "NumericalAlgorithms/RootFinding/TOMS748.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
 #include "Utilities/ConstantExpressions.hpp"
@@ -127,10 +128,24 @@ std::optional<PrimitiveRecoveryData> PalenzuelaEtAl::apply(
   try {
     specific_enthalpy_times_lorentz_factor =
         // NOLINTNEXTLINE(clang-analyzer-core)
-        RootFinder::toms748(f_of_x, lower_bound, upper_bound,
-                            absolute_tolerance_, relative_tolerance_,
-                            max_iterations_);
-  } catch (std::exception& exception) {
+        RootFinder::toms748<
+            false, RootFinder::Toms748ErrorHandling::ThrowWithoutStacktrace>(
+            f_of_x, lower_bound, upper_bound, absolute_tolerance_,
+            relative_tolerance_, max_iterations_);
+  } catch (const SpectreError&) {
+    primitive_recovery_diagnostics::record_failure_reason(
+        primitive_recovery_diagnostics::Scheme::Palenzuela,
+        primitive_recovery_diagnostics::FailureReason::UnbracketedRoot);
+    return std::nullopt;
+  } catch (const convergence_error&) {
+    primitive_recovery_diagnostics::record_failure_reason(
+        primitive_recovery_diagnostics::Scheme::Palenzuela,
+        primitive_recovery_diagnostics::FailureReason::Nonconvergence);
+    return std::nullopt;
+  } catch (const std::exception&) {
+    primitive_recovery_diagnostics::record_failure_reason(
+        primitive_recovery_diagnostics::Scheme::Palenzuela,
+        primitive_recovery_diagnostics::FailureReason::OtherException);
     return std::nullopt;
   }
   const double lorentz_factor =
