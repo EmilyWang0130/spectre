@@ -5,6 +5,7 @@
 
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Hll.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Hllc.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/HllcGr.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Hlld.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Hllem.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Marquina.hpp"
@@ -13,5 +14,5 @@
 
 namespace grmhd::ValenciaDivClean::BoundaryCorrections {
 using standard_boundary_corrections =
-    tmpl::list<Hll, Hllc, Hlld, Hllem, Marquina, Rusanov>;
+    tmpl::list<Hll, Hllc, HllcGr, Hlld, Hllem, Marquina, Rusanov>;
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections

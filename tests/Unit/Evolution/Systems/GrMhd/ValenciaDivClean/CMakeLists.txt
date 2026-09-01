@@ -13,6 +13,7 @@ set(LIBRARY_SOURCES
   BoundaryConditions/Test_Reflective.cpp
   BoundaryCorrections/Test_Hll.cpp
   BoundaryCorrections/Test_Hllc.cpp
+  BoundaryCorrections/Test_HllcGr.cpp
   BoundaryCorrections/Test_Hlld.cpp
   BoundaryCorrections/Test_Hllem.cpp
   BoundaryCorrections/Test_Marquina.cpp

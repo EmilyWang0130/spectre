@@ -7,6 +7,7 @@ spectre_target_sources(
   PRIVATE
   Hll.cpp
   Hllc.cpp
+  HllcGr.cpp
   Hlld.cpp
   Hllem.cpp
   Marquina.cpp
@@ -20,6 +21,7 @@ spectre_target_headers(
   Factory.hpp
   Hll.hpp
   Hllc.hpp
+  HllcGr.hpp
   Hlld.hpp
   HlldImpl.hpp
   Hllem.hpp
