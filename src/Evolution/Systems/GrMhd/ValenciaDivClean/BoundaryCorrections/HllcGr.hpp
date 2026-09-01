@@ -48,41 +48,58 @@ namespace grmhd::ValenciaDivClean::BoundaryCorrections {
  * and materially cheaper to implement in SpECTRE's DG interface structure.
  * At each interface point, defining
  * \f{align*}
- *   \hat F(U) &= \frac{F(U) + \beta^n U}{\alpha}, &
- *   \nu       &= \frac{\lambda + \beta^n}{\alpha},
+ *   \hat F(U) &= \frac{F(U) + \beta^n_{\rm eff} U}{\alpha}, &
+ *   \nu       &= \frac{\lambda + \beta^n_{\rm eff}}{\alpha},
  * \f}
- * the hatted system satisfies \f$\hat F(\tilde E) = \tilde M\f$
- * identically, restoring MB05's SR identity \f$F(E) = m^x\f$. The existing
- * MB05 quadratic + star-state math runs on the hatted quantities and the
- * inverse transform recovers the coordinate-frame flux.
+ * the hatted system satisfies
+ * \f{align*}
+ *   \hat F(\tilde E)
+ *     &= \hat F(\tilde\tau) + \hat F(\tilde D)
+ *     = M, & M \equiv n^i \tilde S_i,
+ * \f}
+ * restoring MB05's SR identity \f$F(E) = m^x\f$. The MB05 quadratic
+ * separately needs \f$\hat F(M) = n^i \hat F(\tilde S_i)\f$; do not confuse
+ * that with \f$\hat F(\tilde E)\f$. The SR kernel runs on the hatted
+ * quantities and must return both the selected star-region state
+ * \f$U_{\rm sel}\f$ and the selected hatted flux
+ * \f$\hat F_{\rm sel}\f$; the inverse transform
+ * \f$G_{\rm coord} = \alpha \hat F_{\rm sel} - \beta^n_{\rm eff}
+ * U_{\rm sel}\f$ needs both.
  *
  * Per face:
  * -# Average the interior/exterior 3+1 geometry
  *    (\f$\alpha, \beta^i, \gamma_{ij}, n_i\f$) inside `dg_boundary_terms`
- *    — **not** per-side tetrads. This is the single-Lorentz-frame
- *    requirement for the Riemann problem to be well-posed.
+ *    — **not** per-side tetrads. Single-frame requirement for the Riemann
+ *    problem to be well-posed.
+ * -# Renormalize the averaged normal in the averaged inverse spatial
+ *    metric: \f$n_i \mapsto n_i / \sqrt{\gamma^{jk} n_j n_k}\f$.
+ * -# Compute \f$\beta^n_{\rm eff} = \beta^i n_i + n \cdot v_{\rm mesh}\f$
+ *    and the local-frame interface speed
+ *    \f$w_{\rm face} = \beta^n_{\rm eff} / \alpha\f$.
  * -# Hat-transform L and R state, flux, and wave-speed inputs.
- * -# Run the existing MB05 kernel on the hatted quantities.
- * -# Inverse-transform the numerical flux.
- * -# Region selection stays in the coordinate frame; a mesh-velocity aware
- *    \f$\beta^n_{\rm eff} = \beta^n + n \cdot v_{\rm mesh}\f$ feeds the
- *    transform.
+ * -# Run the MB05 kernel on the hatted quantities; sample the fan at
+ *    \f$w_{\rm face}\f$ (hatted frame), not at zero.
+ * -# Inverse-transform the selected flux using the selected state.
  *
  * The design makes the scheme **exact** on curved backgrounds where the
  * current `Hllc` is only an SR-inspired approximation (via MB05's identity
  * \f$F(E) = m^x\f$, which breaks when \f$\alpha \ne 1\f$ or
  * \f$\beta^n \ne 0\f$). The flat-space reduction is bit-identical to
- * `Hllc` — see the plan doc §9 rung 1.
+ * `Hllc` — see the plan doc §10 rung 1.
  *
  * The full WSG16 tetrad wrapper (plan §5) is deferred to a later session
  * as (a) a curved-background cross-check against the two-scalar form
- * (plan §9 rung 6) and (b) the natural HLLD-extension architecture — for
+ * (plan §10 rung 7) and (b) the natural HLLD-extension architecture — for
  * HLLD the transverse-B structure needs the full 4-velocity basis and
  * the two-scalar reduction breaks.
  *
- * \note Restricted to \f$\mathbf{B} = 0\f$. For the divergence-cleaning
- * variables \f$\tilde{B}^i\f$ and \f$\tilde\Phi\f$ the HLL flux is used,
- * matching `Hllc`. Extending to MHD requires HLLD (Mignone, Ugliano & Bodo
+ * \note Restricted to \f$\mathbf{B} = 0\f$. For genuinely magnetized
+ * states (\f$|B| > \f$ threshold) the class falls back to **full HLL for
+ * all evolved variables**, not the hybrid HLLC-on-fluid + HLL-on-B pattern
+ * used by the current `Hllc`. That hybrid is not a consistent RMHD HLLC:
+ * the MB05 star-state assumes \f$B = 0\f$, and applying it to fluid
+ * variables when \f$B \ne 0\f$ gives inconsistent Rankine-Hugoniot
+ * conditions. Extending to MHD requires HLLD (Mignone, Ugliano & Bodo
  * 2009) as the inner kernel.
  */
 class HllcGr final : public evolution::BoundaryCorrection {
@@ -118,6 +135,22 @@ class HllcGr final : public evolution::BoundaryCorrection {
   /// \f$F^*(\tilde S_i) = \tilde S^*_i \lambda^* + \tilde p^*\, n_i\f$.
   struct InterfaceNormalCovector : db::SimpleTag {
     using type = tnsr::i<DataVector, 3, Frame::Inertial>;
+  };
+  /// Lapse \f$\alpha\f$ at the interface, needed for the two-scalar hat
+  /// transform: divides the coordinate-frame quantities to convert them to
+  /// the local Eulerian frame.
+  struct LapseAtInterface : db::SimpleTag {
+    using type = Scalar<DataVector>;
+  };
+  /// Normal projection of the shift, \f$\beta^n = \beta^i n_i\f$, at the
+  /// interface. Feeds the two-scalar hat transform
+  /// \f$\hat F = (F + \beta^n U)/\alpha\f$ and the interface-velocity
+  /// \f$w_{\rm face} = \beta^n/\alpha\f$ region-selection point.
+  /// Signed with the interior's outward normal; averaged antisymmetrically
+  /// with the exterior copy in `dg_boundary_terms` — same pattern as
+  /// `InterfaceNormalCovector` above.
+  struct ShiftDotNormal : db::SimpleTag {
+    using type = Scalar<DataVector>;
   };
 
   struct MagneticFieldMagnitudeForHydro {
@@ -172,7 +205,8 @@ class HllcGr final : public evolution::BoundaryCorrection {
                  ::Tags::NormalDotFlux<Tags::TildePhi>,
                  LargestOutgoingCharSpeed, LargestIngoingCharSpeed,
                  NormalDotTildeS, NormalDotFluxNormalDotTildeS, AdvectionSpeed,
-                 PressureFluxCoefficient, InterfaceNormalCovector>;
+                 PressureFluxCoefficient, InterfaceNormalCovector,
+                 LapseAtInterface, ShiftDotNormal>;
   using dg_package_data_temporary_tags = tmpl::list<
       gr::Tags::Lapse<DataVector>, gr::Tags::Shift<DataVector, 3>,
       hydro::Tags::SpatialVelocityOneForm<DataVector, 3, Frame::Inertial>,
@@ -213,6 +247,8 @@ class HllcGr final : public evolution::BoundaryCorrection {
       gsl::not_null<Scalar<DataVector>*> packaged_pressure_flux_coefficient,
       gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
           packaged_interface_normal_covector,
+      gsl::not_null<Scalar<DataVector>*> packaged_lapse_at_interface,
+      gsl::not_null<Scalar<DataVector>*> packaged_shift_dot_normal,
 
       const Scalar<DataVector>& tilde_d, const Scalar<DataVector>& tilde_ye,
       const Scalar<DataVector>& tilde_tau,
@@ -279,6 +315,8 @@ class HllcGr final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& pressure_flux_coefficient_int,
       const tnsr::i<DataVector, 3, Frame::Inertial>&
           interface_normal_covector_int,
+      const Scalar<DataVector>& lapse_at_interface_int,
+      const Scalar<DataVector>& shift_dot_normal_int,
       const Scalar<DataVector>& tilde_d_ext,
       const Scalar<DataVector>& tilde_ye_ext,
       const Scalar<DataVector>& tilde_tau_ext,
@@ -301,6 +339,8 @@ class HllcGr final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& pressure_flux_coefficient_ext,
       const tnsr::i<DataVector, 3, Frame::Inertial>&
           interface_normal_covector_ext,
+      const Scalar<DataVector>& lapse_at_interface_ext,
+      const Scalar<DataVector>& shift_dot_normal_ext,
       dg::Formulation dg_formulation);
 
  private:

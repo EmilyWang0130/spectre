@@ -73,6 +73,8 @@ double HllcGr::dg_package_data(
     const gsl::not_null<Scalar<DataVector>*> packaged_pressure_flux_coefficient,
     const gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
         packaged_interface_normal_covector,
+    const gsl::not_null<Scalar<DataVector>*> packaged_lapse_at_interface,
+    const gsl::not_null<Scalar<DataVector>*> packaged_shift_dot_normal,
 
     const Scalar<DataVector>& tilde_d, const Scalar<DataVector>& tilde_ye,
     const Scalar<DataVector>& tilde_tau,
@@ -113,6 +115,15 @@ double HllcGr::dg_package_data(
   {
     Scalar<DataVector> shift_dot_normal = tilde_d;
     dot_product(make_not_null(&shift_dot_normal), shift, normal_covector);
+
+    // Package α and β^n for the two-scalar hat transform in
+    // dg_boundary_terms. These are the RAW coordinate-frame values, without
+    // mesh-velocity subtraction — the current SR HLLC scheme subtracts
+    // n · v_mesh from the packaged wave speeds and advection_speed below;
+    // for the GR-correct two-scalar path the mesh-velocity convention is
+    // resolved separately at the interface (see plan §6).
+    *packaged_lapse_at_interface = lapse;
+    *packaged_shift_dot_normal = shift_dot_normal;
 
     get(*packaged_largest_outgoing_char_speed) =
         get(lapse) - get(shift_dot_normal);
@@ -293,6 +304,8 @@ void HllcGr::dg_boundary_terms(
     const Scalar<DataVector>& pressure_flux_coefficient_int,
     const tnsr::i<DataVector, 3, Frame::Inertial>&
         interface_normal_covector_int,
+    const Scalar<DataVector>& lapse_at_interface_int,
+    const Scalar<DataVector>& shift_dot_normal_int,
     const Scalar<DataVector>& tilde_d_ext,
     const Scalar<DataVector>& tilde_ye_ext,
     const Scalar<DataVector>& tilde_tau_ext,
@@ -313,6 +326,8 @@ void HllcGr::dg_boundary_terms(
     const Scalar<DataVector>& pressure_flux_coefficient_ext,
     const tnsr::i<DataVector, 3, Frame::Inertial>&
         interface_normal_covector_ext,
+    const Scalar<DataVector>& lapse_at_interface_ext,
+    const Scalar<DataVector>& shift_dot_normal_ext,
     const dg::Formulation dg_formulation) {
   const size_t num_points = get(tilde_d_int).size();
   const bool weak_form = dg_formulation == dg::Formulation::WeakInertial;
@@ -350,7 +365,9 @@ void HllcGr::dg_boundary_terms(
     const double f_Tau_L = get(normal_dot_flux_tilde_tau_int)[i];
     const double f_Phi_L = get(normal_dot_flux_tilde_phi_int)[i];
     const double f_M_L = get(normal_dot_flux_normal_dot_tilde_s_int)[i];
-    const double f_E_L = f_Tau_L + f_D_L;
+    // Note: f_E_L = f_Tau_L + f_D_L was the coord-frame energy flux used
+    // by the pre-refactor MB05 quadratic. The two-scalar refactor works
+    // with F_hat_E_L = F_hat_Tau_L + F_hat_D_L below instead.
 
     // Interior-frame R (= ext) state / flux / scalars. State variables and
     // even-normal-count scalars are unflipped; flux-like quantities and
@@ -369,7 +386,6 @@ void HllcGr::dg_boundary_terms(
     const double f_Tau_R = -get(normal_dot_flux_tilde_tau_ext)[i];
     const double f_Phi_R = -get(normal_dot_flux_tilde_phi_ext)[i];
     const double f_M_R = get(normal_dot_flux_normal_dot_tilde_s_ext)[i];
-    const double f_E_R = f_Tau_R + f_D_R;
 
     // Interior-frame per-index R quantities for tilde_S and tilde_B and
     // their fluxes. tilde_S_i, tilde_B^i (state) do not flip; their normal
@@ -410,198 +426,272 @@ void HllcGr::dg_boundary_terms(
          0.5 * (get<2>(interface_normal_covector_int)[i] -
                 get<2>(interface_normal_covector_ext)[i])}};
 
-    // Helper: HLL flux for a state variable (odd-normal-count quantity, so
-    // the ext-flip sign is baked in via the "+ f_R" combination). This is
-    // used as the fallback / for the magnetic + divergence-cleaning
-    // sector, where HLLC doesn't add contact resolution.
+    // Two-scalar hat-transform geometry (plan §3 + §4). alpha is a scalar
+    // (symmetric average); beta^n = beta^i n_i is odd under normal-flip
+    // (antisymmetric average, matching the n_i pattern above). Mesh
+    // velocity is deferred to a future session — the SpECTRE convention
+    // needs to be verified first (plan §6).
+    const double alpha =
+        0.5 * (get(lapse_at_interface_int)[i] + get(lapse_at_interface_ext)[i]);
+    const double beta_n_eff =
+        0.5 * (get(shift_dot_normal_int)[i] - get(shift_dot_normal_ext)[i]);
+    const double alpha_inv = 1.0 / alpha;
+
+    // Hat-transform L/R outer wave speeds and normal fluxes (plan §4.1
+    // steps 3-5). The hatted system satisfies MB05's SR identity
+    // F_hat(E) = M, so the existing MB05 quadratic + star-state math
+    // runs on hatted quantities directly.
+    const double nu_L = (lambda_L + beta_n_eff) * alpha_inv;
+    const double nu_R = (lambda_R + beta_n_eff) * alpha_inv;
+    // Physical normal velocity v^n = u/alpha + beta^n/alpha (the SR
+    // "v_x" analog in the hatted frame).
+    const double v_hat_L = (u_L + beta_n_eff) * alpha_inv;
+    const double v_hat_R = (u_R + beta_n_eff) * alpha_inv;
+    // SR pressure (in hatted units) = sqrt(gamma) p; coord P_tilde = alpha
+    // sqrt(gamma) p, so divide by alpha.
+    const double P_hat_L = Ptilde_L * alpha_inv;
+    const double P_hat_R = Ptilde_R * alpha_inv;
+
+    const double F_hat_D_L = (f_D_L + beta_n_eff * D_L) * alpha_inv;
+    const double F_hat_Ye_L = (f_Ye_L + beta_n_eff * Ye_L) * alpha_inv;
+    const double F_hat_Tau_L = (f_Tau_L + beta_n_eff * Tau_L) * alpha_inv;
+    // F_hat(E) = F_hat_Tau + F_hat_D — the MB05 SR identity F_hat(E) = M
+    // holds on physical states.
+    const double F_hat_E_L = F_hat_Tau_L + F_hat_D_L;
+    // F_hat(M) = n^i F_hat(S_i) = (F(M) + beta^n_eff M) / alpha, SEPARATE
+    // from F_hat(E). Both enter the MB05 quadratic (a = F_hat_E_hll,
+    // b = E_hll + F_hat_M_hll, c = M_hll).
+    const double F_hat_M_L = (f_M_L + beta_n_eff * M_L) * alpha_inv;
+    const std::array<double, 3> F_hat_S_L{
+        {(f_S_L[0] + beta_n_eff * S_L[0]) * alpha_inv,
+         (f_S_L[1] + beta_n_eff * S_L[1]) * alpha_inv,
+         (f_S_L[2] + beta_n_eff * S_L[2]) * alpha_inv}};
+
+    const double F_hat_D_R = (f_D_R + beta_n_eff * D_R) * alpha_inv;
+    const double F_hat_Ye_R = (f_Ye_R + beta_n_eff * Ye_R) * alpha_inv;
+    const double F_hat_Tau_R = (f_Tau_R + beta_n_eff * Tau_R) * alpha_inv;
+    const double F_hat_E_R = F_hat_Tau_R + F_hat_D_R;
+    const double F_hat_M_R = (f_M_R + beta_n_eff * M_R) * alpha_inv;
+    const std::array<double, 3> F_hat_S_R{
+        {(f_S_R[0] + beta_n_eff * S_R[0]) * alpha_inv,
+         (f_S_R[1] + beta_n_eff * S_R[1]) * alpha_inv,
+         (f_S_R[2] + beta_n_eff * S_R[2]) * alpha_inv}};
+
+    // Helper: HLL flux for a state variable — used for the magnetic +
+    // divergence-cleaning sector, which keeps the current hybrid path
+    // (plan §8 recommends full-HLL fallback for |B| > threshold; deferred
+    // to a future session).
     const double delta_lambda = lambda_R - lambda_L;
     const auto hll_flux = [lambda_L, lambda_R, delta_lambda](
                               const double f_L, const double f_R,
                               const double U_L, const double U_R) {
-      // Note: f_R here is already in the L-frame (sign-flipped from ext).
+      // f_R here is already in the L-frame (sign-flipped from ext).
       return (lambda_R * f_L - lambda_L * f_R +
               lambda_L * lambda_R * (U_R - U_L)) /
              delta_lambda;
     };
 
-    // Region selection follows MB05 §3.1.3.
-    // For the trivial supersonic branches we pick a fixed side's flux; for
-    // the star region we solve the MB05 quadratic for lambda*.
-
-    // We assemble G_* for each component in the interior's normal frame.
-    // For weak form, boundary_correction = G. For strong form,
-    // boundary_correction = G - f_int.
-    double G_D = 0.0;
-    double G_Ye = 0.0;
-    double G_Tau = 0.0;
-    std::array<double, 3> G_S{{0.0, 0.0, 0.0}};
+    // Selected star state and selected hatted flux (plan §4.1 step 8).
+    // These are the outputs of the SR MB05 kernel run in the hatted
+    // frame; the inverse transform (plan §4.1 step 9) requires BOTH.
+    double D_sel = 0.0, Ye_sel = 0.0, Tau_sel = 0.0;
+    std::array<double, 3> S_sel{{0.0, 0.0, 0.0}};
+    double F_hat_D_sel = 0.0, F_hat_Ye_sel = 0.0, F_hat_Tau_sel = 0.0;
+    std::array<double, 3> F_hat_S_sel{{0.0, 0.0, 0.0}};
+    // Magnetic + Phi are handled in coord frame directly (hybrid path).
     std::array<double, 3> G_B{{0.0, 0.0, 0.0}};
     double G_Phi = 0.0;
 
+    // Region select. sign check on lambda (coord frame) is equivalent to
+    // sign check on (nu - w_face) in the hatted frame — see plan §4.
     if (lambda_L >= 0.0) {
-      // Fully outgoing: numerical flux = f_L (packaged interior flux).
-      G_D = f_D_L;
-      G_Ye = f_Ye_L;
-      G_Tau = f_Tau_L;
-      G_S = f_S_L;
+      // Fully outgoing.
+      D_sel = D_L;
+      Ye_sel = Ye_L;
+      Tau_sel = Tau_L;
+      S_sel = S_L;
+      F_hat_D_sel = F_hat_D_L;
+      F_hat_Ye_sel = F_hat_Ye_L;
+      F_hat_Tau_sel = F_hat_Tau_L;
+      F_hat_S_sel = F_hat_S_L;
       G_B = f_B_L;
       G_Phi = f_Phi_L;
     } else if (lambda_R <= 0.0) {
-      // Fully incoming: numerical flux = f_R (packaged exterior flux in
-      // interior's normal frame; already sign-flipped above).
-      G_D = f_D_R;
-      G_Ye = f_Ye_R;
-      G_Tau = f_Tau_R;
-      G_S = f_S_R;
+      // Fully incoming.
+      D_sel = D_R;
+      Ye_sel = Ye_R;
+      Tau_sel = Tau_R;
+      S_sel = S_R;
+      F_hat_D_sel = F_hat_D_R;
+      F_hat_Ye_sel = F_hat_Ye_R;
+      F_hat_Tau_sel = F_hat_Tau_R;
+      F_hat_S_sel = F_hat_S_R;
       G_B = f_B_R;
       G_Phi = f_Phi_R;
     } else {
-      // Star region. Solve the MB05 quadratic (Eq. 18).
-      // HLL averages for (E, M) and their fluxes (in interior's frame).
+      // Star region. MB05 quadratic in hatted quantities.
+      const double dnu = nu_R - nu_L;
       const double E_hll =
-          (lambda_R * E_R - lambda_L * E_L + f_E_L - f_E_R) / delta_lambda;
+          (nu_R * E_R - nu_L * E_L + F_hat_E_L - F_hat_E_R) / dnu;
       const double M_hll =
-          (lambda_R * M_R - lambda_L * M_L + f_M_L - f_M_R) / delta_lambda;
-      const double f_E_hll = (lambda_R * f_E_L - lambda_L * f_E_R +
-                              lambda_L * lambda_R * (E_R - E_L)) /
-                             delta_lambda;
-      const double f_M_hll = (lambda_R * f_M_L - lambda_L * f_M_R +
-                              lambda_L * lambda_R * (M_R - M_L)) /
-                             delta_lambda;
+          (nu_R * M_R - nu_L * M_L + F_hat_M_L - F_hat_M_R) / dnu;
+      const double F_hat_E_hll =
+          (nu_R * F_hat_E_L - nu_L * F_hat_E_R + nu_L * nu_R * (E_R - E_L)) /
+          dnu;
+      const double F_hat_M_hll =
+          (nu_R * F_hat_M_L - nu_L * F_hat_M_R + nu_L * nu_R * (M_R - M_L)) /
+          dnu;
 
-      // MB05 Eq. 18 quadratic in the form
-      //   a lambda*^2 - b lambda* + c = 0,
-      // with a = F_E_hll, b = E_hll + F_M_hll, c = M_hll. Solve using
-      // Numerical Recipes' stable-root form to avoid catastrophic
-      // cancellation in b - sqrt(D). PLUTO's `Src/RHD/hllc.c` uses the
-      // same trick. No fallback -- MB05 proves lambda* is real and inside
-      // [lambda_L, lambda_R] for physical L/R states, and we trust the
-      // reconstructor to hand us physical states (any failure is upstream).
-      const double a = f_E_hll;
-      const double b = E_hll + f_M_hll;
+      // MB05 Eq. 18 quadratic in hatted quantities:
+      //   a nu*^2 - b nu* + c = 0
+      //   a = F_hat_E_hll, b = E_hll + F_hat_M_hll, c = M_hll.
+      // Numerical-Recipes stable-root form (PLUTO's `Src/RHD/hllc.c`).
+      const double a = F_hat_E_hll;
+      const double b = E_hll + F_hat_M_hll;
       const double c = M_hll;
-      // MB05 guarantees b^2 - 4ac >= 0 for physical states. The `max(0, .)`
-      // is a defensive `sqrt` guard against unphysical L/R data (e.g. the
-      // random-data unit test) -- not an algorithmic fallback to HLL.
+      // Defensive sqrt guard against unphysical L/R data (random-data
+      // unit test). MB05 proves b^2 - 4ac >= 0 for physical states.
       const double discriminant = std::sqrt(std::max(0.0, b * b - 4.0 * a * c));
-      // DIAG: check for degenerate quadratic (division by zero in either
-      // form) or non-finite inputs, and dump the offending L, R state.
+      // Diagnostic dump for genuinely degenerate quadratic or non-finite
+      // inputs — kept for the two-scalar refactor as it isolates
+      // upstream bugs (reconstruction, primitive recovery) from solver
+      // bugs.
       const bool bad_rat_branch =
           (b >= 0.0) and std::abs(b + discriminant) < 1.0e-30;
       const bool bad_dir_branch = (b < 0.0) and std::abs(a) < 1.0e-30;
       const bool bad_input =
           not std::isfinite(a) or not std::isfinite(b) or not std::isfinite(c);
       if (bad_rat_branch or bad_dir_branch or bad_input) {
-        ERROR("[HllcGr DIAG] Degenerate quadratic at grid point i="
+        ERROR("[HllcGr DIAG] Degenerate hatted quadratic at grid point i="
               << i << "\n  a=" << a << " b=" << b << " c=" << c
-              << " disc=" << discriminant << "\n  lambda_L=" << lambda_L
-              << " lambda_R=" << lambda_R << "\n  L: D=" << D_L
-              << " Ye=" << Ye_L << " Tau=" << Tau_L << " Phi=" << Phi_L
-              << " M=" << M_L << " u=" << u_L << " Ptilde=" << Ptilde_L
+              << " disc=" << discriminant << "\n  alpha=" << alpha
+              << " beta_n_eff=" << beta_n_eff << "\n  nu_L=" << nu_L
+              << " nu_R=" << nu_R << "\n  L: D=" << D_L << " Ye=" << Ye_L
+              << " Tau=" << Tau_L << " Phi=" << Phi_L << " M=" << M_L
+              << " v_hat=" << v_hat_L << " P_hat=" << P_hat_L
               << "\n     Sx=" << S_L[0] << " Sy=" << S_L[1] << " Sz=" << S_L[2]
-              << "\n     fD=" << f_D_L << " fE=" << f_E_L << " fM=" << f_M_L
-              << " fPhi=" << f_Phi_L << "\n     fSx=" << f_S_L[0] << " fSy="
-              << f_S_L[1] << " fSz=" << f_S_L[2] << "\n  R: D=" << D_R
-              << " Ye=" << Ye_R << " Tau=" << Tau_R << " Phi=" << Phi_R
-              << " M=" << M_R << " u=" << u_R << " Ptilde=" << Ptilde_R
-              << "\n     Sx=" << S_R[0] << " Sy=" << S_R[1] << " Sz=" << S_R[2]
-              << "\n     fD=" << f_D_R << " fE=" << f_E_R << " fM=" << f_M_R
-              << " fPhi=" << f_Phi_R << "\n     fSx=" << f_S_R[0]
-              << " fSy=" << f_S_R[1] << " fSz=" << f_S_R[2] << "\n  n_i=("
-              << n_i[0] << ", " << n_i[1] << ", " << n_i[2] << ")");
+              << "\n     F_hat_D=" << F_hat_D_L << " F_hat_E=" << F_hat_E_L
+              << " F_hat_M=" << F_hat_M_L << "\n     F_hat_Sx=" << F_hat_S_L[0]
+              << " F_hat_Sy=" << F_hat_S_L[1] << " F_hat_Sz=" << F_hat_S_L[2]
+              << "\n  R: D=" << D_R << " Ye=" << Ye_R << " Tau=" << Tau_R
+              << " Phi=" << Phi_R << " M=" << M_R << " v_hat=" << v_hat_R
+              << " P_hat=" << P_hat_R << "\n     Sx=" << S_R[0]
+              << " Sy=" << S_R[1] << " Sz=" << S_R[2]
+              << "\n     F_hat_D=" << F_hat_D_R << " F_hat_E=" << F_hat_E_R
+              << " F_hat_M=" << F_hat_M_R << "\n     F_hat_Sx=" << F_hat_S_R[0]
+              << " F_hat_Sy=" << F_hat_S_R[1] << " F_hat_Sz=" << F_hat_S_R[2]
+              << "\n  n_i=(" << n_i[0] << ", " << n_i[1] << ", " << n_i[2]
+              << ")");
       }
-      const double lambda_star = (b >= 0.0) ? (2.0 * c / (b + discriminant))
-                                            : ((b - discriminant) / (2.0 * a));
+      const double nu_star = (b >= 0.0) ? (2.0 * c / (b + discriminant))
+                                        : ((b - discriminant) / (2.0 * a));
 
-      // Common star pressure from the HLL consistency relations:
-      //   Ptilde_star = f_M_hll - lambda_star * f_E_hll.
-      // This follows from MB05 Eq. (18) together with
-      //   M_hll = lambda_star * (E_hll + Ptilde_star),
-      // and is equivalent to the corrected form of MB05 Eq. (17),
-      //   (A + lambda Ptilde_star) lambda_star = B + Ptilde_star.
-      // Using the HLL averages avoids choosing one side and preserves the
-      // int/ext swap symmetry up to roundoff.
-      const double Ptilde_star = f_M_hll - lambda_star * f_E_hll;
+      // Hatted star pressure. In the hatted frame the SR-derived MB05
+      // consistency relation is P_hat_star = F_hat_M_hll - nu_star *
+      // F_hat_E_hll (identical algebra to the coord version, just with
+      // hatted quantities).
+      const double P_hat_star = F_hat_M_hll - nu_star * F_hat_E_hll;
 
-      // Star states via MB05 Eq. 16, in the interior's normal frame.
-      // Common factor r_alpha = (lambda_alpha - u_alpha) / (lambda_alpha
-      // - lambda*). transverse/passive quantities scale by r; normal
-      // momentum and energy pick up pressure-difference terms.
-      auto star_state = [lambda_star, Ptilde_star, &n_i](
-                            const double lambda_alpha, const double u_alpha,
-                            const double D_alpha, const double Ye_alpha,
-                            const double Tau_alpha, const double E_alpha,
-                            const double M_alpha, const double Ptilde_alpha,
-                            const std::array<double, 3>& S_alpha,
-                            double& D_star, double& Ye_star, double& Tau_star,
-                            double& M_star, std::array<double, 3>& S_star) {
-        const double denom = lambda_alpha - lambda_star;
-        const double r = (lambda_alpha - u_alpha) / denom;
+      // Star states (hatted). r_alpha = (nu_alpha - v_hat_alpha) /
+      // (nu_alpha - nu_star). Note that D_star, Ye_star, Tau_star, S_star
+      // are STATE variables — they don't transform under the hat, so the
+      // values computed here are the coord-frame star states directly.
+      auto star_state_hat = [nu_star, P_hat_star, &n_i](
+                                const double nu_alpha, const double v_hat_alpha,
+                                const double D_alpha, const double Ye_alpha,
+                                const double Tau_alpha, const double E_alpha,
+                                const double M_alpha, const double P_hat_alpha,
+                                const std::array<double, 3>& S_alpha,
+                                double& D_star, double& Ye_star,
+                                double& Tau_star,
+                                std::array<double, 3>& S_star) {
+        const double denom = nu_alpha - nu_star;
+        const double r = (nu_alpha - v_hat_alpha) / denom;
         D_star = D_alpha * r;
         Ye_star = Ye_alpha * r;
         const double E_star =
-            (E_alpha * (lambda_alpha - u_alpha) + Ptilde_star * lambda_star -
-             Ptilde_alpha * u_alpha) /
+            (E_alpha * (nu_alpha - v_hat_alpha) + P_hat_star * nu_star -
+             P_hat_alpha * v_hat_alpha) /
             denom;
         Tau_star = E_star - D_star;
-        // Consistency: keep Tau* via E* - D* rather than through a
-        // separate MB05-style formula to avoid roundoff drift.
-        (void)Tau_alpha;
-        M_star =
-            (M_alpha * (lambda_alpha - u_alpha) + Ptilde_star - Ptilde_alpha) /
-            denom;
-        const double pressure_jump = Ptilde_star - Ptilde_alpha;
+        (void)Tau_alpha;  // consistency via E_star - D_star, not
+                          // MB05 Eq. 16b, to avoid roundoff drift.
+        (void)M_alpha;    // n^i S_star_i consistency check deferred to
+                          // the unit test (was (void)M_star_{L,R} before
+                          // the refactor).
+        const double pressure_jump = P_hat_star - P_hat_alpha;
         for (size_t k = 0; k < 3; ++k) {
-          gsl::at(S_star, k) = (gsl::at(S_alpha, k) * (lambda_alpha - u_alpha) +
+          gsl::at(S_star, k) = (gsl::at(S_alpha, k) * (nu_alpha - v_hat_alpha) +
                                 pressure_jump * gsl::at(n_i, k)) /
                                denom;
         }
       };
 
-      double D_star_L = 0.0, Ye_star_L = 0.0, Tau_star_L = 0.0, M_star_L = 0.0;
+      double D_star_L = 0.0, Ye_star_L = 0.0, Tau_star_L = 0.0;
       std::array<double, 3> S_star_L{{0.0, 0.0, 0.0}};
-      double D_star_R = 0.0, Ye_star_R = 0.0, Tau_star_R = 0.0, M_star_R = 0.0;
+      double D_star_R = 0.0, Ye_star_R = 0.0, Tau_star_R = 0.0;
       std::array<double, 3> S_star_R{{0.0, 0.0, 0.0}};
-      star_state(lambda_L, u_L, D_L, Ye_L, Tau_L, E_L, M_L, Ptilde_L, S_L,
-                 D_star_L, Ye_star_L, Tau_star_L, M_star_L, S_star_L);
-      star_state(lambda_R, u_R, D_R, Ye_R, Tau_R, E_R, M_R, Ptilde_R, S_R,
-                 D_star_R, Ye_star_R, Tau_star_R, M_star_R, S_star_R);
+      star_state_hat(nu_L, v_hat_L, D_L, Ye_L, Tau_L, E_L, M_L, P_hat_L, S_L,
+                     D_star_L, Ye_star_L, Tau_star_L, S_star_L);
+      star_state_hat(nu_R, v_hat_R, D_R, Ye_R, Tau_R, E_R, M_R, P_hat_R, S_R,
+                     D_star_R, Ye_star_R, Tau_star_R, S_star_R);
 
-      // Star flux via Rankine-Hugoniot: F*_alpha = F_alpha + lambda_alpha
-      // (U*_alpha - U_alpha). Guaranteed conservative.
-      if (lambda_star >= 0.0) {
-        G_D = f_D_L + lambda_L * (D_star_L - D_L);
-        G_Ye = f_Ye_L + lambda_L * (Ye_star_L - Ye_L);
-        G_Tau = f_Tau_L + lambda_L * (Tau_star_L - Tau_L);
+      // Region select inside the fan (plan §4.1 step 8): nu_star vs
+      // w_face = beta_n_eff / alpha. Equivalent to lambda_star_coord =
+      // alpha * nu_star - beta_n_eff vs 0.
+      const double lambda_star_coord = alpha * nu_star - beta_n_eff;
+
+      if (lambda_star_coord >= 0.0) {
+        D_sel = D_star_L;
+        Ye_sel = Ye_star_L;
+        Tau_sel = Tau_star_L;
+        S_sel = S_star_L;
+        // Hatted star flux via Rankine-Hugoniot: F_hat_star =
+        // F_hat_alpha + nu_alpha (U_star - U_alpha).
+        F_hat_D_sel = F_hat_D_L + nu_L * (D_star_L - D_L);
+        F_hat_Ye_sel = F_hat_Ye_L + nu_L * (Ye_star_L - Ye_L);
+        F_hat_Tau_sel = F_hat_Tau_L + nu_L * (Tau_star_L - Tau_L);
         for (size_t k = 0; k < 3; ++k) {
-          gsl::at(G_S, k) = gsl::at(f_S_L, k) +
-                            lambda_L * (gsl::at(S_star_L, k) - gsl::at(S_L, k));
+          gsl::at(F_hat_S_sel, k) =
+              gsl::at(F_hat_S_L, k) +
+              nu_L * (gsl::at(S_star_L, k) - gsl::at(S_L, k));
         }
       } else {
-        G_D = f_D_R + lambda_R * (D_star_R - D_R);
-        G_Ye = f_Ye_R + lambda_R * (Ye_star_R - Ye_R);
-        G_Tau = f_Tau_R + lambda_R * (Tau_star_R - Tau_R);
+        D_sel = D_star_R;
+        Ye_sel = Ye_star_R;
+        Tau_sel = Tau_star_R;
+        S_sel = S_star_R;
+        F_hat_D_sel = F_hat_D_R + nu_R * (D_star_R - D_R);
+        F_hat_Ye_sel = F_hat_Ye_R + nu_R * (Ye_star_R - Ye_R);
+        F_hat_Tau_sel = F_hat_Tau_R + nu_R * (Tau_star_R - Tau_R);
         for (size_t k = 0; k < 3; ++k) {
-          gsl::at(G_S, k) = gsl::at(f_S_R, k) +
-                            lambda_R * (gsl::at(S_star_R, k) - gsl::at(S_R, k));
+          gsl::at(F_hat_S_sel, k) =
+              gsl::at(F_hat_S_R, k) +
+              nu_R * (gsl::at(S_star_R, k) - gsl::at(S_R, k));
         }
       }
-      // Ensure the M / S consistency: (n^i S*_i) should equal M*_side
-      // (the scalar we solved for). Not enforced hard here; the numerical
-      // consistency is checked in the unit test.
-      (void)M_star_L;
-      (void)M_star_R;
 
-      // Magnetic + divergence-cleaning sector: HLL flux. HLLC doesn't
-      // resolve the Alfven / slow waves; the class is documented as B = 0
-      // only. The supersonic branches above already handled the trivial
-      // cases; this only runs in the star region.
+      // Magnetic + Phi HLL fallback (hybrid — plan §8 flags this).
       G_Phi = hll_flux(f_Phi_L, f_Phi_R, Phi_L, Phi_R);
       for (size_t k = 0; k < 3; ++k) {
         gsl::at(G_B, k) = hll_flux(gsl::at(f_B_L, k), gsl::at(f_B_R, k),
                                    gsl::at(B_L, k), gsl::at(B_R, k));
       }
     }
+
+    // Inverse hat transform (plan §4.1 step 9). Needs BOTH the selected
+    // hatted flux and the selected state:
+    //   G_coord = alpha * F_hat_selected - beta^n_eff * U_selected.
+    // Silently gives correct results for alpha=1, beta^n_eff=0 whether
+    // U_selected is present or not; curved-space tests will catch the
+    // bug if U_selected is dropped.
+    const double G_D = alpha * F_hat_D_sel - beta_n_eff * D_sel;
+    const double G_Ye = alpha * F_hat_Ye_sel - beta_n_eff * Ye_sel;
+    const double G_Tau = alpha * F_hat_Tau_sel - beta_n_eff * Tau_sel;
+    const std::array<double, 3> G_S{
+        {alpha * F_hat_S_sel[0] - beta_n_eff * S_sel[0],
+         alpha * F_hat_S_sel[1] - beta_n_eff * S_sel[1],
+         alpha * F_hat_S_sel[2] - beta_n_eff * S_sel[2]}};
 
     // Convert G to the boundary correction expected by the DG action.
     // Weak form: correction = G; strong form: correction = G - f_L.
