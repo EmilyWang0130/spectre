@@ -69,15 +69,21 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.HllcGr",
   // numerical flux is antisymmetric under exchanging the two sides of the
   // interface.
   //
-  // ZeroOnSmoothSolution::No is used because the present MB05 star-state
-  // formulas are implemented directly in coordinate-frame Valencia
-  // variables. They exactly satisfy the identical-state consistency
-  // property in Minkowski spacetime, but not necessarily for arbitrary
-  // lapse and shift.
+  // ZeroOnSmoothSolution::No is used because the star-state formulas rely
+  // on the MB05 identity F(E) = m^x, which requires that the packaged
+  // fluxes be F(U) of the state; the conservation helper populates state
+  // and flux independently. The Python cross-check below verifies the
+  // smooth-solution property with self-consistent fluxes.
+  //
+  // Lapse in [0.3, 1.0] and shift components in [-0.3, 0.3] are wide
+  // enough that the two-scalar hat transform (F_hat = (F + beta^n U)/alpha,
+  // nu = (lambda + beta^n)/alpha) is exercised order-unity — this is the
+  // first-beta^n-nonzero rung (rung 3) of the validation ladder in
+  // HLLC_GR_ONF_PLAN.md sec 10.
   const tuples::TaggedTuple<
       helpers::Tags::Range<gr::Tags::Lapse<DataVector>>,
       helpers::Tags::Range<gr::Tags::Shift<DataVector, 3>>>
-      ranges{std::array{0.3, 1.0}, std::array{0.01, 0.02}};
+      ranges{std::array{0.3, 1.0}, std::array{-0.3, 0.3}};
 
   helpers::test_boundary_correction_conservation<system>(
       make_not_null(&gen), hllc_boundary_correction, mesh, volume_data, ranges,
@@ -121,7 +127,7 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.HllcGr",
       helpers::Tags::Range<gr::Tags::Lapse<DataVector>>,
       helpers::Tags::Range<gr::Tags::Shift<DataVector, 3>>,
       helpers::Tags::Range<grmhd::ValenciaDivClean::Tags::TildeB<>>>
-      ranges_hydro{std::array{0.3, 1.0}, std::array{0.01, 0.02},
+      ranges_hydro{std::array{0.3, 1.0}, std::array{-0.3, 0.3},
                    std::array{0.0, 0.0}};
 
   helpers::test_boundary_correction_with_python<system,
@@ -138,8 +144,7 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.HllcGr",
       helpers::Tags::Range<gr::Tags::Lapse<DataVector>>,
       helpers::Tags::Range<gr::Tags::Shift<DataVector, 3>>,
       helpers::Tags::Range<grmhd::ValenciaDivClean::Tags::TildeB<>>>
-      ranges_nonzero_magnetic_field{std::array{0.3, 1.0},
-                                    std::array{0.01, 0.02},
+      ranges_nonzero_magnetic_field{std::array{0.3, 1.0}, std::array{-0.3, 0.3},
                                     std::array{1.0e-4, 1.0e-3}};
 
   helpers::test_boundary_correction_with_python<system,
@@ -156,7 +161,7 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.HllcGr",
       helpers::Tags::Range<gr::Tags::Shift<DataVector, 3>>,
       helpers::Tags::Range<grmhd::ValenciaDivClean::Tags::TildeB<>>>
       ranges_atmosphere{std::array{1.0e-10, 1.0e-9}, std::array{0.3, 1.0},
-                        std::array{0.01, 0.02}, std::array{0.0, 0.0}};
+                        std::array{-0.3, 0.3}, std::array{0.0, 0.0}};
 
   helpers::test_boundary_correction_with_python<system,
                                                 tmpl::list<ConvertPolytropic>>(
