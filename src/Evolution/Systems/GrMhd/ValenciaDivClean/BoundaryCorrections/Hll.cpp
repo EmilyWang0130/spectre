@@ -67,6 +67,7 @@ double Hll::dg_package_data(
         packaged_interface_unit_normal,
     const gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
     const gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
+    const gsl::not_null<Scalar<DataVector>*> packaged_electron_fraction,
     const gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
         packaged_spatial_velocity,
     const gsl::not_null<Scalar<DataVector>*> packaged_pressure,
@@ -219,6 +220,7 @@ double Hll::dg_package_data(
   // Package the primitives needed to reconstruct the averaged fast-magnetosonic
   // bounds in dg_boundary_terms.
   *packaged_rest_mass_density = rest_mass_density;
+  *packaged_electron_fraction = electron_fraction;
   for (size_t i = 0; i < 3; ++i) {
     packaged_spatial_velocity->get(i) = spatial_velocity.get(i);
   }
@@ -277,6 +279,7 @@ void Hll::dg_boundary_terms(
     const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
     const Scalar<DataVector>& metric_flatness_int,
     const Scalar<DataVector>& rest_mass_density_int,
+    const Scalar<DataVector>& electron_fraction_int,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
     const Scalar<DataVector>& pressure_int,
     const Scalar<DataVector>& /*lorentz_factor_int*/,
@@ -298,12 +301,13 @@ void Hll::dg_boundary_terms(
     const tnsr::i<DataVector, 3, Frame::Inertial>& /*iface_normal_ext*/,
     const Scalar<DataVector>& metric_flatness_ext,
     const Scalar<DataVector>& rest_mass_density_ext,
+    const Scalar<DataVector>& electron_fraction_ext,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
     const Scalar<DataVector>& pressure_ext,
     const Scalar<DataVector>& /*lorentz_factor_ext*/,
     const Scalar<DataVector>& specific_internal_energy_ext,
     const dg::Formulation dg_formulation,
-    const EquationsOfState::EquationOfState<true, 3>& equation_of_state) {
+    const EquationsOfState::EquationOfState<true, 3>& equation_of_state) const {
   const size_t num_points = get(tilde_d_int).size();
   const bool weak = dg_formulation == dg::Formulation::WeakInertial;
 
@@ -363,12 +367,52 @@ void Hll::dg_boundary_terms(
     for (size_t i = 0; i < 3; ++i) {
       flat_metric.get(i, i) = 1.0;
     }
-    tnsr::i<DataVector, 9> mhd_speeds{num_points, 0.0};
-    characteristic_speeds_mhd(make_not_null(&mhd_speeds), v_avg, b_avg, rho_avg,
-                              eps_avg, w_avg, enthalpy_avg, flat_metric,
-                              interface_unit_normal_int, equation_of_state);
-    fast_max = max(0.0, mhd_speeds.get(7));  // v_n + c_fast
-    fast_min = min(0.0, mhd_speeds.get(1));  // v_n - c_fast
+    // Branch on |B| at the averaged interface state:
+    //   * |B| < magnetic_field_magnitude_for_hydro_ : pure-hydro
+    //     characteristic_speeds_hydro, which takes electron_fraction and works
+    //     for non-equilibrium 3D EOSs (e.g. Togashi). At B = 0 this is bitwise-
+    //     identical to what characteristic_speeds_mhd would return.
+    //   * |B| >= threshold : characteristic_speeds_mhd, which reduces to
+    //     fast-magnetosonic; unchanged behavior for the KH-instability physics
+    //     the flat-branch was originally added to protect (96d94d83e). Note
+    //     the MHD helper's ThermodynamicDim = 3 branch only supports
+    //     equilibrium 3D EOSs -- if that combination ever needs to be
+    //     supported (non-eq 3D + significant B) a Y_e-aware MHD-fast helper
+    //     will be needed.
+    const double b_sq_avg_max = [&num_points, &b_avg]() {
+      double max_b_sq = 0.0;
+      for (size_t pt = 0; pt < num_points; ++pt) {
+        double b_sq = 0.0;
+        for (size_t i = 0; i < 3; ++i) {
+          b_sq += square(b_avg.get(i)[pt]);
+        }
+        max_b_sq = std::max(max_b_sq, b_sq);
+      }
+      return max_b_sq;
+    }();
+    if (b_sq_avg_max < square(magnetic_field_magnitude_for_hydro_)) {
+      const Scalar<DataVector> ye_avg{
+          0.5 * (get(electron_fraction_int) + get(electron_fraction_ext))};
+      const Scalar<DataVector> p_avg_eos =
+          equation_of_state.pressure_from_density_and_energy(rho_avg, eps_avg,
+                                                             ye_avg);
+      const Scalar<DataVector> h_avg_eos =
+          hydro::relativistic_specific_enthalpy(rho_avg, eps_avg, p_avg_eos);
+      tnsr::i<DataVector, 3> hydro_speeds{num_points, 0.0};
+      characteristic_speeds_hydro(
+          make_not_null(&hydro_speeds), v_avg, rho_avg, eps_avg, ye_avg, w_avg,
+          h_avg_eos, flat_metric, interface_unit_normal_int, equation_of_state);
+      fast_max = max(0.0, hydro_speeds.get(HydroSpeed::LambdaPlus));
+      fast_min = min(0.0, hydro_speeds.get(HydroSpeed::LambdaMinus));
+    } else {
+      tnsr::i<DataVector, 9> mhd_speeds{num_points, 0.0};
+      characteristic_speeds_mhd(make_not_null(&mhd_speeds), v_avg, b_avg,
+                                rho_avg, eps_avg, w_avg, enthalpy_avg,
+                                flat_metric, interface_unit_normal_int,
+                                equation_of_state);
+      fast_max = max(0.0, mhd_speeds.get(7));  // v_n + c_fast
+      fast_min = min(0.0, mhd_speeds.get(1));  // v_n - c_fast
+    }
   }
 
   // HLL flux for one conserved component given the bounds l_max, l_min.

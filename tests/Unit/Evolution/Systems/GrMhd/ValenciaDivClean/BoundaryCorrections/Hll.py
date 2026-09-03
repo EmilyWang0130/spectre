@@ -136,6 +136,7 @@ def dg_package_data(
         normal_covector,
         np.asarray(metric_flatness),
         rest_mass_density,
+        electron_fraction,
         spatial_velocity,
         pressure,
         lorentz_factor,
@@ -161,6 +162,7 @@ def dg_boundary_terms(
     interior_interface_unit_normal,
     interior_metric_flatness,
     interior_rest_mass_density,
+    interior_electron_fraction,
     interior_spatial_velocity,
     interior_pressure,
     interior_lorentz_factor,
@@ -182,6 +184,7 @@ def dg_boundary_terms(
     exterior_interface_unit_normal,
     exterior_metric_flatness,
     exterior_rest_mass_density,
+    exterior_electron_fraction,
     exterior_spatial_velocity,
     exterior_pressure,
     exterior_lorentz_factor,
@@ -203,10 +206,10 @@ def dg_boundary_terms(
             -exterior_largest_outgoing_char_speed,
         ),
     )
-    # Fast-magnetosonic bounds for the MHD variables are computed at the averaged
-    # interface state, but only in flat space. The random test inputs use a
-    # curved metric (metric_flatness > 1e-12 always), so the C++ falls back to
-    # the light bounds; the reference does the same here.
+    # Fast-magnetosonic bounds for the MHD variables are computed at the
+    # averaged interface state, but only in flat space. The random test inputs
+    # use a curved metric (metric_flatness > 1e-12 always), so the C++ falls
+    # back to the light bounds; the reference does the same here.
     fast_max = lambda_max
     fast_min = lambda_min
 

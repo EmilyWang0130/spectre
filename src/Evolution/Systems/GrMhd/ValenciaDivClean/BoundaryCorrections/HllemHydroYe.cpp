@@ -351,10 +351,12 @@ void HllemHydroYe::dg_boundary_terms(
   tnsr::ij<DataVector, 6> hydro_right{num_points, 0.0};
   tnsr::IJ<DataVector, 6> hydro_left{num_points, 0.0};
   DataVector lambda_mid{num_points, 0.0};
-  // characteristic_speeds_mhd interprets the primitives in flat space and
-  // asserts on superluminal velocities; only call it where the background is
-  // flat. (M&M backgrounds are uniform, so a face is either all-flat or
-  // all-curved.)
+  // Flat + |B| < threshold + rho > cutoff => sharpen the outer fluid bounds
+  // from the pure-hydro characteristic speeds (rather than falling back to
+  // light speed). The averaged interface state defines c_s^2 and the
+  // eigenvector construction consistently. Only call the flat helpers where
+  // the background is actually flat -- they assert on superluminal
+  // velocities against an identity spatial metric.
   if (max(get(metric_flatness_int)) <= 1.0e-12 and
       max(get(metric_flatness_ext)) <= 1.0e-12) {
     // FP exceptions are disabled around the flat-space computation for
@@ -387,28 +389,35 @@ void HllemHydroYe::dg_boundary_terms(
     for (size_t i = 0; i < 3; ++i) {
       flat_metric.get(i, i) = 1.0;
     }
-    tnsr::i<DataVector, 9> mhd_speeds{num_points, 0.0};
-    characteristic_speeds_mhd(make_not_null(&mhd_speeds), v_avg, b_avg, rho_avg,
-                              eps_avg, w_avg, enthalpy_avg, flat_metric,
-                              interface_unit_normal_int, equation_of_state);
-    fast_max = max(0.0, mhd_speeds.get(7));  // v_n + c_fast
-    fast_min = min(0.0, mhd_speeds.get(1));  // v_n - c_fast
-    // Middle-block projector, at the SAME averaged interface state so it
-    // stays coherent with the fast bounds above. Rebuild
-    // (p_avg, h_avg) via the EOS so that the eigensystem sees a
-    // thermodynamically consistent state (design v2 sec 6).
+    // Use the pure-hydro characteristic speeds instead of the MHD ones for
+    // the outer fluid bounds: the MHD helper's ThermodynamicDim=3 branch
+    // only supports beta-equilibrium EOSs, whereas characteristic_speeds_
+    // hydro takes electron_fraction explicitly and works for non-eq 3D
+    // tables (Togashi, DD2 full). The averaged interface state's
+    // (p_avg, h_avg) is rebuilt on-EOS so both the outer bounds and the
+    // eigensystem see one thermodynamically consistent state (design v2
+    // sec 6).
+    const Scalar<DataVector> ye_avg{
+        0.5 * (get(electron_fraction_int) + get(electron_fraction_ext))};
+    const Scalar<DataVector> p_avg_eos =
+        equation_of_state.pressure_from_density_and_energy(rho_avg, eps_avg,
+                                                           ye_avg);
+    const Scalar<DataVector> h_avg_eos =
+        hydro::relativistic_specific_enthalpy(rho_avg, eps_avg, p_avg_eos);
+    tnsr::i<DataVector, 3> hydro_speeds{num_points, 0.0};
+    characteristic_speeds_hydro(make_not_null(&hydro_speeds), v_avg, rho_avg,
+                                eps_avg, ye_avg, w_avg, h_avg_eos, flat_metric,
+                                interface_unit_normal_int, equation_of_state);
+    fast_max = max(0.0, hydro_speeds.get(HydroSpeed::LambdaPlus));
+    fast_min = min(0.0, hydro_speeds.get(HydroSpeed::LambdaMinus));
+    // Suppress warnings for the temporaries that used to feed the MHD helper
+    // (b_avg was for its magnetic-field argument). Retain them so the
+    // averaged state remains complete for future diagnostics.
+    (void)b_avg;
+    (void)p_avg;
+    (void)enthalpy_avg;
+    // Middle-block projector -- reuse the same averaged state.
     if (restore_middle_block_) {
-      const Scalar<DataVector> ye_avg{
-          0.5 * (get(electron_fraction_int) + get(electron_fraction_ext))};
-      const Scalar<DataVector> p_avg_eos =
-          equation_of_state.pressure_from_density_and_energy(rho_avg, eps_avg,
-                                                             ye_avg);
-      const Scalar<DataVector> h_avg_eos =
-          hydro::relativistic_specific_enthalpy(rho_avg, eps_avg, p_avg_eos);
-      tnsr::i<DataVector, 3> hydro_speeds{num_points, 0.0};
-      characteristic_speeds_hydro(
-          make_not_null(&hydro_speeds), v_avg, rho_avg, eps_avg, ye_avg, w_avg,
-          h_avg_eos, flat_metric, interface_unit_normal_int, equation_of_state);
       characteristic_eigenvectors_hydro(
           make_not_null(&hydro_right), make_not_null(&hydro_left), v_avg,
           rho_avg, eps_avg, h_avg_eos, ye_avg, w_avg, interface_unit_normal_int,

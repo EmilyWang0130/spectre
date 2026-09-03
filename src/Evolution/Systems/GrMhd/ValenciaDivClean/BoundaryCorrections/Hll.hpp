@@ -154,6 +154,7 @@ class Hll final : public evolution::BoundaryCorrection {
       ::Tags::NormalDotFlux<Tags::TildePhi>, LargestOutgoingCharSpeed,
       LargestIngoingCharSpeed, InterfaceUnitNormal, MetricFlatness,
       hydro::Tags::RestMassDensity<DataVector>,
+      hydro::Tags::ElectronFraction<DataVector>,
       hydro::Tags::SpatialVelocity<DataVector, 3>,
       hydro::Tags::Pressure<DataVector>, hydro::Tags::LorentzFactor<DataVector>,
       hydro::Tags::SpecificInternalEnergy<DataVector>>;
@@ -196,6 +197,7 @@ class Hll final : public evolution::BoundaryCorrection {
           packaged_interface_unit_normal,
       gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
       gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
+      gsl::not_null<Scalar<DataVector>*> packaged_electron_fraction,
       gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
           packaged_spatial_velocity,
       gsl::not_null<Scalar<DataVector>*> packaged_pressure,
@@ -235,7 +237,9 @@ class Hll final : public evolution::BoundaryCorrection {
       const EquationsOfState::EquationOfState<true, 3>& equation_of_state)
       const;
 
-  static void dg_boundary_terms(
+  // Non-static so the flat-branch fast-bound recomputation can consult
+  // magnetic_field_magnitude_for_hydro_ (matches Hllem's convention).
+  void dg_boundary_terms(
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_tau,
@@ -263,6 +267,7 @@ class Hll final : public evolution::BoundaryCorrection {
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
       const Scalar<DataVector>& metric_flatness_int,
       const Scalar<DataVector>& rest_mass_density_int,
+      const Scalar<DataVector>& electron_fraction_int,
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
       const Scalar<DataVector>& pressure_int,
       const Scalar<DataVector>& lorentz_factor_int,
@@ -286,12 +291,14 @@ class Hll final : public evolution::BoundaryCorrection {
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_ext,
       const Scalar<DataVector>& metric_flatness_ext,
       const Scalar<DataVector>& rest_mass_density_ext,
+      const Scalar<DataVector>& electron_fraction_ext,
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
       const Scalar<DataVector>& pressure_ext,
       const Scalar<DataVector>& lorentz_factor_ext,
       const Scalar<DataVector>& specific_internal_energy_ext,
       dg::Formulation dg_formulation,
-      const EquationsOfState::EquationOfState<true, 3>& equation_of_state);
+      const EquationsOfState::EquationOfState<true, 3>& equation_of_state)
+      const;
 
  private:
   friend bool operator==(const Hll& lhs, const Hll& rhs);
