@@ -1,0 +1,388 @@
+// Distributed under the MIT License.
+// See LICENSE.txt for details.
+
+#pragma once
+
+#include <limits>
+#include <memory>
+#include <optional>
+
+#include "DataStructures/DataBox/Prefixes.hpp"
+#include "DataStructures/Tensor/TypeAliases.hpp"
+#include "Evolution/BoundaryCorrection.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/Tags.hpp"
+#include "NumericalAlgorithms/DiscontinuousGalerkin/Formulation.hpp"
+#include "Options/String.hpp"
+#include "PointwiseFunctions/GeneralRelativity/Tags.hpp"
+#include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
+#include "PointwiseFunctions/Hydro/Tags.hpp"
+#include "Utilities/Gsl.hpp"
+#include "Utilities/Serialization/CharmPupable.hpp"
+#include "Utilities/TMPL.hpp"
+
+/// \cond
+class DataVector;
+namespace gsl {
+template <typename T>
+class not_null;
+}  // namespace gsl
+namespace PUP {
+class er;
+}  // namespace PUP
+/// \endcond
+
+namespace grmhd::ValenciaDivClean::BoundaryCorrections {
+/*!
+ * \brief HLL + middle-block anti-diffusion for the hydro+\f$Y_e\f$ subsystem.
+ *
+ * Baseline HLL on all six evolved variables plus anti-diffusion of the
+ * four-dimensional degenerate middle eigenspace of the hydro+\f$Y_e\f$
+ * characteristic decomposition (entropy + two shear modes + composition),
+ * via a basis-independent complementary projector
+ *
+ * \f{align*}
+ *   P_\text{mid} = I - P_+ - P_- ,
+ * \f}
+ *
+ * where \f$P_\pm = R_\pm \otimes L_\pm / (L_\pm \cdot R_\pm)\f$ are the
+ * projectors onto the two acoustic eigenspaces of the normal-flux Jacobian.
+ * The composition-pressure coupling
+ * \f$\zeta = (\partial p / \partial Y_e)_{\rho,\epsilon}\f$ enters through
+ * \f$P_\pm(\zeta) \to P_\text{mid}(\zeta)\f$ automatically; no composition
+ * wave is treated as a named object.
+ *
+ * The corrected flux is
+ *
+ * \f{align*}
+ *   G_\text{HLLEM} = G_\text{HLL}
+ *     - \frac{S_L S_R}{S_R - S_L}\,
+ *       \delta_\text{mid}\,
+ *       P_\text{mid}\,
+ *       (U_R - U_L) ,
+ * \f}
+ *
+ * with
+ * \f$\delta_\text{mid} = 1 - \min(0,\lambda_\text{mid})/S_L
+ *                          - \max(0,\lambda_\text{mid})/S_R\f$ and
+ * \f$\lambda_\text{mid} = v \cdot \hat n\f$.
+ *
+ * Magnetized states with
+ * \f$|B| \ge \text{MagneticFieldMagnitudeForHydro}\f$ bypass this class and
+ * fall back to the existing full HLL solver (design phase 5 covers the GR
+ * ONF wrapper reused from HllcGr; until then this class is flat-space-only
+ * for the anti-diffusion path).
+ *
+ * ---- Phase 1 (current) ----
+ *
+ * `RestoreMiddleBlock=false` and `UsePhysicalZeta=false` are the phase-1
+ * defaults. In this configuration the class reduces bit-identically to the
+ * existing `Hll` solver on the hydro slots; only the option/package/
+ * boundary-term plumbing has been added. Phase 2 will wire up the
+ * projector construction and enable `RestoreMiddleBlock` by default. See
+ * `spectre_runs/hllem_hydroye_design/design.md` for the full design.
+ *
+ * ---- HLL baseline (as inherited from `Hll`) ----
+ *
+ * Let \f$U\f$ be the evolved variable, \f$F^i\f$ the flux, and \f$n_i\f$ be
+ * the outward directed unit normal to the interface. Denoting
+ * \f$F := n_i F^i\f$, the HLL boundary correction is \cite Harten1983
+ *
+ * \f{align*}
+ * G_\text{HLL} = \frac{\lambda_\text{max} F_\text{int} +
+ * \lambda_\text{min} F_\text{ext}}{\lambda_\text{max} - \lambda_\text{min}}
+ * - \frac{\lambda_\text{min}\lambda_\text{max}}{\lambda_\text{max} -
+ *   \lambda_\text{min}} \left(U_\text{int} - U_\text{ext}\right)
+ * \f}
+ *
+ * where "int" and "ext" stand for interior and exterior.
+ * \f$\lambda_\text{min}\f$ and \f$\lambda_\text{max}\f$ are defined as
+ *
+ * \f{align*}
+ * \lambda_\text{min} &=
+ * \text{min}\left(\lambda^{-}_\text{int},-\lambda^{+}_\text{ext}, 0\right) \\
+ * \lambda_\text{max} &=
+ * \text{max}\left(\lambda^{+}_\text{int},-\lambda^{-}_\text{ext}, 0\right)
+ * \f}
+ *
+ * where \f$\lambda^{+}\f$ (\f$\lambda^{-}\f$) is the largest characteristic
+ * speed in the outgoing (ingoing) direction. Note the minus signs in front of
+ * \f$\lambda^{\pm}_\text{ext}\f$, which is because an outgoing speed w.r.t. the
+ * neighboring element is an ingoing speed w.r.t. the local element, and vice
+ * versa. Similarly, the \f$F_{\text{ext}}\f$ term in \f$G_\text{HLL}\f$ has a
+ * positive sign because the outward directed normal of the neighboring element
+ * has the opposite sign, i.e. \f$n_i^{\text{ext}}=-n_i^{\text{int}}\f$.
+ *
+ * The characteristic/signal speeds are given in the documentation for
+ * `grmhd::ValenciaDivClean::characteristic_speeds()`. Since the fluid is
+ * travelling slower than the speed of light, the speeds we are interested in
+ * are
+ *
+ * \f{align*}{
+ *   \lambda^{\pm}&=\pm\alpha-\beta^i n_i,
+ * \f}
+ *
+ * which correspond to the divergence cleaning field.
+ *
+ * \note
+ * - In the strong form the `dg_boundary_terms` function returns
+ *   \f$G - F_\text{int}\f$
+ * - For either \f$\lambda_\text{min} = 0\f$ or \f$\lambda_\text{max} = 0\f$
+ *   (i.e. all characteristics move in the same direction) the HLL boundary
+ *   correction reduces to pure upwinding.
+ * - Some references use \f$S\f$ instead of \f$\lambda\f$ for the
+ *   signal/characteristic speeds
+ * - It may be possible to use the slower speeds for the magnetic field and
+ *   fluid part of the system in order to make the flux less dissipative for
+ *   those variables.
+ */
+class HllemHydroYe final : public evolution::BoundaryCorrection {
+ public:
+  struct LargestOutgoingCharSpeed : db::SimpleTag {
+    using type = Scalar<DataVector>;
+  };
+  struct LargestIngoingCharSpeed : db::SimpleTag {
+    using type = Scalar<DataVector>;
+  };
+  /// Interface unit normal (covector), used to project the normal magnetic
+  /// field for the divergence-cleaning (Phi, B_n) subsystem.
+  struct InterfaceUnitNormal : db::SimpleTag {
+    using type = tnsr::i<DataVector, 3, Frame::Inertial>;
+  };
+  /// |lapse - 1| + |shift|, a measure of how far the background is from flat.
+  /// The scalar/MHD split only holds in flat space; where this is nonzero the
+  /// boundary correction falls back to the standard (light-speed) HLL flux.
+  struct MetricFlatness : db::SimpleTag {
+    using type = Scalar<DataVector>;
+  };
+
+  struct MagneticFieldMagnitudeForHydro {
+    static constexpr Options::String help = {
+        "When the magnetic field is below this value we use the hydro "
+        "characteristic speeds."};
+    using type = double;
+  };
+  struct LightSpeedDensityCutoff {
+    static constexpr Options::String help = {
+        "When the density is below this value we just use the light speed for "
+        "the characteristic speeds."};
+    using type = double;
+  };
+  struct RestoreMiddleBlock {
+    static constexpr Options::String help = {
+        "If true, apply the middle-block anti-diffusion "
+        "-(S_L S_R)/(S_R - S_L) * delta_mid * P_mid * (U_R - U_L) on top of "
+        "the HLL baseline. If false, the class reduces to the existing Hll "
+        "solver on the hydro slots. Phase 1 default is false; phase 2 will "
+        "enable this by default."};
+    using type = bool;
+  };
+  struct UsePhysicalZeta {
+    static constexpr Options::String help = {
+        "If true, build the acoustic eigenvectors that define P_mid using "
+        "the physical zeta = (dp/dY_e)_{rho,eps}. If false, build them with "
+        "zeta artificially zeroed -- the zeta-sensitivity diagnostic. Has "
+        "no effect while RestoreMiddleBlock is false."};
+    using type = bool;
+  };
+  using options =
+      tmpl::list<MagneticFieldMagnitudeForHydro, LightSpeedDensityCutoff,
+                 RestoreMiddleBlock, UsePhysicalZeta>;
+  static constexpr Options::String help = {
+      "HLL + middle-block anti-diffusion for the hydro+Y_e subsystem. Phase 1 "
+      "reduces bit-identically to Hll (RestoreMiddleBlock=false); phase 2 "
+      "will wire up the projector construction."};
+
+  HllemHydroYe() = default;
+  HllemHydroYe(const HllemHydroYe&) = default;
+  HllemHydroYe& operator=(const HllemHydroYe&) = default;
+  HllemHydroYe(HllemHydroYe&&) = default;
+  HllemHydroYe& operator=(HllemHydroYe&&) = default;
+  ~HllemHydroYe() override = default;
+
+  HllemHydroYe(double magnetic_field_magnitude_for_hydro,
+               double light_speed_density_cutoff, bool restore_middle_block,
+               bool use_physical_zeta);
+
+  /// \cond
+  explicit HllemHydroYe(CkMigrateMessage* /*unused*/);
+  using PUP::able::register_constructor;
+  WRAPPED_PUPable_decl_template(HllemHydroYe);  // NOLINT
+  /// \endcond
+  void pup(PUP::er& p) override;  // NOLINT
+
+  std::unique_ptr<BoundaryCorrection> get_clone() const override;
+
+  using dg_package_field_tags = tmpl::list<
+      Tags::TildeD, Tags::TildeYe, Tags::TildeTau,
+      Tags::TildeS<Frame::Inertial>, Tags::TildeB<Frame::Inertial>,
+      Tags::TildePhi, ::Tags::NormalDotFlux<Tags::TildeD>,
+      ::Tags::NormalDotFlux<Tags::TildeYe>,
+      ::Tags::NormalDotFlux<Tags::TildeTau>,
+      ::Tags::NormalDotFlux<Tags::TildeS<Frame::Inertial>>,
+      ::Tags::NormalDotFlux<Tags::TildeB<Frame::Inertial>>,
+      ::Tags::NormalDotFlux<Tags::TildePhi>, LargestOutgoingCharSpeed,
+      LargestIngoingCharSpeed, InterfaceUnitNormal, MetricFlatness,
+      hydro::Tags::RestMassDensity<DataVector>,
+      hydro::Tags::ElectronFraction<DataVector>,
+      hydro::Tags::Temperature<DataVector>,
+      hydro::Tags::SpatialVelocity<DataVector, 3>,
+      hydro::Tags::Pressure<DataVector>, hydro::Tags::LorentzFactor<DataVector>,
+      hydro::Tags::SpecificInternalEnergy<DataVector>>;
+  using dg_package_data_temporary_tags = tmpl::list<
+      gr::Tags::Lapse<DataVector>, gr::Tags::Shift<DataVector, 3>,
+      hydro::Tags::SpatialVelocityOneForm<DataVector, 3, Frame::Inertial>>;
+  using dg_package_data_primitive_tags =
+      tmpl::list<hydro::Tags::RestMassDensity<DataVector>,
+                 hydro::Tags::ElectronFraction<DataVector>,
+                 hydro::Tags::Temperature<DataVector>,
+                 hydro::Tags::SpatialVelocity<DataVector, 3>,
+                 hydro::Tags::SpecificInternalEnergy<DataVector>,
+                 hydro::Tags::Pressure<DataVector>,
+                 hydro::Tags::LorentzFactor<DataVector>>;
+  using dg_package_data_volume_tags =
+      tmpl::list<hydro::Tags::GrmhdEquationOfState>;
+  // The equation of state is needed in dg_boundary_terms to compute the
+  // fast-magnetosonic HLL bounds at the averaged interface state.
+  using dg_boundary_terms_volume_tags =
+      tmpl::list<hydro::Tags::GrmhdEquationOfState>;
+
+  double dg_package_data(
+      gsl::not_null<Scalar<DataVector>*> packaged_tilde_d,
+      gsl::not_null<Scalar<DataVector>*> packaged_tilde_ye,
+      gsl::not_null<Scalar<DataVector>*> packaged_tilde_tau,
+      gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*> packaged_tilde_s,
+      gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*> packaged_tilde_b,
+      gsl::not_null<Scalar<DataVector>*> packaged_tilde_phi,
+      gsl::not_null<Scalar<DataVector>*> packaged_normal_dot_flux_tilde_d,
+      gsl::not_null<Scalar<DataVector>*> packaged_normal_dot_flux_tilde_ye,
+      gsl::not_null<Scalar<DataVector>*> packaged_normal_dot_flux_tilde_tau,
+      gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
+          packaged_normal_dot_flux_tilde_s,
+      gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
+          packaged_normal_dot_flux_tilde_b,
+      gsl::not_null<Scalar<DataVector>*> packaged_normal_dot_flux_tilde_phi,
+      gsl::not_null<Scalar<DataVector>*> packaged_largest_outgoing_char_speed,
+      gsl::not_null<Scalar<DataVector>*> packaged_largest_ingoing_char_speed,
+      gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
+          packaged_interface_unit_normal,
+      gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
+      gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
+      gsl::not_null<Scalar<DataVector>*> packaged_electron_fraction,
+      gsl::not_null<Scalar<DataVector>*> packaged_temperature,
+      gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
+          packaged_spatial_velocity,
+      gsl::not_null<Scalar<DataVector>*> packaged_pressure,
+      gsl::not_null<Scalar<DataVector>*> packaged_lorentz_factor,
+      gsl::not_null<Scalar<DataVector>*> packaged_specific_internal_energy,
+
+      const Scalar<DataVector>& tilde_d, const Scalar<DataVector>& tilde_ye,
+      const Scalar<DataVector>& tilde_tau,
+      const tnsr::i<DataVector, 3, Frame::Inertial>& tilde_s,
+      const tnsr::I<DataVector, 3, Frame::Inertial>& tilde_b,
+      const Scalar<DataVector>& tilde_phi,
+
+      const tnsr::I<DataVector, 3, Frame::Inertial>& flux_tilde_d,
+      const tnsr::I<DataVector, 3, Frame::Inertial>& flux_tilde_ye,
+      const tnsr::I<DataVector, 3, Frame::Inertial>& flux_tilde_tau,
+      const tnsr::Ij<DataVector, 3, Frame::Inertial>& flux_tilde_s,
+      const tnsr::IJ<DataVector, 3, Frame::Inertial>& flux_tilde_b,
+      const tnsr::I<DataVector, 3, Frame::Inertial>& flux_tilde_phi,
+
+      const Scalar<DataVector>& lapse,
+      const tnsr::I<DataVector, 3, Frame::Inertial>& shift,
+      const tnsr::i<DataVector, 3, Frame::Inertial>& spatial_velocity_one_form,
+
+      const Scalar<DataVector>& rest_mass_density,
+      const Scalar<DataVector>& electron_fraction,
+      const Scalar<DataVector>& temperature,
+      const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity,
+      const Scalar<DataVector>& specific_internal_energy,
+      const Scalar<DataVector>& pressure,
+      const Scalar<DataVector>& lorentz_factor,
+
+      const tnsr::i<DataVector, 3, Frame::Inertial>& normal_covector,
+      const tnsr::I<DataVector, 3, Frame::Inertial>& normal_vector,
+      const std::optional<tnsr::I<DataVector, 3, Frame::Inertial>>&
+      /*mesh_velocity*/,
+      const std::optional<Scalar<DataVector>>& normal_dot_mesh_velocity,
+      const EquationsOfState::EquationOfState<true, 3>& equation_of_state)
+      const;
+
+  // Non-static (unlike Hll) so phase 2 can consult restore_middle_block_ and
+  // use_physical_zeta_. In phase 1 the body is HLL-identical and does not
+  // depend on those flags.
+  void dg_boundary_terms(
+      gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
+      gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
+      gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_tau,
+      gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
+          boundary_correction_tilde_s,
+      gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
+          boundary_correction_tilde_b,
+      gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_phi,
+      const Scalar<DataVector>& tilde_d_int,
+      const Scalar<DataVector>& tilde_ye_int,
+      const Scalar<DataVector>& tilde_tau_int,
+      const tnsr::i<DataVector, 3, Frame::Inertial>& tilde_s_int,
+      const tnsr::I<DataVector, 3, Frame::Inertial>& tilde_b_int,
+      const Scalar<DataVector>& tilde_phi_int,
+      const Scalar<DataVector>& normal_dot_flux_tilde_d_int,
+      const Scalar<DataVector>& normal_dot_flux_tilde_ye_int,
+      const Scalar<DataVector>& normal_dot_flux_tilde_tau_int,
+      const tnsr::i<DataVector, 3, Frame::Inertial>&
+          normal_dot_flux_tilde_s_int,
+      const tnsr::I<DataVector, 3, Frame::Inertial>&
+          normal_dot_flux_tilde_b_int,
+      const Scalar<DataVector>& normal_dot_flux_tilde_phi_int,
+      const Scalar<DataVector>& largest_outgoing_char_speed_int,
+      const Scalar<DataVector>& largest_ingoing_char_speed_int,
+      const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
+      const Scalar<DataVector>& metric_flatness_int,
+      const Scalar<DataVector>& rest_mass_density_int,
+      const Scalar<DataVector>& electron_fraction_int,
+      const Scalar<DataVector>& temperature_int,
+      const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
+      const Scalar<DataVector>& pressure_int,
+      const Scalar<DataVector>& lorentz_factor_int,
+      const Scalar<DataVector>& specific_internal_energy_int,
+      const Scalar<DataVector>& tilde_d_ext,
+      const Scalar<DataVector>& tilde_ye_ext,
+      const Scalar<DataVector>& tilde_tau_ext,
+      const tnsr::i<DataVector, 3, Frame::Inertial>& tilde_s_ext,
+      const tnsr::I<DataVector, 3, Frame::Inertial>& tilde_b_ext,
+      const Scalar<DataVector>& tilde_phi_ext,
+      const Scalar<DataVector>& normal_dot_flux_tilde_d_ext,
+      const Scalar<DataVector>& normal_dot_flux_tilde_ye_ext,
+      const Scalar<DataVector>& normal_dot_flux_tilde_tau_ext,
+      const tnsr::i<DataVector, 3, Frame::Inertial>&
+          normal_dot_flux_tilde_s_ext,
+      const tnsr::I<DataVector, 3, Frame::Inertial>&
+          normal_dot_flux_tilde_b_ext,
+      const Scalar<DataVector>& normal_dot_flux_tilde_phi_ext,
+      const Scalar<DataVector>& largest_outgoing_char_speed_ext,
+      const Scalar<DataVector>& largest_ingoing_char_speed_ext,
+      const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_ext,
+      const Scalar<DataVector>& metric_flatness_ext,
+      const Scalar<DataVector>& rest_mass_density_ext,
+      const Scalar<DataVector>& electron_fraction_ext,
+      const Scalar<DataVector>& temperature_ext,
+      const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
+      const Scalar<DataVector>& pressure_ext,
+      const Scalar<DataVector>& lorentz_factor_ext,
+      const Scalar<DataVector>& specific_internal_energy_ext,
+      dg::Formulation dg_formulation,
+      const EquationsOfState::EquationOfState<true, 3>& equation_of_state)
+      const;
+
+ private:
+  friend bool operator==(const HllemHydroYe& lhs, const HllemHydroYe& rhs);
+
+  double magnetic_field_magnitude_for_hydro_{
+      std::numeric_limits<double>::signaling_NaN()};
+  double light_speed_density_cutoff_{
+      std::numeric_limits<double>::signaling_NaN()};
+  bool restore_middle_block_{false};
+  bool use_physical_zeta_{true};
+};
+bool operator!=(const HllemHydroYe& lhs, const HllemHydroYe& rhs);
+}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections
