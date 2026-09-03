@@ -155,6 +155,7 @@ class Hll final : public evolution::BoundaryCorrection {
       LargestIngoingCharSpeed, InterfaceUnitNormal, MetricFlatness,
       hydro::Tags::RestMassDensity<DataVector>,
       hydro::Tags::ElectronFraction<DataVector>,
+      hydro::Tags::SoundSpeedSquared<DataVector>,
       hydro::Tags::SpatialVelocity<DataVector, 3>,
       hydro::Tags::Pressure<DataVector>, hydro::Tags::LorentzFactor<DataVector>,
       hydro::Tags::SpecificInternalEnergy<DataVector>>;
@@ -198,6 +199,7 @@ class Hll final : public evolution::BoundaryCorrection {
       gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
       gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
       gsl::not_null<Scalar<DataVector>*> packaged_electron_fraction,
+      gsl::not_null<Scalar<DataVector>*> packaged_sound_speed_squared,
       gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
           packaged_spatial_velocity,
       gsl::not_null<Scalar<DataVector>*> packaged_pressure,
@@ -268,6 +270,7 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& metric_flatness_int,
       const Scalar<DataVector>& rest_mass_density_int,
       const Scalar<DataVector>& electron_fraction_int,
+      const Scalar<DataVector>& sound_speed_squared_int,
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
       const Scalar<DataVector>& pressure_int,
       const Scalar<DataVector>& lorentz_factor_int,
@@ -292,6 +295,7 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& metric_flatness_ext,
       const Scalar<DataVector>& rest_mass_density_ext,
       const Scalar<DataVector>& electron_fraction_ext,
+      const Scalar<DataVector>& sound_speed_squared_ext,
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
       const Scalar<DataVector>& pressure_ext,
       const Scalar<DataVector>& lorentz_factor_ext,

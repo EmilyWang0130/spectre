@@ -74,6 +74,7 @@ double HllemHydroYe::dg_package_data(
     const gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
     const gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
     const gsl::not_null<Scalar<DataVector>*> packaged_electron_fraction,
+    const gsl::not_null<Scalar<DataVector>*> packaged_sound_speed_squared,
     const gsl::not_null<Scalar<DataVector>*> packaged_temperature,
     const gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
         packaged_spatial_velocity,
@@ -122,6 +123,10 @@ double HllemHydroYe::dg_package_data(
         get(lapse) - get(shift_dot_normal);
     get(*packaged_largest_ingoing_char_speed) =
         -get(lapse) - get(shift_dot_normal);
+    // Default packaged sound speed to zero -- sentinel used by
+    // dg_boundary_terms's fast-bounds fallback (see Hll.cpp for the
+    // rationale). Populated below in the hydro / above-atmosphere branch.
+    get(*packaged_sound_speed_squared) = 0.0;
 
     if (const bool has_b_field =
             max(get(magnitude(tilde_b))) > magnetic_field_magnitude_for_hydro_;
@@ -163,6 +168,7 @@ double HllemHydroYe::dg_package_data(
                         .sound_speed_squared_from_density_and_temperature(
                             rest_mass_density, temperature, electron_fraction)),
                 0.0, 1.0)};
+      *packaged_sound_speed_squared = sound_speed_squared;
 
       // Compute v_dot_normal, v^i n_i
       dot_product(make_not_null(&v_dot_normal), spatial_velocity,
@@ -289,9 +295,10 @@ void HllemHydroYe::dg_boundary_terms(
     const Scalar<DataVector>& metric_flatness_int,
     const Scalar<DataVector>& rest_mass_density_int,
     const Scalar<DataVector>& electron_fraction_int,
+    const Scalar<DataVector>& sound_speed_squared_int,
     const Scalar<DataVector>& /*temperature_int*/,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
-    const Scalar<DataVector>& pressure_int,
+    const Scalar<DataVector>& /*pressure_int*/,
     const Scalar<DataVector>& /*lorentz_factor_int*/,
     const Scalar<DataVector>& specific_internal_energy_int,
     const Scalar<DataVector>& tilde_d_ext,
@@ -312,9 +319,10 @@ void HllemHydroYe::dg_boundary_terms(
     const Scalar<DataVector>& metric_flatness_ext,
     const Scalar<DataVector>& rest_mass_density_ext,
     const Scalar<DataVector>& electron_fraction_ext,
+    const Scalar<DataVector>& sound_speed_squared_ext,
     const Scalar<DataVector>& /*temperature_ext*/,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
-    const Scalar<DataVector>& pressure_ext,
+    const Scalar<DataVector>& /*pressure_ext*/,
     const Scalar<DataVector>& /*lorentz_factor_ext*/,
     const Scalar<DataVector>& specific_internal_energy_ext,
     const dg::Formulation dg_formulation,
@@ -351,80 +359,80 @@ void HllemHydroYe::dg_boundary_terms(
   tnsr::ij<DataVector, 6> hydro_right{num_points, 0.0};
   tnsr::IJ<DataVector, 6> hydro_left{num_points, 0.0};
   DataVector lambda_mid{num_points, 0.0};
-  // Flat + |B| < threshold + rho > cutoff => sharpen the outer fluid bounds
-  // from the pure-hydro characteristic speeds (rather than falling back to
-  // light speed). The averaged interface state defines c_s^2 and the
-  // eigenvector construction consistently. Only call the flat helpers where
-  // the background is actually flat -- they assert on superluminal
-  // velocities against an identity spatial metric.
-  if (max(get(metric_flatness_int)) <= 1.0e-12 and
-      max(get(metric_flatness_ext)) <= 1.0e-12) {
-    // FP exceptions are disabled around the flat-space computation for
-    // consistency with the eigensystem-based corrections.
+  // Flat + hydro (both packaged c_s^2 > 0) => outer fluid bounds from the
+  // closed-form lambda_pm(v_avg, c_s^2_avg), using packaged per-side data
+  // only. Zero EOS calls on the fast-bounds path -- the previous
+  // "average primitives, EOS-lookup for p/h, then characteristic_speeds_..."
+  // recipe cost ~4 Togashi-trilinear lookups per interface per step. See
+  // Hll.cpp for the full rationale (this class inherits the same design
+  // decision).
+  //
+  // If restore_middle_block_ = true we still need the eigensystem, which in
+  // turn needs the on-EOS (p_avg, h_avg) at the averaged (rho, eps, Y_e). We
+  // fall into a second block that does that lookup once, only when middle-
+  // block anti-diffusion is requested.
+  const bool flat = max(get(metric_flatness_int)) <= 1.0e-12 and
+                    max(get(metric_flatness_ext)) <= 1.0e-12 and
+                    min(get(sound_speed_squared_int)) > 0.0 and
+                    min(get(sound_speed_squared_ext)) > 0.0;
+  tnsr::I<DataVector, 3, Frame::Inertial> v_avg{num_points, 0.0};
+  DataVector v_sq_avg{num_points, 0.0};
+  DataVector v_n_avg{num_points, 0.0};
+  if (flat) {
     const ScopedFpeState fpe(false);
-    // Averaged primitive state (B = TildeB in flat space).
+    for (size_t i = 0; i < 3; ++i) {
+      v_avg.get(i) =
+          0.5 * (spatial_velocity_int.get(i) + spatial_velocity_ext.get(i));
+      v_sq_avg += v_avg.get(i) * v_avg.get(i);
+      v_n_avg += v_avg.get(i) * interface_unit_normal_int.get(i);
+    }
+    v_sq_avg = clamp(v_sq_avg, 0.0, 1.0 - 1.0e-10);
+    const DataVector cs2_avg =
+        0.5 * (get(sound_speed_squared_int) + get(sound_speed_squared_ext));
+    const DataVector one_minus_cs2 = 1.0 - cs2_avg;
+    const DataVector one_minus_v2_cs2 = 1.0 - v_sq_avg * cs2_avg;
+    const DataVector disc =
+        sqrt(clamp(cs2_avg * (1.0 - v_sq_avg) *
+                       (one_minus_v2_cs2 - v_n_avg * v_n_avg * one_minus_cs2),
+                   0.0, 1.0));
+    // In flat space lapse = 1 and shift = 0, so the alpha/beta terms drop.
+    const DataVector lambda_plus =
+        (v_n_avg * one_minus_cs2 + disc) / one_minus_v2_cs2;
+    const DataVector lambda_minus =
+        (v_n_avg * one_minus_cs2 - disc) / one_minus_v2_cs2;
+    fast_max = max(0.0, lambda_plus);
+    fast_min = min(0.0, lambda_minus);
+  }
+
+  // Middle-block eigensystem (only when the anti-diffusion is enabled).
+  // This still costs one EOS lookup per interface (for the on-EOS
+  // (p_avg, h_avg)); it's the price of the design's thermodynamic
+  // consistency in the eigenvector construction. Kept gated so
+  // RestoreMiddleBlock = false remains cheap.
+  if (flat and restore_middle_block_) {
+    const ScopedFpeState fpe(false);
     const Scalar<DataVector> rho_avg{
         0.5 * (get(rest_mass_density_int) + get(rest_mass_density_ext))};
     const Scalar<DataVector> eps_avg{0.5 * (get(specific_internal_energy_int) +
                                             get(specific_internal_energy_ext))};
-    const Scalar<DataVector> p_avg{0.5 *
-                                   (get(pressure_int) + get(pressure_ext))};
-    tnsr::I<DataVector, 3, Frame::Inertial> v_avg{num_points};
-    tnsr::I<DataVector, 3, Frame::Inertial> b_avg{num_points};
-    for (size_t i = 0; i < 3; ++i) {
-      v_avg.get(i) =
-          0.5 * (spatial_velocity_int.get(i) + spatial_velocity_ext.get(i));
-      b_avg.get(i) = 0.5 * (tilde_b_int.get(i) + tilde_b_ext.get(i));
-    }
-    // Lorentz factor consistent with the averaged velocity (flat).
-    DataVector v_sq_avg{num_points, 0.0};
-    for (size_t i = 0; i < 3; ++i) {
-      v_sq_avg += v_avg.get(i) * v_avg.get(i);
-    }
-    v_sq_avg = clamp(v_sq_avg, 0.0, 1.0 - 1.0e-10);
-    const Scalar<DataVector> w_avg{1.0 / sqrt(1.0 - v_sq_avg)};
-    const Scalar<DataVector> enthalpy_avg =
-        hydro::relativistic_specific_enthalpy(rho_avg, eps_avg, p_avg);
-    tnsr::ii<DataVector, 3, Frame::Inertial> flat_metric{num_points, 0.0};
-    for (size_t i = 0; i < 3; ++i) {
-      flat_metric.get(i, i) = 1.0;
-    }
-    // Use the pure-hydro characteristic speeds instead of the MHD ones for
-    // the outer fluid bounds: the MHD helper's ThermodynamicDim=3 branch
-    // only supports beta-equilibrium EOSs, whereas characteristic_speeds_
-    // hydro takes electron_fraction explicitly and works for non-eq 3D
-    // tables (Togashi, DD2 full). The averaged interface state's
-    // (p_avg, h_avg) is rebuilt on-EOS so both the outer bounds and the
-    // eigensystem see one thermodynamically consistent state (design v2
-    // sec 6).
     const Scalar<DataVector> ye_avg{
         0.5 * (get(electron_fraction_int) + get(electron_fraction_ext))};
+    const Scalar<DataVector> w_avg{1.0 / sqrt(1.0 - v_sq_avg)};
     const Scalar<DataVector> p_avg_eos =
         equation_of_state.pressure_from_density_and_energy(rho_avg, eps_avg,
                                                            ye_avg);
     const Scalar<DataVector> h_avg_eos =
         hydro::relativistic_specific_enthalpy(rho_avg, eps_avg, p_avg_eos);
-    tnsr::i<DataVector, 3> hydro_speeds{num_points, 0.0};
-    characteristic_speeds_hydro(make_not_null(&hydro_speeds), v_avg, rho_avg,
-                                eps_avg, ye_avg, w_avg, h_avg_eos, flat_metric,
-                                interface_unit_normal_int, equation_of_state);
-    fast_max = max(0.0, hydro_speeds.get(HydroSpeed::LambdaPlus));
-    fast_min = min(0.0, hydro_speeds.get(HydroSpeed::LambdaMinus));
-    // Suppress warnings for the temporaries that used to feed the MHD helper
-    // (b_avg was for its magnetic-field argument). Retain them so the
-    // averaged state remains complete for future diagnostics.
-    (void)b_avg;
-    (void)p_avg;
-    (void)enthalpy_avg;
-    // Middle-block projector -- reuse the same averaged state.
-    if (restore_middle_block_) {
-      characteristic_eigenvectors_hydro(
-          make_not_null(&hydro_right), make_not_null(&hydro_left), v_avg,
-          rho_avg, eps_avg, h_avg_eos, ye_avg, w_avg, interface_unit_normal_int,
-          flat_metric, equation_of_state);
-      lambda_mid = hydro_speeds.get(HydroSpeed::NormalDotVelocity);
-      have_middle_block = true;
+    tnsr::ii<DataVector, 3, Frame::Inertial> flat_metric{num_points, 0.0};
+    for (size_t i = 0; i < 3; ++i) {
+      flat_metric.get(i, i) = 1.0;
     }
+    characteristic_eigenvectors_hydro(
+        make_not_null(&hydro_right), make_not_null(&hydro_left), v_avg, rho_avg,
+        eps_avg, h_avg_eos, ye_avg, w_avg, interface_unit_normal_int,
+        flat_metric, equation_of_state);
+    lambda_mid = v_n_avg;  // v_avg . n = HydroSpeed::NormalDotVelocity
+    have_middle_block = true;
   }
 
   // HLL flux for one conserved component given the bounds l_max, l_min.

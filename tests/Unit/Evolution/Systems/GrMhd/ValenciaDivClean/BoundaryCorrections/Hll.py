@@ -137,6 +137,10 @@ def dg_package_data(
         np.asarray(metric_flatness),
         rest_mass_density,
         electron_fraction,
+        # Sound-speed-squared placeholder for the pypp packaged-tuple. Real
+        # value not needed here (test random ranges never trip the flat
+        # branch that consumes it).
+        np.asarray(0.0 * lapse),
         spatial_velocity,
         pressure,
         lorentz_factor,
@@ -163,6 +167,7 @@ def dg_boundary_terms(
     interior_metric_flatness,
     interior_rest_mass_density,
     interior_electron_fraction,
+    interior_sound_speed_squared,
     interior_spatial_velocity,
     interior_pressure,
     interior_lorentz_factor,
@@ -185,6 +190,7 @@ def dg_boundary_terms(
     exterior_metric_flatness,
     exterior_rest_mass_density,
     exterior_electron_fraction,
+    exterior_sound_speed_squared,
     exterior_spatial_velocity,
     exterior_pressure,
     exterior_lorentz_factor,

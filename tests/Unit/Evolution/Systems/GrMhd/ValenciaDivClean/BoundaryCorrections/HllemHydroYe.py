@@ -137,6 +137,9 @@ def dg_package_data(
         np.asarray(metric_flatness),
         rest_mass_density,
         electron_fraction,
+        # Sound-speed-squared placeholder; test ranges never trip the flat
+        # branch that consumes it.
+        np.asarray(0.0 * lapse),
         temperature,
         spatial_velocity,
         pressure,
@@ -164,6 +167,7 @@ def dg_boundary_terms(
     interior_metric_flatness,
     interior_rest_mass_density,
     interior_electron_fraction,
+    interior_sound_speed_squared,
     interior_temperature,
     interior_spatial_velocity,
     interior_pressure,
@@ -187,6 +191,7 @@ def dg_boundary_terms(
     exterior_metric_flatness,
     exterior_rest_mass_density,
     exterior_electron_fraction,
+    exterior_sound_speed_squared,
     exterior_temperature,
     exterior_spatial_velocity,
     exterior_pressure,
