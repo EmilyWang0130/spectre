@@ -288,7 +288,7 @@ void HllemHydroYe::dg_boundary_terms(
     const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
     const Scalar<DataVector>& metric_flatness_int,
     const Scalar<DataVector>& rest_mass_density_int,
-    const Scalar<DataVector>& /*electron_fraction_int*/,
+    const Scalar<DataVector>& electron_fraction_int,
     const Scalar<DataVector>& /*temperature_int*/,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
     const Scalar<DataVector>& pressure_int,
@@ -311,7 +311,7 @@ void HllemHydroYe::dg_boundary_terms(
     const tnsr::i<DataVector, 3, Frame::Inertial>& /*iface_normal_ext*/,
     const Scalar<DataVector>& metric_flatness_ext,
     const Scalar<DataVector>& rest_mass_density_ext,
-    const Scalar<DataVector>& /*electron_fraction_ext*/,
+    const Scalar<DataVector>& electron_fraction_ext,
     const Scalar<DataVector>& /*temperature_ext*/,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
     const Scalar<DataVector>& pressure_ext,
@@ -342,6 +342,15 @@ void HllemHydroYe::dg_boundary_terms(
   // scheme reduces to the standard HLL flux there.
   DataVector fast_max = lambda_max;
   DataVector fast_min = lambda_min;
+  // Middle-block projector storage (populated only when we take the flat +
+  // hydro branch AND restore_middle_block_ is true).
+  bool have_middle_block = false;
+  // characteristic_eigenvectors_hydro uses tnsr::ij for the right-eigenvector
+  // "modes" and tnsr::IJ for the left-eigenvector "projectors"; keep the same
+  // convention here.
+  tnsr::ij<DataVector, 6> hydro_right{num_points, 0.0};
+  tnsr::IJ<DataVector, 6> hydro_left{num_points, 0.0};
+  DataVector lambda_mid{num_points, 0.0};
   // characteristic_speeds_mhd interprets the primitives in flat space and
   // asserts on superluminal velocities; only call it where the background is
   // flat. (M&M backgrounds are uniform, so a face is either all-flat or
@@ -384,6 +393,29 @@ void HllemHydroYe::dg_boundary_terms(
                               interface_unit_normal_int, equation_of_state);
     fast_max = max(0.0, mhd_speeds.get(7));  // v_n + c_fast
     fast_min = min(0.0, mhd_speeds.get(1));  // v_n - c_fast
+    // Middle-block projector, at the SAME averaged interface state so it
+    // stays coherent with the fast bounds above. Rebuild
+    // (p_avg, h_avg) via the EOS so that the eigensystem sees a
+    // thermodynamically consistent state (design v2 sec 6).
+    if (restore_middle_block_) {
+      const Scalar<DataVector> ye_avg{
+          0.5 * (get(electron_fraction_int) + get(electron_fraction_ext))};
+      const Scalar<DataVector> p_avg_eos =
+          equation_of_state.pressure_from_density_and_energy(rho_avg, eps_avg,
+                                                             ye_avg);
+      const Scalar<DataVector> h_avg_eos =
+          hydro::relativistic_specific_enthalpy(rho_avg, eps_avg, p_avg_eos);
+      tnsr::i<DataVector, 3> hydro_speeds{num_points, 0.0};
+      characteristic_speeds_hydro(
+          make_not_null(&hydro_speeds), v_avg, rho_avg, eps_avg, ye_avg, w_avg,
+          h_avg_eos, flat_metric, interface_unit_normal_int, equation_of_state);
+      characteristic_eigenvectors_hydro(
+          make_not_null(&hydro_right), make_not_null(&hydro_left), v_avg,
+          rho_avg, eps_avg, h_avg_eos, ye_avg, w_avg, interface_unit_normal_int,
+          flat_metric, equation_of_state);
+      lambda_mid = hydro_speeds.get(HydroSpeed::NormalDotVelocity);
+      have_middle_block = true;
+    }
   }
 
   // HLL flux for one conserved component given the bounds l_max, l_min.
@@ -428,6 +460,96 @@ void HllemHydroYe::dg_boundary_terms(
             normal_dot_flux_tilde_s_int.get(i), tilde_s_ext.get(i),
             normal_dot_flux_tilde_s_ext.get(i));
   }
+
+  // Middle-block anti-diffusion (design v2 sec 1, 7). Only active in the
+  // flat + hydro branch where we built the eigensystem above.
+  //
+  //   F_new = F_HLL - (S_L S_R / (S_R - S_L)) * delta_mid * P_mid * (U_R - U_L)
+  //
+  // with P_mid = I - P_+ - P_-, P_+/- = R_+/- (x) L_+/- / (L_+/- . R_+/-).
+  // Ordering of the 6 slots follows characteristic_eigenvectors_hydro:
+  //   [D, S_x, S_y, S_z, tau, DYe].
+  if (have_middle_block) {
+    const std::array<const DataVector*, 6> u_int_c{
+        {&get(tilde_d_int), &get<0>(tilde_s_int), &get<1>(tilde_s_int),
+         &get<2>(tilde_s_int), &get(tilde_tau_int), &get(tilde_ye_int)}};
+    const std::array<const DataVector*, 6> u_ext_c{
+        {&get(tilde_d_ext), &get<0>(tilde_s_ext), &get<1>(tilde_s_ext),
+         &get<2>(tilde_s_ext), &get(tilde_tau_ext), &get(tilde_ye_ext)}};
+    const std::array<DataVector*, 6> corr_c{
+        {&get(*boundary_correction_tilde_d),
+         &get<0>(*boundary_correction_tilde_s),
+         &get<1>(*boundary_correction_tilde_s),
+         &get<2>(*boundary_correction_tilde_s),
+         &get(*boundary_correction_tilde_tau),
+         &get(*boundary_correction_tilde_ye)}};
+    constexpr size_t plus_idx = HydroVectorR::Rplus;
+    constexpr size_t minus_idx = HydroVectorR::Rminus;
+    for (size_t pt = 0; pt < num_points; ++pt) {
+      const double s_l = fast_min[pt];
+      const double s_r = fast_max[pt];
+      const double denom = s_r - s_l;
+      // Same guard as the HLL flux; skip anti-diffusion when there is no
+      // HLL diffusion to remove (both bounds ~ 0).
+      if (denom < 1.0e-30) {
+        continue;
+      }
+      const double lam = lambda_mid[pt];
+      const double delta_mid =
+          1.0 - std::min(0.0, lam) / (s_l - 1.0e-30) -
+          std::max(0.0, lam) / (s_r + 1.0e-30);
+      const double coeff = -s_l * s_r / denom * delta_mid;
+      // Biorthogonal (not biorthonormal) diagonals.
+      double diag_plus = 0.0;
+      double diag_minus = 0.0;
+      for (size_t n = 0; n < 6; ++n) {
+        diag_plus += hydro_left.get(plus_idx, n)[pt] *
+                     hydro_right.get(plus_idx, n)[pt];
+        diag_minus += hydro_left.get(minus_idx, n)[pt] *
+                      hydro_right.get(minus_idx, n)[pt];
+      }
+      // Skip acoustic projectors that are ill-conditioned at this point
+      // (would only be true at strong degeneracies -- shouldn't happen for
+      // R+, R- which are non-degenerate by construction, but guard anyway).
+      const double diag_tol = 1.0e-12;
+      const bool plus_ok = std::abs(diag_plus) > diag_tol;
+      const bool minus_ok = std::abs(diag_minus) > diag_tol;
+      if (not plus_ok and not minus_ok) {
+        continue;
+      }
+      // L_+/- . (U_R - U_L) at this point.
+      double alpha_plus = 0.0;
+      double alpha_minus = 0.0;
+      std::array<double, 6> du{};
+      for (size_t n = 0; n < 6; ++n) {
+        du[n] = (*gsl::at(u_ext_c, n))[pt] - (*gsl::at(u_int_c, n))[pt];
+        if (plus_ok) {
+          alpha_plus += hydro_left.get(plus_idx, n)[pt] * du[n];
+        }
+        if (minus_ok) {
+          alpha_minus += hydro_left.get(minus_idx, n)[pt] * du[n];
+        }
+      }
+      if (plus_ok) {
+        alpha_plus /= diag_plus;
+      }
+      if (minus_ok) {
+        alpha_minus /= diag_minus;
+      }
+      // ΔU_mid = ΔU - alpha_+ R_+ - alpha_- R_-, and add to correction.
+      for (size_t n = 0; n < 6; ++n) {
+        double du_mid = du[n];
+        if (plus_ok) {
+          du_mid -= alpha_plus * hydro_right.get(plus_idx, n)[pt];
+        }
+        if (minus_ok) {
+          du_mid -= alpha_minus * hydro_right.get(minus_idx, n)[pt];
+        }
+        (*gsl::at(corr_c, n))[pt] += coeff * du_mid;
+      }
+    }
+  }
+
   // Magnetic field: the NORMAL component is part of the GLM subsystem (light
   // speed), the TANGENTIAL component is MHD (fast bounds). Decompose along the
   // interface normal, treat each part with its own bounds, and recombine
