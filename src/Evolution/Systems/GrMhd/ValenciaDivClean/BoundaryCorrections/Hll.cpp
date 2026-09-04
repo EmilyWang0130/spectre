@@ -66,14 +66,6 @@ double Hll::dg_package_data(
     const gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
         packaged_interface_unit_normal,
     const gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
-    const gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
-    const gsl::not_null<Scalar<DataVector>*> packaged_electron_fraction,
-    const gsl::not_null<Scalar<DataVector>*> packaged_sound_speed_squared,
-    const gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
-        packaged_spatial_velocity,
-    const gsl::not_null<Scalar<DataVector>*> packaged_pressure,
-    const gsl::not_null<Scalar<DataVector>*> packaged_lorentz_factor,
-    const gsl::not_null<Scalar<DataVector>*> packaged_specific_internal_energy,
 
     const Scalar<DataVector>& tilde_d, const Scalar<DataVector>& tilde_ye,
     const Scalar<DataVector>& tilde_tau,
@@ -116,11 +108,6 @@ double Hll::dg_package_data(
         get(lapse) - get(shift_dot_normal);
     get(*packaged_largest_ingoing_char_speed) =
         -get(lapse) - get(shift_dot_normal);
-    // Default packaged sound speed to zero. dg_boundary_terms uses this as
-    // a "no averaged-state fast bounds available" sentinel and falls back
-    // to the packaged light-speed bounds; only populated below in the
-    // hydro / above-atmosphere branch.
-    get(*packaged_sound_speed_squared) = 0.0;
 
     if (const bool has_b_field =
             max(get(magnitude(tilde_b))) > magnetic_field_magnitude_for_hydro_;
@@ -162,9 +149,6 @@ double Hll::dg_package_data(
                         .sound_speed_squared_from_density_and_temperature(
                             rest_mass_density, temperature, electron_fraction)),
                 0.0, 1.0)};
-      // Save the sound speed for the averaged-state fast bounds in
-      // dg_boundary_terms (avoids a second EOS lookup there).
-      *packaged_sound_speed_squared = sound_speed_squared;
 
       // Compute v_dot_normal, v^i n_i
       dot_product(make_not_null(&v_dot_normal), spatial_velocity,
@@ -226,17 +210,6 @@ double Hll::dg_package_data(
   get(*packaged_metric_flatness) = abs(get(lapse) - 1.0) + abs(get<0>(shift)) +
                                    abs(get<1>(shift)) + abs(get<2>(shift));
 
-  // Package the primitives needed to reconstruct the averaged fast-magnetosonic
-  // bounds in dg_boundary_terms.
-  *packaged_rest_mass_density = rest_mass_density;
-  *packaged_electron_fraction = electron_fraction;
-  for (size_t i = 0; i < 3; ++i) {
-    packaged_spatial_velocity->get(i) = spatial_velocity.get(i);
-  }
-  *packaged_pressure = pressure;
-  *packaged_lorentz_factor = lorentz_factor;
-  *packaged_specific_internal_energy = specific_internal_energy;
-
   *packaged_tilde_d = tilde_d;
   *packaged_tilde_ye = tilde_ye;
   *packaged_tilde_tau = tilde_tau;
@@ -287,13 +260,6 @@ void Hll::dg_boundary_terms(
     const Scalar<DataVector>& largest_ingoing_char_speed_int,
     const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
     const Scalar<DataVector>& metric_flatness_int,
-    const Scalar<DataVector>& /*rest_mass_density_int*/,
-    const Scalar<DataVector>& /*electron_fraction_int*/,
-    const Scalar<DataVector>& sound_speed_squared_int,
-    const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
-    const Scalar<DataVector>& /*pressure_int*/,
-    const Scalar<DataVector>& /*lorentz_factor_int*/,
-    const Scalar<DataVector>& /*specific_internal_energy_int*/,
     const Scalar<DataVector>& tilde_d_ext,
     const Scalar<DataVector>& tilde_ye_ext,
     const Scalar<DataVector>& tilde_tau_ext,
@@ -310,15 +276,8 @@ void Hll::dg_boundary_terms(
     const Scalar<DataVector>& largest_ingoing_char_speed_ext,
     const tnsr::i<DataVector, 3, Frame::Inertial>& /*iface_normal_ext*/,
     const Scalar<DataVector>& metric_flatness_ext,
-    const Scalar<DataVector>& /*rest_mass_density_ext*/,
-    const Scalar<DataVector>& /*electron_fraction_ext*/,
-    const Scalar<DataVector>& sound_speed_squared_ext,
-    const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
-    const Scalar<DataVector>& /*pressure_ext*/,
-    const Scalar<DataVector>& /*lorentz_factor_ext*/,
-    const Scalar<DataVector>& /*specific_internal_energy_ext*/,
     const dg::Formulation dg_formulation,
-    const EquationsOfState::EquationOfState<true, 3>& equation_of_state) const {
+    const EquationsOfState::EquationOfState<true, 3>& /*equation_of_state*/) {
   const size_t num_points = get(tilde_d_int).size();
   const bool weak = dg_formulation == dg::Formulation::WeakInertial;
 
@@ -340,64 +299,20 @@ void Hll::dg_boundary_terms(
   // approach seeded in the Kelvin-Helmholtz test. In curved space the flat
   // decomposition does not hold, so we fall back to the light bounds and the
   // scheme reduces to the standard HLL flux there.
-  DataVector fast_max = lambda_max;
-  DataVector fast_min = lambda_min;
-  // Optimised averaged-state fast bounds. Iago's 96d94d83e (which fixed the
-  // KH mirror-y asymmetry) originally recomputed characteristic_speeds_...
-  // at the arithmetic-averaged primitive state via an EOS call. That cost
-  // ~4 Togashi-trilinear lookups per interface per step; on non-equilibrium
-  // 3D tables it dominated HLL's wallclock. The symmetric-bound property
-  // (invariance under v_n -> -v_n at a shear interface) only requires the
-  // AVERAGED (v, c_s^2), so we now:
-  //   * package the per-side sound-speed-squared alongside the light-speed
-  //     bounds (already computed in dg_package_data; formerly discarded);
-  //   * average v and c_s^2 arithmetically at the interface;
-  //   * rebuild lambda_+/- via the closed-form
-  //         lambda_pm = alpha/(1 - v^2 c_s^2)
-  //                     * (v_n (1 - c_s^2) +/- c_s sqrt((1-v^2)(1 - v^2 c_s^2
-  //                                                       - v_n^2 (1 -
-  //                                                       c_s^2))))
-  //                     - beta^n
-  //     from the same closed-form dg_package_data uses. Zero EOS calls.
-  // Applies only to the hydro sub-branch (both packaged c_s^2 > 0, which
-  // implies |B| < threshold and rho > cutoff on both sides). MHD-fast bounds
-  // require the fast-magnetosonic dispersion at the averaged state; the
-  // current KHI use case keeps the old characteristic_speeds_mhd path there
-  // via a fallback to the light bounds when either packaged c_s^2 is zero
-  // (which the MHD sub-branch signals). A follow-up can package c_fast^2
-  // per side too for the same optimisation on the MHD side.
-  if (max(get(metric_flatness_int)) <= 1.0e-12 and
-      max(get(metric_flatness_ext)) <= 1.0e-12 and
-      min(get(sound_speed_squared_int)) > 0.0 and
-      min(get(sound_speed_squared_ext)) > 0.0) {
-    const ScopedFpeState fpe(false);
-    const DataVector cs2_avg =
-        0.5 * (get(sound_speed_squared_int) + get(sound_speed_squared_ext));
-    DataVector v_sq_avg{num_points, 0.0};
-    DataVector v_n_avg{num_points, 0.0};
-    for (size_t i = 0; i < 3; ++i) {
-      const DataVector vi_avg =
-          0.5 * (spatial_velocity_int.get(i) + spatial_velocity_ext.get(i));
-      v_sq_avg += vi_avg * vi_avg;
-      v_n_avg += vi_avg * interface_unit_normal_int.get(i);
-    }
-    v_sq_avg = clamp(v_sq_avg, 0.0, 1.0 - 1.0e-10);
-    const DataVector one_minus_cs2 = 1.0 - cs2_avg;
-    const DataVector one_minus_v2_cs2 = 1.0 - v_sq_avg * cs2_avg;
-    // Discriminant clamped at 0 for numerical safety near the sonic point.
-    const DataVector disc =
-        sqrt(clamp(cs2_avg * (1.0 - v_sq_avg) *
-                       (one_minus_v2_cs2 - v_n_avg * v_n_avg * one_minus_cs2),
-                   0.0, 1.0));
-    // In flat space lapse = 1, shift = 0 (implied by both metric_flatnesses
-    // <= 1e-12), so the lapse/shift terms drop out.
-    const DataVector lambda_plus =
-        (v_n_avg * one_minus_cs2 + disc) / one_minus_v2_cs2;
-    const DataVector lambda_minus =
-        (v_n_avg * one_minus_cs2 - disc) / one_minus_v2_cs2;
-    fast_max = max(0.0, lambda_plus);
-    fast_min = min(0.0, lambda_minus);
-  }
+  // Fluid-variable HLL bounds are the same per-side max/min combination as
+  // above (Recipe A: Davis 1988). This is the textbook HLL choice --
+  // sound-speed bounds computed per side in dg_package_data (which already
+  // takes electron_fraction, so non-equilibrium 3D EOSs like Togashi are
+  // handled correctly), then combined here.
+  //
+  // Iago's 96d94d83e replaced these with an averaged-state closed-form
+  // (Recipe B) to fix a KH-instability mirror-y drift. That fix is preserved
+  // on iago/mhd_experiments; on this branch we revert to the develop
+  // convention because Recipe B under-bounds the fan at strongly-asymmetric
+  // interfaces (violating the Harten-Lax-van Leer theorem's premise).
+  // Pure-hydro projects here (TOV + Ye) do not require the symmetry fix.
+  const DataVector& fast_max = lambda_max;
+  const DataVector& fast_min = lambda_min;
 
   // HLL flux for one conserved component given the bounds l_max, l_min.
   const auto hll = [&weak, &num_points](

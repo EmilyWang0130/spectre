@@ -135,16 +135,6 @@ def dg_package_data(
         compute_char(-1.0),
         normal_covector,
         np.asarray(metric_flatness),
-        rest_mass_density,
-        electron_fraction,
-        # Sound-speed-squared placeholder for the pypp packaged-tuple. Real
-        # value not needed here (test random ranges never trip the flat
-        # branch that consumes it).
-        np.asarray(0.0 * lapse),
-        spatial_velocity,
-        pressure,
-        lorentz_factor,
-        specific_internal_energy,
     )
 
 
@@ -165,13 +155,6 @@ def dg_boundary_terms(
     interior_largest_ingoing_char_speed,
     interior_interface_unit_normal,
     interior_metric_flatness,
-    interior_rest_mass_density,
-    interior_electron_fraction,
-    interior_sound_speed_squared,
-    interior_spatial_velocity,
-    interior_pressure,
-    interior_lorentz_factor,
-    interior_specific_internal_energy,
     exterior_tilde_d,
     exterior_tilde_ye,
     exterior_tilde_tau,
@@ -188,13 +171,6 @@ def dg_boundary_terms(
     exterior_largest_ingoing_char_speed,
     exterior_interface_unit_normal,
     exterior_metric_flatness,
-    exterior_rest_mass_density,
-    exterior_electron_fraction,
-    exterior_sound_speed_squared,
-    exterior_spatial_velocity,
-    exterior_pressure,
-    exterior_lorentz_factor,
-    exterior_specific_internal_energy,
     use_strong_form,
 ):
     # Light-speed (divergence-cleaning) bounds: for Phi and the normal B.

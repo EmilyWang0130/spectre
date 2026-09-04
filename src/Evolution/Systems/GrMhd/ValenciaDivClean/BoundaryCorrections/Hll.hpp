@@ -143,22 +143,17 @@ class Hll final : public evolution::BoundaryCorrection {
 
   std::unique_ptr<BoundaryCorrection> get_clone() const override;
 
-  using dg_package_field_tags = tmpl::list<
-      Tags::TildeD, Tags::TildeYe, Tags::TildeTau,
-      Tags::TildeS<Frame::Inertial>, Tags::TildeB<Frame::Inertial>,
-      Tags::TildePhi, ::Tags::NormalDotFlux<Tags::TildeD>,
-      ::Tags::NormalDotFlux<Tags::TildeYe>,
-      ::Tags::NormalDotFlux<Tags::TildeTau>,
-      ::Tags::NormalDotFlux<Tags::TildeS<Frame::Inertial>>,
-      ::Tags::NormalDotFlux<Tags::TildeB<Frame::Inertial>>,
-      ::Tags::NormalDotFlux<Tags::TildePhi>, LargestOutgoingCharSpeed,
-      LargestIngoingCharSpeed, InterfaceUnitNormal, MetricFlatness,
-      hydro::Tags::RestMassDensity<DataVector>,
-      hydro::Tags::ElectronFraction<DataVector>,
-      hydro::Tags::SoundSpeedSquared<DataVector>,
-      hydro::Tags::SpatialVelocity<DataVector, 3>,
-      hydro::Tags::Pressure<DataVector>, hydro::Tags::LorentzFactor<DataVector>,
-      hydro::Tags::SpecificInternalEnergy<DataVector>>;
+  using dg_package_field_tags =
+      tmpl::list<Tags::TildeD, Tags::TildeYe, Tags::TildeTau,
+                 Tags::TildeS<Frame::Inertial>, Tags::TildeB<Frame::Inertial>,
+                 Tags::TildePhi, ::Tags::NormalDotFlux<Tags::TildeD>,
+                 ::Tags::NormalDotFlux<Tags::TildeYe>,
+                 ::Tags::NormalDotFlux<Tags::TildeTau>,
+                 ::Tags::NormalDotFlux<Tags::TildeS<Frame::Inertial>>,
+                 ::Tags::NormalDotFlux<Tags::TildeB<Frame::Inertial>>,
+                 ::Tags::NormalDotFlux<Tags::TildePhi>,
+                 LargestOutgoingCharSpeed, LargestIngoingCharSpeed,
+                 InterfaceUnitNormal, MetricFlatness>;
   using dg_package_data_temporary_tags = tmpl::list<
       gr::Tags::Lapse<DataVector>, gr::Tags::Shift<DataVector, 3>,
       hydro::Tags::SpatialVelocityOneForm<DataVector, 3, Frame::Inertial>>;
@@ -197,14 +192,6 @@ class Hll final : public evolution::BoundaryCorrection {
       gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
           packaged_interface_unit_normal,
       gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
-      gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
-      gsl::not_null<Scalar<DataVector>*> packaged_electron_fraction,
-      gsl::not_null<Scalar<DataVector>*> packaged_sound_speed_squared,
-      gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
-          packaged_spatial_velocity,
-      gsl::not_null<Scalar<DataVector>*> packaged_pressure,
-      gsl::not_null<Scalar<DataVector>*> packaged_lorentz_factor,
-      gsl::not_null<Scalar<DataVector>*> packaged_specific_internal_energy,
 
       const Scalar<DataVector>& tilde_d, const Scalar<DataVector>& tilde_ye,
       const Scalar<DataVector>& tilde_tau,
@@ -239,9 +226,7 @@ class Hll final : public evolution::BoundaryCorrection {
       const EquationsOfState::EquationOfState<true, 3>& equation_of_state)
       const;
 
-  // Non-static so the flat-branch fast-bound recomputation can consult
-  // magnetic_field_magnitude_for_hydro_ (matches Hllem's convention).
-  void dg_boundary_terms(
+  static void dg_boundary_terms(
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_tau,
@@ -268,13 +253,6 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& largest_ingoing_char_speed_int,
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
       const Scalar<DataVector>& metric_flatness_int,
-      const Scalar<DataVector>& rest_mass_density_int,
-      const Scalar<DataVector>& electron_fraction_int,
-      const Scalar<DataVector>& sound_speed_squared_int,
-      const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
-      const Scalar<DataVector>& pressure_int,
-      const Scalar<DataVector>& lorentz_factor_int,
-      const Scalar<DataVector>& specific_internal_energy_int,
       const Scalar<DataVector>& tilde_d_ext,
       const Scalar<DataVector>& tilde_ye_ext,
       const Scalar<DataVector>& tilde_tau_ext,
@@ -293,16 +271,8 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& largest_ingoing_char_speed_ext,
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_ext,
       const Scalar<DataVector>& metric_flatness_ext,
-      const Scalar<DataVector>& rest_mass_density_ext,
-      const Scalar<DataVector>& electron_fraction_ext,
-      const Scalar<DataVector>& sound_speed_squared_ext,
-      const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
-      const Scalar<DataVector>& pressure_ext,
-      const Scalar<DataVector>& lorentz_factor_ext,
-      const Scalar<DataVector>& specific_internal_energy_ext,
       dg::Formulation dg_formulation,
-      const EquationsOfState::EquationOfState<true, 3>& equation_of_state)
-      const;
+      const EquationsOfState::EquationOfState<true, 3>& equation_of_state);
 
  private:
   friend bool operator==(const Hll& lhs, const Hll& rhs);
