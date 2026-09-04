@@ -63,9 +63,6 @@ double Hll::dg_package_data(
         packaged_largest_outgoing_char_speed,
     const gsl::not_null<Scalar<DataVector>*>
         packaged_largest_ingoing_char_speed,
-    const gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
-        packaged_interface_unit_normal,
-    const gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
 
     const Scalar<DataVector>& tilde_d, const Scalar<DataVector>& tilde_ye,
     const Scalar<DataVector>& tilde_tau,
@@ -199,17 +196,6 @@ double Hll::dg_package_data(
     }
   }
 
-  // Package the interface unit normal (for the scalar/MHD field split) and the
-  // metric-flatness measure (the split only holds in flat space). The
-  // fast-magnetosonic HLL bounds are no longer computed per-side here; they are
-  // computed at the AVERAGED interface state inside dg_boundary_terms
-  // (mirroring the HLLEM boundary correction), which fixes a top/bottom
-  // asymmetry that the per-side, sign-of-v_n-dependent bounds seeded in the
-  // Kelvin-Helmholtz test.
-  *packaged_interface_unit_normal = normal_covector;
-  get(*packaged_metric_flatness) = abs(get(lapse) - 1.0) + abs(get<0>(shift)) +
-                                   abs(get<1>(shift)) + abs(get<2>(shift));
-
   *packaged_tilde_d = tilde_d;
   *packaged_tilde_ye = tilde_ye;
   *packaged_tilde_tau = tilde_tau;
@@ -258,8 +244,6 @@ void Hll::dg_boundary_terms(
     const Scalar<DataVector>& normal_dot_flux_tilde_phi_int,
     const Scalar<DataVector>& largest_outgoing_char_speed_int,
     const Scalar<DataVector>& largest_ingoing_char_speed_int,
-    const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
-    const Scalar<DataVector>& metric_flatness_int,
     const Scalar<DataVector>& tilde_d_ext,
     const Scalar<DataVector>& tilde_ye_ext,
     const Scalar<DataVector>& tilde_tau_ext,
@@ -274,8 +258,6 @@ void Hll::dg_boundary_terms(
     const Scalar<DataVector>& normal_dot_flux_tilde_phi_ext,
     const Scalar<DataVector>& largest_outgoing_char_speed_ext,
     const Scalar<DataVector>& largest_ingoing_char_speed_ext,
-    const tnsr::i<DataVector, 3, Frame::Inertial>& /*iface_normal_ext*/,
-    const Scalar<DataVector>& metric_flatness_ext,
     const dg::Formulation dg_formulation,
     const EquationsOfState::EquationOfState<true, 3>& /*equation_of_state*/) {
   const size_t num_points = get(tilde_d_int).size();
@@ -356,50 +338,13 @@ void Hll::dg_boundary_terms(
             normal_dot_flux_tilde_s_int.get(i), tilde_s_ext.get(i),
             normal_dot_flux_tilde_s_ext.get(i));
   }
-  // Magnetic field: the NORMAL component is part of the GLM subsystem (light
-  // speed), the TANGENTIAL component is MHD (fast bounds). Decompose along the
-  // interface normal, treat each part with its own bounds, and recombine
-  // G(B^i) = G(B_n) n^i + G(B_t^i). (In flat space n is a unit covector and the
-  // metric is the identity, so raising/lowering the normal is trivial.)
-  {
-    const auto& n = interface_unit_normal_int;
-    DataVector bn_int{num_points, 0.0};
-    DataVector bn_ext{num_points, 0.0};
-    DataVector nfbn_int{num_points, 0.0};
-    DataVector nfbn_ext{num_points, 0.0};
-    for (size_t i = 0; i < 3; ++i) {
-      bn_int += tilde_b_int.get(i) * n.get(i);
-      bn_ext += tilde_b_ext.get(i) * n.get(i);
-      nfbn_int += normal_dot_flux_tilde_b_int.get(i) * n.get(i);
-      nfbn_ext += normal_dot_flux_tilde_b_ext.get(i) * n.get(i);
-    }
-    const DataVector g_bn =
-        hll(lambda_max, lambda_min, bn_int, nfbn_int, bn_ext, nfbn_ext);
-    // The decomposition uses n as both covector and (raised) vector, which is
-    // only valid in flat space; where the background is curved fall back to the
-    // plain (light-speed) HLL flux for B, which keeps the scheme conservative.
-    for (size_t i = 0; i < 3; ++i) {
-      const DataVector bt_int = tilde_b_int.get(i) - bn_int * n.get(i);
-      const DataVector bt_ext = tilde_b_ext.get(i) - bn_ext * n.get(i);
-      const DataVector nfbt_int =
-          normal_dot_flux_tilde_b_int.get(i) - nfbn_int * n.get(i);
-      const DataVector nfbt_ext =
-          normal_dot_flux_tilde_b_ext.get(i) - nfbn_ext * n.get(i);
-      const DataVector g_bt =
-          hll(fast_max, fast_min, bt_int, nfbt_int, bt_ext, nfbt_ext);
-      const DataVector g_split = g_bn * n.get(i) + g_bt;
-      const DataVector g_plain =
-          hll(lambda_max, lambda_min, tilde_b_int.get(i),
-              normal_dot_flux_tilde_b_int.get(i), tilde_b_ext.get(i),
-              normal_dot_flux_tilde_b_ext.get(i));
-      for (size_t pt = 0; pt < num_points; ++pt) {
-        boundary_correction_tilde_b->get(i)[pt] =
-            (get(metric_flatness_int)[pt] > 1.0e-12 or
-             get(metric_flatness_ext)[pt] > 1.0e-12)
-                ? g_plain[pt]
-                : g_split[pt];
-      }
-    }
+  // Magnetic field: plain HLL with light-speed bounds (matches develop's
+  // pre-f5b73d016 behaviour; the GLM / MHD split has been reverted).
+  for (size_t i = 0; i < 3; ++i) {
+    boundary_correction_tilde_b->get(i) =
+        hll(lambda_max, lambda_min, tilde_b_int.get(i),
+            normal_dot_flux_tilde_b_int.get(i), tilde_b_ext.get(i),
+            normal_dot_flux_tilde_b_ext.get(i));
   }
 }
 

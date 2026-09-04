@@ -112,12 +112,6 @@ def dg_package_data(
                 )
             )
 
-    # The fast-magnetosonic bounds are now computed at the averaged interface
-    # state inside dg_boundary_terms, so dg_package_data packages the primitives
-    # (rest mass density, spatial velocity, pressure, Lorentz factor, specific
-    # internal energy) instead of per-side fast speeds. The return order matches
-    # dg_package_field_tags.
-    metric_flatness = np.abs(lapse - 1.0) + np.sum(np.abs(shift))
     return (
         tilde_d,
         tilde_ye,
@@ -133,8 +127,6 @@ def dg_package_data(
         np.asarray(np.dot(flux_tilde_phi, normal_covector)),
         compute_char(1.0),
         compute_char(-1.0),
-        normal_covector,
-        np.asarray(metric_flatness),
     )
 
 
@@ -153,8 +145,6 @@ def dg_boundary_terms(
     interior_normal_dot_flux_tilde_phi,
     interior_largest_outgoing_char_speed,
     interior_largest_ingoing_char_speed,
-    interior_interface_unit_normal,
-    interior_metric_flatness,
     exterior_tilde_d,
     exterior_tilde_ye,
     exterior_tilde_tau,
@@ -169,8 +159,6 @@ def dg_boundary_terms(
     exterior_normal_dot_flux_tilde_phi,
     exterior_largest_outgoing_char_speed,
     exterior_largest_ingoing_char_speed,
-    exterior_interface_unit_normal,
-    exterior_metric_flatness,
     use_strong_form,
 ):
     # Light-speed (divergence-cleaning) bounds: for Phi and the normal B.
@@ -242,21 +230,9 @@ def dg_boundary_terms(
         exterior_tilde_s,
         exterior_normal_dot_flux_tilde_s,
     )
-    # Magnetic field: normal part (light) + tangential part (fast) when flat,
-    # else the plain light-speed HLL flux.
-    n = interior_interface_unit_normal
-    bn_int = np.dot(interior_tilde_b, n)
-    bn_ext = np.dot(exterior_tilde_b, n)
-    nfbn_int = np.dot(interior_normal_dot_flux_tilde_b, n)
-    nfbn_ext = np.dot(exterior_normal_dot_flux_tilde_b, n)
-    g_bn = hll(lambda_max, lambda_min, bn_int, nfbn_int, bn_ext, nfbn_ext)
-    bt_int = interior_tilde_b - bn_int * n
-    bt_ext = exterior_tilde_b - bn_ext * n
-    nfbt_int = interior_normal_dot_flux_tilde_b - nfbn_int * n
-    nfbt_ext = exterior_normal_dot_flux_tilde_b - nfbn_ext * n
-    g_bt = hll(fast_max, fast_min, bt_int, nfbt_int, bt_ext, nfbt_ext)
-    g_split = g_bn * n + g_bt
-    g_plain = hll(
+    # Magnetic field: plain HLL with light-speed bounds (GLM/MHD split
+    # reverted; matches develop's pre-f5b73d016 behaviour).
+    tilde_b = hll(
         lambda_max,
         lambda_min,
         interior_tilde_b,
@@ -264,10 +240,6 @@ def dg_boundary_terms(
         exterior_tilde_b,
         exterior_normal_dot_flux_tilde_b,
     )
-    is_curved = (interior_metric_flatness > 1.0e-12) or (
-        exterior_metric_flatness > 1.0e-12
-    )
-    tilde_b = g_plain if is_curved else g_split
 
     return (
         tilde_d,

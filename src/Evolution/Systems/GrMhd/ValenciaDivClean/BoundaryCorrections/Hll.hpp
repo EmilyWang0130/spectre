@@ -95,18 +95,6 @@ class Hll final : public evolution::BoundaryCorrection {
   struct LargestIngoingCharSpeed : db::SimpleTag {
     using type = Scalar<DataVector>;
   };
-  /// Interface unit normal (covector), used to project the normal magnetic
-  /// field for the divergence-cleaning (Phi, B_n) subsystem.
-  struct InterfaceUnitNormal : db::SimpleTag {
-    using type = tnsr::i<DataVector, 3, Frame::Inertial>;
-  };
-  /// |lapse - 1| + |shift|, a measure of how far the background is from flat.
-  /// The scalar/MHD split only holds in flat space; where this is nonzero the
-  /// boundary correction falls back to the standard (light-speed) HLL flux.
-  struct MetricFlatness : db::SimpleTag {
-    using type = Scalar<DataVector>;
-  };
-
   struct MagneticFieldMagnitudeForHydro {
     static constexpr Options::String help = {
         "When the magnetic field is below this value we use the hydro "
@@ -152,8 +140,7 @@ class Hll final : public evolution::BoundaryCorrection {
                  ::Tags::NormalDotFlux<Tags::TildeS<Frame::Inertial>>,
                  ::Tags::NormalDotFlux<Tags::TildeB<Frame::Inertial>>,
                  ::Tags::NormalDotFlux<Tags::TildePhi>,
-                 LargestOutgoingCharSpeed, LargestIngoingCharSpeed,
-                 InterfaceUnitNormal, MetricFlatness>;
+                 LargestOutgoingCharSpeed, LargestIngoingCharSpeed>;
   using dg_package_data_temporary_tags = tmpl::list<
       gr::Tags::Lapse<DataVector>, gr::Tags::Shift<DataVector, 3>,
       hydro::Tags::SpatialVelocityOneForm<DataVector, 3, Frame::Inertial>>;
@@ -189,9 +176,6 @@ class Hll final : public evolution::BoundaryCorrection {
       gsl::not_null<Scalar<DataVector>*> packaged_normal_dot_flux_tilde_phi,
       gsl::not_null<Scalar<DataVector>*> packaged_largest_outgoing_char_speed,
       gsl::not_null<Scalar<DataVector>*> packaged_largest_ingoing_char_speed,
-      gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
-          packaged_interface_unit_normal,
-      gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
 
       const Scalar<DataVector>& tilde_d, const Scalar<DataVector>& tilde_ye,
       const Scalar<DataVector>& tilde_tau,
@@ -251,8 +235,6 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& normal_dot_flux_tilde_phi_int,
       const Scalar<DataVector>& largest_outgoing_char_speed_int,
       const Scalar<DataVector>& largest_ingoing_char_speed_int,
-      const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
-      const Scalar<DataVector>& metric_flatness_int,
       const Scalar<DataVector>& tilde_d_ext,
       const Scalar<DataVector>& tilde_ye_ext,
       const Scalar<DataVector>& tilde_tau_ext,
@@ -269,8 +251,6 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& normal_dot_flux_tilde_phi_ext,
       const Scalar<DataVector>& largest_outgoing_char_speed_ext,
       const Scalar<DataVector>& largest_ingoing_char_speed_ext,
-      const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_ext,
-      const Scalar<DataVector>& metric_flatness_ext,
       dg::Formulation dg_formulation,
       const EquationsOfState::EquationOfState<true, 3>& equation_of_state);
 
