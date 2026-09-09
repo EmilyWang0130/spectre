@@ -17,6 +17,7 @@
 
 #include "DataStructures/Tensor/TypeAliases.hpp"
 #include "IO/H5/EosTable.hpp"
+#include "NumericalAlgorithms/Interpolation/MultiCubicSpanInterpolation.hpp"
 #include "NumericalAlgorithms/Interpolation/MultiLinearSpanInterpolation.hpp"
 #include "Options/String.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
@@ -86,13 +87,25 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
         "\"dd2.eos_beta\")."};
   };
 
+  struct InterpolationOrder {
+    using type = size_t;
+    static constexpr Options::String help{
+        "Polynomial order used to interpolate between table nodes. "
+        "1 (default) uses linear (fast, C0, O(h^2)). "
+        "3 uses 4-point Lagrange (cubic, C0-with-continuous-first-derivative "
+        "within each 4-point cell, O(h^4)). Cubic is more expensive per query "
+        "and requires at least 4 table nodes."};
+    static constexpr type default_value = 1;
+  };
+
   static constexpr Options::String help = {
       "A tabulated 1D barotropic equation of state, loaded from an h5 file "
       "produced by an offline converter (e.g. ConvertComposeBetaTo1D for "
       "cold beta-equilibrium slices from CompOSE .beta ASCII tables). "
       "Structurally analogous to Tabulated3D."};
 
-  using options = tmpl::list<TableFilename, TableSubFilename>;
+  using options =
+      tmpl::list<TableFilename, TableSubFilename, InterpolationOrder>;
 
   Tabulated1D() = default;
   Tabulated1D(const Tabulated1D& rhs);
@@ -102,11 +115,13 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
   ~Tabulated1D() override = default;
 
   /// Construct by reading the named subfile from the h5 file at `filename`.
-  Tabulated1D(const std::string& filename, const std::string& subfilename);
+  Tabulated1D(const std::string& filename, const std::string& subfilename,
+              size_t interpolation_order = 1);
 
   /// Construct directly from an already-opened `h5::EosTable`.
   /// Useful for tests that build the table in-memory.
-  explicit Tabulated1D(const h5::EosTable& spectre_eos);
+  explicit Tabulated1D(const h5::EosTable& spectre_eos,
+                       size_t interpolation_order = 1);
 
   std::unique_ptr<EquationOfState<IsRelativistic, 1>> get_clone()
       const override;
@@ -151,12 +166,26 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
  private:
   EQUATION_OF_STATE_FORWARD_DECLARE_MEMBER_IMPLS(1)
 
-  void initialize(const h5::EosTable& spectre_eos);
+  void initialize(const h5::EosTable& spectre_eos,
+                  size_t interpolation_order = 1);
 
   /// Rebuild the non-PUP'd interpolator from the stored grid + table data.
   /// Called at the end of every path that mutates `log_rho_grid_` or
   /// `table_data_`: `initialize`, PUP unpack, copy/assign.
   void initialize_interpolator();
+
+  /// Interpolate a single tabulated field at the given log_rho via
+  /// whichever interpolator matches interpolation_order_.
+  template <size_t Field>
+  double interpolate_field(const double log_rest_mass_density) const {
+    if (interpolation_order_ == 3) {
+      const auto weights =
+          cubic_interpolator_.get_weights(log_rest_mass_density);
+      return cubic_interpolator_.template interpolate<Field>(weights)[0];
+    }
+    const auto weights = interpolator_.get_weights(log_rest_mass_density);
+    return interpolator_.template interpolate<Field>(weights)[0];
+  }
 
   /// Uniformly log-spaced grid in log(rho_geom). Uniformity is required
   /// by intrp::UniformMultiLinearSpanInterpolation.
@@ -175,10 +204,20 @@ class Tabulated1D : public EquationOfState<IsRelativistic, 1> {
   /// uses. Zero when eps_min >= 0.
   double energy_shift_ = 0.0;
 
+  /// Polynomial order for between-node interpolation. 1 = linear (always
+  /// initialized). 3 = 4-point Lagrange (cubic), initialized only when
+  /// interpolation_order_ == 3.
+  size_t interpolation_order_ = 1;
+
   /// Non-PUP'd; rebuilt from log_rho_grid_ / table_data_ after any state
   /// change. Docs on the interpolator class note it is intentionally not
   /// PUPable.
   intrp::UniformMultiLinearSpanInterpolation<1, NumberOfVars> interpolator_{};
+
+  /// 1D 4-point Lagrange interpolator; only queried when
+  /// interpolation_order_ == 3.
+  intrp::UniformMultiCubicSpanInterpolation<1, NumberOfVars>
+      cubic_interpolator_{};
 };
 
 /// \cond

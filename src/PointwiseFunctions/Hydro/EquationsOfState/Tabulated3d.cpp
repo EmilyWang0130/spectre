@@ -44,11 +44,7 @@ Scalar<DataType> Tabulated3D<IsRelativistic>::
     const auto& log_T = get(log_temperature);
 
     const auto f = [this, log_rho, log_T](const double ye) {
-      const auto weights = interpolator_.get_weights(log_T, log_rho, ye);
-      const auto interpolated_values =
-          interpolator_.template interpolate<DeltaMu>(weights);
-
-      return interpolated_values[0];
+      return this->template interpolate_field<DeltaMu>(log_T, log_rho, ye);
     };
 
     const auto root_from_lambda =
@@ -63,11 +59,7 @@ Scalar<DataType> Tabulated3D<IsRelativistic>::
       const auto& log_T = get(log_temperature)[s];
 
       const auto f = [this, log_rho, log_T](const double ye) {
-        const auto weights = interpolator_.get_weights(log_T, log_rho, ye);
-        const auto interpolated_values =
-            interpolator_.template interpolate<DeltaMu>(weights);
-
-        return interpolated_values[0];
+        return this->template interpolate_field<DeltaMu>(log_T, log_rho, ye);
       };
 
       const auto root_from_lambda = RootFinder::toms748(
@@ -88,7 +80,9 @@ Tabulated3D<IsRelativistic>::get_clone() const {
 }
 
 template <bool IsRelativistic>
-void Tabulated3D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
+void Tabulated3D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos,
+                                             const size_t interpolation_order) {
+  interpolation_order_ = interpolation_order;
   // STEP 0: Allocate intermediate data structures for initialization
 
   auto setup_index_variable = [&spectre_eos](const std::string& name) {
@@ -209,16 +203,18 @@ void Tabulated3D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
   }
 
   initialize(electron_fraction, log_density, log_temperature, table_data,
-             energy_shift, enthalpy_minimum);
+             energy_shift, enthalpy_minimum, interpolation_order_);
 }
 
 template <bool IsRelativistic>
 void Tabulated3D<IsRelativistic>::initialize(
     std::vector<double> electron_fraction, std::vector<double> log_density,
     std::vector<double> log_temperature, std::vector<double> table_data,
-    double energy_shift, double enthalpy_minimum) {
+    double energy_shift, double enthalpy_minimum,
+    const size_t interpolation_order) {
   energy_shift_ = energy_shift;
   enthalpy_minimum_ = enthalpy_minimum;
+  interpolation_order_ = interpolation_order;
   table_electron_fraction_ = std::move(electron_fraction);
   table_log_density_ = std::move(log_density);
   table_log_temperature_ = std::move(log_temperature);
@@ -250,6 +246,23 @@ void Tabulated3D<IsRelativistic>::initialize_interpolator() {
   interpolator_ = intrp::UniformMultiLinearSpanInterpolation<3, NumberOfVars>(
       independent_data_view, {table_data_.data(), table_data_.size()},
       num_x_points);
+  // Cubic interpolator needs at least four nodes per axis. Only initialize
+  // it when the caller requested cubic and the grid supports it; otherwise
+  // leave it default-constructed (never queried since interpolation_order_
+  // stays at 1).
+  if (interpolation_order_ == 3) {
+    for (size_t d = 0; d < 3; ++d) {
+      ASSERT(num_x_points[d] >= intrp::multi_cubic_stencil_width,
+             "Tabulated3D: InterpolationOrder=3 requires at least "
+                 << intrp::multi_cubic_stencil_width
+                 << " table nodes per axis; axis " << d << " has "
+                 << num_x_points[d] << ".");
+    }
+    cubic_interpolator_ =
+        intrp::UniformMultiCubicSpanInterpolation<3, NumberOfVars>(
+            independent_data_view, {table_data_.data(), table_data_.size()},
+            num_x_points);
+  }
 }
 
 template <bool IsRelativistic>
@@ -266,6 +279,7 @@ bool Tabulated3D<IsRelativistic>::operator==(
   bool result = true;
   result &= (rhs.enthalpy_minimum_ == this->enthalpy_minimum_);
   result &= (rhs.energy_shift_ == this->energy_shift_);
+  result &= (rhs.interpolation_order_ == this->interpolation_order_);
   result &= (rhs.table_electron_fraction_ == this->table_electron_fraction_);
   result &= (rhs.table_log_density_ == this->table_log_density_);
   result &= (rhs.table_log_temperature_ == this->table_log_temperature_);
@@ -352,21 +366,15 @@ Tabulated3D<IsRelativistic>::pressure_from_density_and_temperature_impl(
       make_with_value<Scalar<DataType>>(get(rest_mass_density), 0.0);
 
   if constexpr (std::is_same_v<DataType, double>) {
-    auto weights = interpolator_.get_weights(get(log_temperature),
-                                             get(log_rest_mass_density),
-                                             get(converted_electron_fraction));
-    auto interpolated_state =
-        interpolator_.template interpolate<Pressure>(weights);
-    get(pressure) = std::exp(interpolated_state[0]);
+    get(pressure) = std::exp(this->template interpolate_field<Pressure>(
+        get(log_temperature), get(log_rest_mass_density),
+        get(converted_electron_fraction)));
 
   } else if constexpr (std::is_same_v<DataType, DataVector>) {
     for (size_t s = 0; s < get(electron_fraction).size(); ++s) {
-      auto weights = interpolator_.get_weights(
+      get(pressure)[s] = std::exp(this->template interpolate_field<Pressure>(
           get(log_temperature)[s], get(log_rest_mass_density)[s],
-          get(converted_electron_fraction)[s]);
-      auto interpolated_state =
-          interpolator_.template interpolate<Pressure>(weights);
-      get(pressure)[s] = std::exp(interpolated_state[0]);
+          get(converted_electron_fraction)[s]));
       if (get(pressure)[s] > 1.0e5) {
         Parallel::printf(
             "[DEBUG T3D p_from_rho_T] s=%zu  input(rho=%.3e T=%.3e Ye=%.4f)"
@@ -387,6 +395,7 @@ void Tabulated3D<IsRelativistic>::pup(PUP::er& p) {
   EquationOfState<IsRelativistic, 3>::pup(p);
   p | energy_shift_;
   p | enthalpy_minimum_;
+  p | interpolation_order_;
   p | table_electron_fraction_;
   p | table_log_density_;
   p | table_log_temperature_;
@@ -451,11 +460,8 @@ Tabulated3D<IsRelativistic>::temperature_from_density_and_energy_impl(
     // Root-finding appropriate between reference density and maximum density
     // We can use x=0 and x=x_max as bounds
     const auto f = [this, log_eps, log_rho, ye](const double log_T) {
-      const auto weights = interpolator_.get_weights(log_T, log_rho, ye);
-      const auto interpolated_values =
-          interpolator_.template interpolate<Epsilon>(weights);
-
-      return log_eps - interpolated_values[0];
+      return log_eps -
+             this->template interpolate_field<Epsilon>(log_T, log_rho, ye);
     };
 
     bool need_root_finding = true;
@@ -488,11 +494,8 @@ Tabulated3D<IsRelativistic>::temperature_from_density_and_energy_impl(
       // Root-finding appropriate between reference density and maximum density
       // We can use x=0 and x=x_max as bounds
       const auto f = [this, log_eps, log_rho, ye](const double log_T) {
-        const auto weights = interpolator_.get_weights(log_T, log_rho, ye);
-        const auto interpolated_values =
-            interpolator_.template interpolate<Epsilon>(weights);
-
-        return log_eps - interpolated_values[0];
+        return log_eps -
+               this->template interpolate_field<Epsilon>(log_T, log_rho, ye);
       };
 
       // Check bounds to avoid error in TOMS748 if bracket is zero
@@ -554,21 +557,17 @@ Tabulated3D<IsRelativistic>::specific_entropy_from_density_and_temperature_impl(
       make_with_value<Scalar<DataType>>(get(rest_mass_density), 0.0);
 
   if constexpr (std::is_same_v<DataType, double>) {
-    auto weights = interpolator_.get_weights(get(log_temperature),
-                                             get(log_rest_mass_density),
-                                             get(converted_electron_fraction));
-    auto interpolated_state =
-        interpolator_.template interpolate<SpecificEntropy>(weights);
-    get(specific_entropy) = std::exp(interpolated_state[0]);
+    get(specific_entropy) =
+        std::exp(this->template interpolate_field<SpecificEntropy>(
+            get(log_temperature), get(log_rest_mass_density),
+            get(converted_electron_fraction)));
 
   } else if constexpr (std::is_same_v<DataType, DataVector>) {
     for (size_t s = 0; s < get(electron_fraction).size(); ++s) {
-      auto weights = interpolator_.get_weights(
-          get(log_temperature)[s], get(log_rest_mass_density)[s],
-          get(converted_electron_fraction)[s]);
-      auto interpolated_state =
-          interpolator_.template interpolate<SpecificEntropy>(weights);
-      get(specific_entropy)[s] = std::exp(interpolated_state[0]);
+      get(specific_entropy)[s] =
+          std::exp(this->template interpolate_field<SpecificEntropy>(
+              get(log_temperature)[s], get(log_rest_mass_density)[s],
+              get(converted_electron_fraction)[s]));
     }
   }
 
@@ -595,13 +594,11 @@ Scalar<DataType> Tabulated3D<IsRelativistic>::
       make_with_value<Scalar<DataType>>(get(rest_mass_density), 0.0);
 
   if constexpr (std::is_same_v<DataType, double>) {
-    auto weights = interpolator_.get_weights(get(log_temperature),
-                                             get(log_rest_mass_density),
-                                             get(converted_electron_fraction));
-    auto interpolated_state =
-        interpolator_.template interpolate<Epsilon>(weights);
     get(specific_internal_energy) =
-        std::exp(interpolated_state[0]) + energy_shift_;
+        std::exp(this->template interpolate_field<Epsilon>(
+            get(log_temperature), get(log_rest_mass_density),
+            get(converted_electron_fraction))) +
+        energy_shift_;
     if (get(specific_internal_energy) > 1.0e5) {
       Parallel::printf(
           "[DEBUG T3D eps_from_rho_T double] input(rho=%.3e T=%.3e Ye=%.4f)"
@@ -612,13 +609,11 @@ Scalar<DataType> Tabulated3D<IsRelativistic>::
     }
   } else if constexpr (std::is_same_v<DataType, DataVector>) {
     for (size_t s = 0; s < get(electron_fraction).size(); ++s) {
-      auto weights = interpolator_.get_weights(
-          get(log_temperature)[s], get(log_rest_mass_density)[s],
-          get(converted_electron_fraction)[s]);
-      auto interpolated_state =
-          interpolator_.template interpolate<Epsilon>(weights);
       get(specific_internal_energy)[s] =
-          std::exp(interpolated_state[0]) + energy_shift_;
+          std::exp(this->template interpolate_field<Epsilon>(
+              get(log_temperature)[s], get(log_rest_mass_density)[s],
+              get(converted_electron_fraction)[s])) +
+          energy_shift_;
       // TNTYST-diagnostic: catch unphysical high-T corner queries. The
       // failing static state has eps ~ 6.8e10 which only lives at the
       // (T_max, low n_b) corner of the TNTYST table. If we hit it here we
@@ -659,21 +654,15 @@ Scalar<DataType> Tabulated3D<IsRelativistic>::
       make_with_value<Scalar<DataType>>(get(rest_mass_density), 0.0);
 
   if constexpr (std::is_same_v<DataType, double>) {
-    auto weights = interpolator_.get_weights(get(log_temperature),
-                                             get(log_rest_mass_density),
-                                             get(converted_electron_fraction));
-    auto interpolated_state =
-        interpolator_.template interpolate<CsSquared>(weights);
-    get(cs2) = interpolated_state[0];
+    get(cs2) = this->template interpolate_field<CsSquared>(
+        get(log_temperature), get(log_rest_mass_density),
+        get(converted_electron_fraction));
 
   } else if constexpr (std::is_same_v<DataType, DataVector>) {
     for (size_t s = 0; s < get(electron_fraction).size(); ++s) {
-      auto weights = interpolator_.get_weights(
+      get(cs2)[s] = this->template interpolate_field<CsSquared>(
           get(log_temperature)[s], get(log_rest_mass_density)[s],
           get(converted_electron_fraction)[s]);
-      auto interpolated_state =
-          interpolator_.template interpolate<CsSquared>(weights);
-      get(cs2)[s] = interpolated_state[0];
     }
   }
 
@@ -700,16 +689,14 @@ Tabulated3D<IsRelativistic>::kappa_from_density_and_temperature_impl(
       make_with_value<Scalar<DataType>>(get(rest_mass_density), 0.0);
 
   if constexpr (std::is_same_v<DataType, double>) {
-    const auto weights = interpolator_.get_weights(
+    get(result) = this->template interpolate_field<Kappa>(
         get(log_temperature), get(log_rest_mass_density),
         get(converted_electron_fraction));
-    get(result) = interpolator_.template interpolate<Kappa>(weights)[0];
   } else if constexpr (std::is_same_v<DataType, DataVector>) {
     for (size_t s = 0; s < get(electron_fraction).size(); ++s) {
-      const auto weights = interpolator_.get_weights(
+      get(result)[s] = this->template interpolate_field<Kappa>(
           get(log_temperature)[s], get(log_rest_mass_density)[s],
           get(converted_electron_fraction)[s]);
-      get(result)[s] = interpolator_.template interpolate<Kappa>(weights)[0];
     }
   }
 
@@ -736,16 +723,14 @@ Tabulated3D<IsRelativistic>::zeta_from_density_and_temperature_impl(
       make_with_value<Scalar<DataType>>(get(rest_mass_density), 0.0);
 
   if constexpr (std::is_same_v<DataType, double>) {
-    const auto weights = interpolator_.get_weights(
+    get(result) = this->template interpolate_field<Zeta>(
         get(log_temperature), get(log_rest_mass_density),
         get(converted_electron_fraction));
-    get(result) = interpolator_.template interpolate<Zeta>(weights)[0];
   } else if constexpr (std::is_same_v<DataType, DataVector>) {
     for (size_t s = 0; s < get(electron_fraction).size(); ++s) {
-      const auto weights = interpolator_.get_weights(
+      get(result)[s] = this->template interpolate_field<Zeta>(
           get(log_temperature)[s], get(log_rest_mass_density)[s],
           get(converted_electron_fraction)[s]);
-      get(result)[s] = interpolator_.template interpolate<Zeta>(weights)[0];
     }
   }
 
@@ -765,13 +750,10 @@ double Tabulated3D<IsRelativistic>::specific_internal_energy_lower_bound(
 
   log_rest_mass_density = log(log_rest_mass_density);
 
-  auto weights = interpolator_.get_weights(log(temperature_lower_bound()),
-                                           log_rest_mass_density,
-                                           converted_electron_fraction);
-  auto interpolated_state =
-      interpolator_.template interpolate<Epsilon>(weights);
-
-  return exp(interpolated_state[0]) + energy_shift_;
+  return exp(this->template interpolate_field<Epsilon>(
+             log(temperature_lower_bound()), log_rest_mass_density,
+             converted_electron_fraction)) +
+         energy_shift_;
 }
 
 template <bool IsRelativistic>
@@ -787,13 +769,10 @@ double Tabulated3D<IsRelativistic>::specific_internal_energy_upper_bound(
 
   log_rest_mass_density = log(log_rest_mass_density);
 
-  auto weights = interpolator_.get_weights(
-      log(upper_bound_tolerance_ * temperature_upper_bound()),
-      log_rest_mass_density, converted_electron_fraction);
-  auto interpolated_state =
-      interpolator_.template interpolate<Epsilon>(weights);
-
-  return exp(interpolated_state[0]) + energy_shift_;
+  return exp(this->template interpolate_field<Epsilon>(
+             log(upper_bound_tolerance_ * temperature_upper_bound()),
+             log_rest_mass_density, converted_electron_fraction)) +
+         energy_shift_;
 }
 
 template <bool IsRelativistic>
@@ -806,24 +785,26 @@ Tabulated3D<IsRelativistic>::
         std::vector<double> log_temperature,
         // NOLINTNEXTLINE(performance-unnecessary-value-param)
         std::vector<double> table_data, double energy_shift,
-        double enthalpy_minimum) {
+        double enthalpy_minimum, const size_t interpolation_order) {
   initialize(std::move(electron_fraction), std::move(log_density),
              std::move(log_temperature), std::move(table_data), energy_shift,
-             enthalpy_minimum);
+             enthalpy_minimum, interpolation_order);
 }
 
 template <bool IsRelativistic>
-Tabulated3D<IsRelativistic>::Tabulated3D(const h5::EosTable& spectre_eos) {
-  initialize(spectre_eos);
+Tabulated3D<IsRelativistic>::Tabulated3D(const h5::EosTable& spectre_eos,
+                                         const size_t interpolation_order) {
+  initialize(spectre_eos, interpolation_order);
 }
 
 template <bool IsRelativistic>
 Tabulated3D<IsRelativistic>::Tabulated3D(const std::string& filename,
-                                         const std::string& subfilename) {
+                                         const std::string& subfilename,
+                                         const size_t interpolation_order) {
   h5::H5File<h5::AccessType::ReadOnly> eos_file{filename};
   const auto& spectre_eos = eos_file.get<h5::EosTable>("/" + subfilename);
 
-  initialize(spectre_eos);
+  initialize(spectre_eos, interpolation_order);
 }
 
 }  // namespace EquationsOfState

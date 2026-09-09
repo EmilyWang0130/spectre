@@ -17,6 +17,7 @@
 #include "DataStructures/Tensor/TypeAliases.hpp"
 #include "IO/H5/EosTable.hpp"
 #include "IO/H5/File.hpp"
+#include "NumericalAlgorithms/Interpolation/MultiCubicSpanInterpolation.hpp"
 #include "NumericalAlgorithms/Interpolation/MultiLinearSpanInterpolation.hpp"
 #include "Options/String.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
@@ -66,7 +67,19 @@ class Tabulated3D : public EquationOfState<IsRelativistic, 3> {
         "Subfile name of the EOS table, e.g., 'dd2'."};
   };
 
-  using options = tmpl::list<TableFilename, TableSubFilename>;
+  struct InterpolationOrder {
+    using type = size_t;
+    static constexpr Options::String help{
+        "Polynomial order used to interpolate between table nodes. "
+        "1 (default) uses tensor-product multilinear (fast, C0, O(h^2)). "
+        "3 uses tensor-product 4-point Lagrange (cubic, C0-with-continuous-"
+        "first-derivative within each 4-point cell, O(h^4)). Cubic is more "
+        "expensive per query and requires at least 4 table nodes per axis."};
+    static constexpr type default_value = 1;
+  };
+
+  using options =
+      tmpl::list<TableFilename, TableSubFilename, InterpolationOrder>;
 
   /// Fields stored in the table
   enum : size_t {
@@ -88,15 +101,17 @@ class Tabulated3D : public EquationOfState<IsRelativistic, 3> {
   ~Tabulated3D() override = default;
 
   explicit Tabulated3D(const std::string& filename,
-                       const std::string& subfilename);
+                       const std::string& subfilename,
+                       size_t interpolation_order = 1);
 
   explicit Tabulated3D(std::vector<double> electron_fraction,
                        std::vector<double> log_density,
                        std::vector<double> log_temperature,
                        std::vector<double> table_data, double energy_shift,
-                       double enthalpy_minimum);
+                       double enthalpy_minimum, size_t interpolation_order = 1);
 
-  explicit Tabulated3D(const h5::EosTable& spectre_eos);
+  explicit Tabulated3D(const h5::EosTable& spectre_eos,
+                       size_t interpolation_order = 1);
 
   EQUATION_OF_STATE_FORWARD_DECLARE_MEMBERS(Tabulated3D, 3)
 
@@ -129,10 +144,10 @@ class Tabulated3D : public EquationOfState<IsRelativistic, 3> {
                   std::vector<double> log_density,
                   std::vector<double> log_temperature,
                   std::vector<double> table_data, double energy_shift,
-                  double enthalpy_minimum);
+                  double enthalpy_minimum, size_t interpolation_order = 1);
 
-
-  void initialize(const h5::EosTable& spectre_eos);
+  void initialize(const h5::EosTable& spectre_eos,
+                  size_t interpolation_order = 1);
 
   bool is_equal(const EquationOfState<IsRelativistic, 3>& rhs) const override;
 
@@ -237,6 +252,24 @@ class Tabulated3D : public EquationOfState<IsRelativistic, 3> {
 
   void initialize_interpolator();
 
+  /// Interpolate a single tabulated field at the given (log T, log rho, Y_e)
+  /// via whichever interpolator matches interpolation_order_. Wraps
+  /// get_weights + interpolate<Field> in one place so the runtime branch
+  /// lives here, not at every call site.
+  template <size_t Field>
+  double interpolate_field(const double log_temperature,
+                           const double log_rest_mass_density,
+                           const double electron_fraction) const {
+    if (interpolation_order_ == 3) {
+      const auto weights = cubic_interpolator_.get_weights(
+          log_temperature, log_rest_mass_density, electron_fraction);
+      return cubic_interpolator_.template interpolate<Field>(weights)[0];
+    }
+    const auto weights = interpolator_.get_weights(
+        log_temperature, log_rest_mass_density, electron_fraction);
+    return interpolator_.template interpolate<Field>(weights)[0];
+  }
+
   /// Energy shift used to account for negative specific internal energies,
   /// which are only stored logarithmically
   double energy_shift_ = 0.;
@@ -244,10 +277,19 @@ class Tabulated3D : public EquationOfState<IsRelativistic, 3> {
   /// Enthalpy minium  across the table
   double enthalpy_minimum_ = 1.;
 
-  /// Main interpolator for the EoS.
-  /// The ordering is  \f$(\log T. \log \rho, Y_e)\f$.
-  /// Assumed to be sorted in ascending order.
+  /// Polynomial order for between-node interpolation. 1 = multilinear
+  /// (always initialized). 3 = tensor-product 4-point Lagrange, only
+  /// used at query time when this equals 3.
+  size_t interpolation_order_ = 1;
+
+  /// Multilinear interpolator; always initialized so the fast path stays
+  /// available. The ordering is \f$(\log T, \log \rho, Y_e)\f$.
   intrp::UniformMultiLinearSpanInterpolation<3, NumberOfVars> interpolator_{};
+
+  /// Tensor-product 4-point Lagrange interpolator; only queried when
+  /// `interpolation_order_ == 3`. Shares the same table backing.
+  intrp::UniformMultiCubicSpanInterpolation<3, NumberOfVars>
+      cubic_interpolator_{};
   /// Electron fraction
   std::vector<double> table_electron_fraction_{};
   /// Logarithmic rest-mass denisty

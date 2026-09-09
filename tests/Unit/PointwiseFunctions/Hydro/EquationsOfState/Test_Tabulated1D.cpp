@@ -296,7 +296,9 @@ void check_factory_creation(
       filename +
       "\n"
       "  TableSubFilename: " +
-      subfilename + "\n");
+      subfilename +
+      "\n"
+      "  InterpolationOrder: 1\n");
   CHECK(eos_from_yaml->is_equal(expected));
 }
 

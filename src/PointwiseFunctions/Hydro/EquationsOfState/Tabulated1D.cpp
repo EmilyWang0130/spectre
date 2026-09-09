@@ -25,15 +25,17 @@ namespace EquationsOfState {
 
 template <bool IsRelativistic>
 Tabulated1D<IsRelativistic>::Tabulated1D(const std::string& filename,
-                                         const std::string& subfilename) {
+                                         const std::string& subfilename,
+                                         const size_t interpolation_order) {
   const h5::H5File<h5::AccessType::ReadOnly> eos_file{filename};
   const auto& spectre_eos = eos_file.get<h5::EosTable>("/" + subfilename);
-  initialize(spectre_eos);
+  initialize(spectre_eos, interpolation_order);
 }
 
 template <bool IsRelativistic>
-Tabulated1D<IsRelativistic>::Tabulated1D(const h5::EosTable& spectre_eos) {
-  initialize(spectre_eos);
+Tabulated1D<IsRelativistic>::Tabulated1D(const h5::EosTable& spectre_eos,
+                                         const size_t interpolation_order) {
+  initialize(spectre_eos, interpolation_order);
 }
 
 template <bool IsRelativistic>
@@ -42,7 +44,8 @@ Tabulated1D<IsRelativistic>::Tabulated1D(const Tabulated1D& rhs)
       log_rho_grid_(rhs.log_rho_grid_),
       table_data_(rhs.table_data_),
       specific_enthalpy_(rhs.specific_enthalpy_),
-      energy_shift_(rhs.energy_shift_) {
+      energy_shift_(rhs.energy_shift_),
+      interpolation_order_(rhs.interpolation_order_) {
   initialize_interpolator();
 }
 
@@ -55,13 +58,16 @@ Tabulated1D<IsRelativistic>& Tabulated1D<IsRelativistic>::operator=(
     table_data_ = rhs.table_data_;
     specific_enthalpy_ = rhs.specific_enthalpy_;
     energy_shift_ = rhs.energy_shift_;
+    interpolation_order_ = rhs.interpolation_order_;
     initialize_interpolator();
   }
   return *this;
 }
 
 template <bool IsRelativistic>
-void Tabulated1D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos) {
+void Tabulated1D<IsRelativistic>::initialize(const h5::EosTable& spectre_eos,
+                                             const size_t interpolation_order) {
+  interpolation_order_ = interpolation_order;
   const auto& names = spectre_eos.independent_variable_names();
   if (names.size() != 1) {
     ERROR(
@@ -192,6 +198,16 @@ void Tabulated1D<IsRelativistic>::initialize_interpolator() {
   interpolator_ = intrp::UniformMultiLinearSpanInterpolation<1, NumberOfVars>(
       independent_data_view, {table_data_.data(), table_data_.size()},
       num_x_points);
+  if (interpolation_order_ == 3) {
+    ASSERT(num_x_points[0] >= intrp::multi_cubic_stencil_width,
+           "Tabulated1D: InterpolationOrder=3 requires at least "
+               << intrp::multi_cubic_stencil_width << " table nodes; got "
+               << num_x_points[0] << ".");
+    cubic_interpolator_ =
+        intrp::UniformMultiCubicSpanInterpolation<1, NumberOfVars>(
+            independent_data_view, {table_data_.data(), table_data_.size()},
+            num_x_points);
+  }
 }
 
 EQUATION_OF_STATE_MEMBER_DEFINITIONS(template <bool IsRelativistic>,
@@ -205,7 +221,8 @@ bool Tabulated1D<IsRelativistic>::operator==(
   return log_rho_grid_ == rhs.log_rho_grid_ and
          table_data_ == rhs.table_data_ and
          specific_enthalpy_ == rhs.specific_enthalpy_ and
-         energy_shift_ == rhs.energy_shift_;
+         energy_shift_ == rhs.energy_shift_ and
+         interpolation_order_ == rhs.interpolation_order_;
 }
 
 template <bool IsRelativistic>
@@ -252,6 +269,7 @@ void Tabulated1D<IsRelativistic>::pup(PUP::er& p) {
   p | table_data_;
   p | specific_enthalpy_;
   p | energy_shift_;
+  p | interpolation_order_;
   if (p.isUnpacking()) {
     initialize_interpolator();
   }
@@ -328,17 +346,15 @@ Scalar<DataType> Tabulated1D<IsRelativistic>::pressure_from_density_impl(
   if constexpr (std::is_same_v<DataType, double>) {
     const double log_rho =
         clamped_log_rho(get(rest_mass_density), log_rho_lo, log_rho_hi);
-    const auto weights = interpolator_.get_weights(log_rho);
     get(result) =
-        std::exp(interpolator_.template interpolate<LogPressure>(weights)[0]);
+        std::exp(this->template interpolate_field<LogPressure>(log_rho));
   } else {
     const auto& rho_arr = get(rest_mass_density);
     for (size_t i = 0; i < rho_arr.size(); ++i) {
       const double log_rho =
           clamped_log_rho(rho_arr[i], log_rho_lo, log_rho_hi);
-      const auto weights = interpolator_.get_weights(log_rho);
       get(result)[i] =
-          std::exp(interpolator_.template interpolate<LogPressure>(weights)[0]);
+          std::exp(this->template interpolate_field<LogPressure>(log_rho));
     }
   }
   return result;
@@ -356,20 +372,17 @@ Tabulated1D<IsRelativistic>::specific_internal_energy_from_density_impl(
   if constexpr (std::is_same_v<DataType, double>) {
     const double log_rho =
         clamped_log_rho(get(rest_mass_density), log_rho_lo, log_rho_hi);
-    const auto weights = interpolator_.get_weights(log_rho);
     get(result) =
-        std::exp(
-            interpolator_.template interpolate<LogShiftedEpsilon>(weights)[0]) +
+        std::exp(this->template interpolate_field<LogShiftedEpsilon>(log_rho)) +
         energy_shift_;
   } else {
     const auto& rho_arr = get(rest_mass_density);
     for (size_t i = 0; i < rho_arr.size(); ++i) {
       const double log_rho =
           clamped_log_rho(rho_arr[i], log_rho_lo, log_rho_hi);
-      const auto weights = interpolator_.get_weights(log_rho);
       get(result)[i] =
-          std::exp(interpolator_.template interpolate<LogShiftedEpsilon>(
-              weights)[0]) +
+          std::exp(
+              this->template interpolate_field<LogShiftedEpsilon>(log_rho)) +
           energy_shift_;
     }
   }
@@ -442,24 +455,20 @@ Scalar<DataType> Tabulated1D<IsRelativistic>::chi_from_density_impl(
   if constexpr (std::is_same_v<DataType, double>) {
     const double log_rho =
         clamped_log_rho(get(rest_mass_density), log_rho_lo, log_rho_hi);
-    const auto weights = interpolator_.get_weights(log_rho);
-    const auto interpolated =
-        interpolator_.template interpolate<LogPressure, AdiabaticIndex>(
-            weights);
-    const double p_geom = std::exp(interpolated[0]);
-    const double slope = interpolated[1];
+    const double p_geom =
+        std::exp(this->template interpolate_field<LogPressure>(log_rho));
+    const double slope =
+        this->template interpolate_field<AdiabaticIndex>(log_rho);
     get(result) = (p_geom / std::exp(log_rho)) * slope;
   } else {
     const auto& rho_arr = get(rest_mass_density);
     for (size_t i = 0; i < rho_arr.size(); ++i) {
       const double log_rho =
           clamped_log_rho(rho_arr[i], log_rho_lo, log_rho_hi);
-      const auto weights = interpolator_.get_weights(log_rho);
-      const auto interpolated =
-          interpolator_.template interpolate<LogPressure, AdiabaticIndex>(
-              weights);
-      const double p_geom = std::exp(interpolated[0]);
-      const double slope = interpolated[1];
+      const double p_geom =
+          std::exp(this->template interpolate_field<LogPressure>(log_rho));
+      const double slope =
+          this->template interpolate_field<AdiabaticIndex>(log_rho);
       get(result)[i] = (p_geom / std::exp(log_rho)) * slope;
     }
   }

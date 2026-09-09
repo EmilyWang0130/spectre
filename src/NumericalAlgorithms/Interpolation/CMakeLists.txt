@@ -35,6 +35,7 @@ spectre_target_headers(
   IrregularInterpolant.hpp
   LagrangePolynomial.hpp
   LinearRegression.hpp
+  MultiCubicSpanInterpolation.hpp
   MultiLinearSpanInterpolation.hpp
   LinearSpanInterpolator.hpp
   PolynomialInterpolation.hpp

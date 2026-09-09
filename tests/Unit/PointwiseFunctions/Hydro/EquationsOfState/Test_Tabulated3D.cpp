@@ -323,7 +323,8 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
            "  TableFilename: " +
            unit_test_src_path() +
            "PointwiseFunctions/Hydro/EquationsOfState/dd2_unit_test.h5\n"
-           "  TableSubFilename: 'dd2'"}));
+           "  TableSubFilename: 'dd2'\n"
+           "  InterpolationOrder: 1"}));
   const EoS::Tabulated3D<true>& deserialized_eos =
       dynamic_cast<const EoS::Tabulated3D<true>&>(*eos_pointer);
   TestHelpers::EquationsOfState::test_get_clone(deserialized_eos);
