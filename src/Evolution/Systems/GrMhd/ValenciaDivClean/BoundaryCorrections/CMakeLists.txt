@@ -20,6 +20,7 @@ spectre_target_headers(
   INCLUDE_DIRECTORY ${CMAKE_SOURCE_DIR}/src
   HEADERS
   Factory.hpp
+  HatTransform.hpp
   Hll.hpp
   Hllc.hpp
   HllcGr.hpp
