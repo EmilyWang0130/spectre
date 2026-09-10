@@ -1447,7 +1447,8 @@ void characteristic_eigenvectors_hydro(
     const tnsr::i<DataVector, 3>& unit_normal,
     const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
     const EquationsOfState::EquationOfState<true, ThermodynamicDim>&
-        equation_of_state) {
+        equation_of_state,
+    const bool use_physical_zeta) {
   const size_t num_grid_points = get(lorentz_factor).size();
   // Zero the outputs (only a subset of the 6x6 entries are nonzero).
   for (size_t wave = 0; wave < 6; ++wave) {
@@ -1609,6 +1610,16 @@ void characteristic_eigenvectors_hydro(
         rest_mass_density, temperature, electron_fraction));
     get(zeta) = get(equation_of_state.zeta_from_density_and_temperature(
         rest_mass_density, temperature, electron_fraction));
+  }
+
+  // Diagnostic override: force the composition coupling off. Placed after
+  // every branch that assigns zeta (lines ~1551, ~1584, ~1611) and before
+  // zeta_max_abs is taken, so the existing zeta == 0 code paths below pick
+  // it up unchanged. Not a physically valid setting for a tabulated 3D EoS
+  // -- it exists so a run can be compared against itself with the
+  // zeta-driven eigenspace rotation removed.
+  if (not use_physical_zeta) {
+    get(zeta) = 0.0;
   }
 
   // This is for the case for zeta = 0.
@@ -3114,7 +3125,8 @@ GENERATE_INSTANTIATIONS(FUNCTION_INSTANTIATION, (1, 2, 3))
       const tnsr::i<DataVector, 3>& unit_normal,                               \
       const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,          \
       const EquationsOfState::EquationOfState<true, GET_DIM(data)>&            \
-          equation_of_state);                                                  \
+          equation_of_state,                                                   \
+      bool use_physical_zeta);                                                 \
   template void flux_jacobian_hydro<GET_DIM(data)>(                            \
       const gsl::not_null<tnsr::iJ<DataVector, 6>*> characteristic_matrix,     \
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity,         \

@@ -430,7 +430,7 @@ void HllemHydroYe::dg_boundary_terms(
     characteristic_eigenvectors_hydro(
         make_not_null(&hydro_right), make_not_null(&hydro_left), v_avg, rho_avg,
         eps_avg, h_avg_eos, ye_avg, w_avg, interface_unit_normal_int,
-        flat_metric, equation_of_state);
+        flat_metric, equation_of_state, use_physical_zeta_);
     lambda_mid = v_n_avg;  // v_avg . n = HydroSpeed::NormalDotVelocity
     have_middle_block = true;
   }
