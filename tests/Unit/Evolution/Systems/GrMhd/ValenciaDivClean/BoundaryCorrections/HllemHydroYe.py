@@ -25,6 +25,7 @@ def dg_package_data(
     lapse,
     shift,
     spatial_velocity_one_form,
+    spatial_metric,
     rest_mass_density,
     electron_fraction,
     temperature,
@@ -112,12 +113,16 @@ def dg_package_data(
                 )
             )
 
-    # The fast-magnetosonic bounds are now computed at the averaged interface
-    # state inside dg_boundary_terms, so dg_package_data packages the primitives
+    # The fast-magnetosonic bounds are computed at the averaged interface state
+    # inside dg_boundary_terms, so dg_package_data packages the primitives
     # (rest mass density, spatial velocity, pressure, Lorentz factor, specific
-    # internal energy) instead of per-side fast speeds. The return order matches
+    # internal energy) instead of per-side fast speeds, along with the raw 3+1
+    # geometry (lapse, beta^n_eff, gamma_ij) that dg_boundary_terms combines
+    # into a single interface frame. The return order matches
     # dg_package_field_tags.
-    metric_flatness = np.abs(lapse - 1.0) + np.sum(np.abs(shift))
+    shift_dot_normal = np.dot(shift, normal_covector)
+    if normal_dot_mesh_velocity is not None:
+        shift_dot_normal = shift_dot_normal + normal_dot_mesh_velocity
     return (
         tilde_d,
         tilde_ye,
@@ -134,11 +139,13 @@ def dg_package_data(
         compute_char(1.0),
         compute_char(-1.0),
         normal_covector,
-        np.asarray(metric_flatness),
+        lapse,
+        np.asarray(shift_dot_normal),
+        spatial_metric,
         rest_mass_density,
         electron_fraction,
-        # Sound-speed-squared placeholder; test ranges never trip the flat
-        # branch that consumes it.
+        # Sound-speed-squared placeholder; the test ranges never trip the
+        # hydro branch that consumes it (see dg_boundary_terms below).
         np.asarray(0.0 * lapse),
         temperature,
         spatial_velocity,
@@ -164,7 +171,9 @@ def dg_boundary_terms(
     interior_largest_outgoing_char_speed,
     interior_largest_ingoing_char_speed,
     interior_interface_unit_normal,
-    interior_metric_flatness,
+    interior_lapse_at_interface,
+    interior_shift_dot_normal,
+    interior_spatial_metric,
     interior_rest_mass_density,
     interior_electron_fraction,
     interior_sound_speed_squared,
@@ -188,7 +197,9 @@ def dg_boundary_terms(
     exterior_largest_outgoing_char_speed,
     exterior_largest_ingoing_char_speed,
     exterior_interface_unit_normal,
-    exterior_metric_flatness,
+    exterior_lapse_at_interface,
+    exterior_shift_dot_normal,
+    exterior_spatial_metric,
     exterior_rest_mass_density,
     exterior_electron_fraction,
     exterior_sound_speed_squared,
@@ -215,9 +226,16 @@ def dg_boundary_terms(
         ),
     )
     # Fast-magnetosonic bounds for the MHD variables are computed at the
-    # averaged interface state, but only in flat space. The random test inputs
-    # use a curved metric (metric_flatness > 1e-12 always), so the C++ falls
-    # back to the light bounds; the reference does the same here.
+    # averaged interface state, but only on the "hydro branch", which the C++
+    # enters when the packaged sound speed is positive over the WHOLE
+    # DataVector on both sides (a reduction, not a pointwise test -- so it
+    # cannot be reproduced faithfully point by point here). Every test range
+    # leaves the packaged sound speed at its zero sentinel, either because
+    # |B| > MagneticFieldMagnitudeForHydro or because the density is below the
+    # atmosphere cutoff, so the C++ falls back to the light bounds; the
+    # reference does the same. The hydro branch and the middle-block
+    # anti-diffusion are covered by the algebraic tests in
+    # Test_HllemHydroYe.cpp instead.
     fast_max = lambda_max
     fast_min = lambda_min
 
@@ -268,21 +286,8 @@ def dg_boundary_terms(
         exterior_tilde_s,
         exterior_normal_dot_flux_tilde_s,
     )
-    # Magnetic field: normal part (light) + tangential part (fast) when flat,
-    # else the plain light-speed HLL flux.
-    n = interior_interface_unit_normal
-    bn_int = np.dot(interior_tilde_b, n)
-    bn_ext = np.dot(exterior_tilde_b, n)
-    nfbn_int = np.dot(interior_normal_dot_flux_tilde_b, n)
-    nfbn_ext = np.dot(exterior_normal_dot_flux_tilde_b, n)
-    g_bn = hll(lambda_max, lambda_min, bn_int, nfbn_int, bn_ext, nfbn_ext)
-    bt_int = interior_tilde_b - bn_int * n
-    bt_ext = exterior_tilde_b - bn_ext * n
-    nfbt_int = interior_normal_dot_flux_tilde_b - nfbn_int * n
-    nfbt_ext = exterior_normal_dot_flux_tilde_b - nfbn_ext * n
-    g_bt = hll(fast_max, fast_min, bt_int, nfbt_int, bt_ext, nfbt_ext)
-    g_split = g_bn * n + g_bt
-    g_plain = hll(
+    # Magnetic field: plain HLL with light-speed bounds (matches Hll).
+    tilde_b = hll(
         lambda_max,
         lambda_min,
         interior_tilde_b,
@@ -290,10 +295,6 @@ def dg_boundary_terms(
         exterior_tilde_b,
         exterior_normal_dot_flux_tilde_b,
     )
-    is_curved = (interior_metric_flatness > 1.0e-12) or (
-        exterior_metric_flatness > 1.0e-12
-    )
-    tilde_b = g_plain if is_curved else g_split
 
     return (
         tilde_d,

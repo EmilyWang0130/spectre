@@ -11,9 +11,11 @@
 
 #include "DataStructures/DataVector.hpp"
 #include "DataStructures/Tags/TempTensor.hpp"
+#include "DataStructures/Tensor/EagerMath/DeterminantAndInverse.hpp"
 #include "DataStructures/Tensor/EagerMath/DotProduct.hpp"
 #include "DataStructures/Tensor/EagerMath/Magnitude.hpp"
 #include "DataStructures/Tensor/Tensor.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/HatTransform.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/Characteristics.hpp"
 #include "NumericalAlgorithms/DiscontinuousGalerkin/Formulation.hpp"
 #include "NumericalAlgorithms/DiscontinuousGalerkin/NormalDotFlux.hpp"
@@ -71,7 +73,10 @@ double HllemHydroYe::dg_package_data(
         packaged_largest_ingoing_char_speed,
     const gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
         packaged_interface_unit_normal,
-    const gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
+    const gsl::not_null<Scalar<DataVector>*> packaged_lapse_at_interface,
+    const gsl::not_null<Scalar<DataVector>*> packaged_shift_dot_normal,
+    const gsl::not_null<tnsr::ii<DataVector, 3, Frame::Inertial>*>
+        packaged_spatial_metric,
     const gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
     const gsl::not_null<Scalar<DataVector>*> packaged_electron_fraction,
     const gsl::not_null<Scalar<DataVector>*> packaged_sound_speed_squared,
@@ -98,6 +103,7 @@ double HllemHydroYe::dg_package_data(
     const Scalar<DataVector>& lapse,
     const tnsr::I<DataVector, 3, Frame::Inertial>& shift,
     const tnsr::i<DataVector, 3, Frame::Inertial>& spatial_velocity_one_form,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
 
     const Scalar<DataVector>& rest_mass_density,
     const Scalar<DataVector>& electron_fraction,
@@ -210,29 +216,41 @@ double HllemHydroYe::dg_package_data(
       }
     }
 
-    // Correct for mesh velocity
+    // Correct for mesh velocity. The same n . v_mesh is folded into the
+    // packaged beta^n so that lambda = alpha nu - beta^n_eff holds for the
+    // packaged speeds; `dg_boundary_terms` inverts exactly that relation to
+    // map the Eulerian-frame eigenvalues into the coordinate frame.
     if (normal_dot_mesh_velocity.has_value()) {
       get(*packaged_largest_outgoing_char_speed) -=
           get(*normal_dot_mesh_velocity);
       get(*packaged_largest_ingoing_char_speed) -=
           get(*normal_dot_mesh_velocity);
+      get(shift_dot_normal) += get(*normal_dot_mesh_velocity);
     }
+
+    // 3+1 geometry for the interface frame (see HatTransform.hpp). Packaged
+    // raw and per-side; combined into one frame in `dg_boundary_terms`,
+    // because building the frame per side would hand the Riemann solver two
+    // states in different frames.
+    *packaged_lapse_at_interface = lapse;
+    *packaged_shift_dot_normal = shift_dot_normal;
   }
 
-  // Package the interface unit normal (for the scalar/MHD field split) and the
-  // metric-flatness measure (the split only holds in flat space). The
-  // fast-magnetosonic HLL bounds are no longer computed per-side here; they are
-  // computed at the AVERAGED interface state inside dg_boundary_terms
-  // (mirroring the HLLEM boundary correction), which fixes a top/bottom
-  // asymmetry that the per-side, sign-of-v_n-dependent bounds seeded in the
-  // Kelvin-Helmholtz test.
+  // Package the interface unit normal. The fast-magnetosonic HLL bounds are
+  // not computed per-side here; they are computed at the AVERAGED interface
+  // state inside dg_boundary_terms (mirroring the HLLEM boundary correction),
+  // which fixes a top/bottom asymmetry that the per-side, sign-of-v_n-
+  // dependent bounds seeded in the Kelvin-Helmholtz test, and which keeps the
+  // outer bounds consistent with the middle-block speed (both come from the
+  // same averaged state, so S_L <= lambda_mid <= S_R by construction).
   *packaged_interface_unit_normal = normal_covector;
-  get(*packaged_metric_flatness) = abs(get(lapse) - 1.0) + abs(get<0>(shift)) +
-                                   abs(get<1>(shift)) + abs(get<2>(shift));
+  *packaged_spatial_metric = spatial_metric;
 
   // Package the primitives needed to reconstruct the averaged fast-magnetosonic
-  // bounds in dg_boundary_terms (as in Hll), plus Y_e and Temperature which
-  // will feed the hydro+Y_e eigensystem construction in phase 2.
+  // bounds and the hydro+Y_e eigensystem in dg_boundary_terms. Note that
+  // Pressure, LorentzFactor and Temperature are packaged but not currently
+  // read there: the eigensystem is built from an on-EOS (p, h) at the
+  // AVERAGED (rho, eps, Y_e) rather than from averaged per-side values.
   *packaged_rest_mass_density = rest_mass_density;
   *packaged_electron_fraction = electron_fraction;
   *packaged_temperature = temperature;
@@ -292,7 +310,9 @@ void HllemHydroYe::dg_boundary_terms(
     const Scalar<DataVector>& largest_outgoing_char_speed_int,
     const Scalar<DataVector>& largest_ingoing_char_speed_int,
     const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
-    const Scalar<DataVector>& metric_flatness_int,
+    const Scalar<DataVector>& lapse_at_interface_int,
+    const Scalar<DataVector>& shift_dot_normal_int,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric_int,
     const Scalar<DataVector>& rest_mass_density_int,
     const Scalar<DataVector>& electron_fraction_int,
     const Scalar<DataVector>& sound_speed_squared_int,
@@ -315,8 +335,10 @@ void HllemHydroYe::dg_boundary_terms(
     const Scalar<DataVector>& normal_dot_flux_tilde_phi_ext,
     const Scalar<DataVector>& largest_outgoing_char_speed_ext,
     const Scalar<DataVector>& largest_ingoing_char_speed_ext,
-    const tnsr::i<DataVector, 3, Frame::Inertial>& /*iface_normal_ext*/,
-    const Scalar<DataVector>& metric_flatness_ext,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_ext,
+    const Scalar<DataVector>& lapse_at_interface_ext,
+    const Scalar<DataVector>& shift_dot_normal_ext,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric_ext,
     const Scalar<DataVector>& rest_mass_density_ext,
     const Scalar<DataVector>& electron_fraction_ext,
     const Scalar<DataVector>& sound_speed_squared_ext,
@@ -336,22 +358,22 @@ void HllemHydroYe::dg_boundary_terms(
                                     -get(largest_ingoing_char_speed_ext));
   const DataVector lambda_min = min(0., get(largest_ingoing_char_speed_int),
                                     -get(largest_outgoing_char_speed_ext));
-  // Fast-magnetosonic HLL bounds: used for the MHD variables (D, Ye, Tau, S and
-  // the tangential magnetic field), which travel slower than light.
+  // Fast-magnetosonic HLL bounds: used for the MHD variables (D, Ye, Tau, S),
+  // which travel slower than light.
   //
-  // The bounds are computed from the fast-magnetosonic characteristic speeds
-  // evaluated at the ARITHMETIC-AVERAGE interface state (exactly like the HLLEM
-  // boundary correction). Evaluating a single interface eigensystem -- rather
-  // than the previous per-side, sign-of-v_n-dependent packaged fast speeds --
-  // makes the bounds identical on mirror-image faces (invariant under
-  // v_n -> -v_n) and removes a small top/bottom asymmetry that the per-side
-  // approach seeded in the Kelvin-Helmholtz test. In curved space the flat
-  // decomposition does not hold, so we fall back to the light bounds and the
-  // scheme reduces to the standard HLL flux there.
+  // The bounds are computed from the fluid characteristic speeds evaluated at
+  // the ARITHMETIC-AVERAGE interface state (exactly like the HLLEM boundary
+  // correction). Evaluating a single interface eigensystem -- rather than the
+  // per-side, sign-of-v_n-dependent packaged fast speeds -- makes the bounds
+  // identical on mirror-image faces (invariant under v_n -> -v_n) and removes
+  // a small top/bottom asymmetry that the per-side approach seeded in the
+  // Kelvin-Helmholtz test. It also guarantees S_L <= lambda_mid <= S_R, since
+  // lambda_mid comes from the same averaged state, and hence
+  // delta_mid in [0, 1].
   DataVector fast_max = lambda_max;
   DataVector fast_min = lambda_min;
-  // Middle-block projector storage (populated only when we take the flat +
-  // hydro branch AND restore_middle_block_ is true).
+  // Middle-block projector storage (populated only when we take the hydro
+  // branch AND restore_middle_block_ is true).
   bool have_middle_block = false;
   // characteristic_eigenvectors_hydro uses tnsr::ij for the right-eigenvector
   // "modes" and tnsr::IJ for the left-eigenvector "projectors"; keep the same
@@ -359,34 +381,80 @@ void HllemHydroYe::dg_boundary_terms(
   tnsr::ij<DataVector, 6> hydro_right{num_points, 0.0};
   tnsr::IJ<DataVector, 6> hydro_left{num_points, 0.0};
   DataVector lambda_mid{num_points, 0.0};
-  // Flat + hydro (both packaged c_s^2 > 0) => outer fluid bounds from the
-  // closed-form lambda_pm(v_avg, c_s^2_avg), using packaged per-side data
-  // only. Zero EOS calls on the fast-bounds path -- the previous
-  // "average primitives, EOS-lookup for p/h, then characteristic_speeds_..."
-  // recipe cost ~4 Togashi-trilinear lookups per interface per step. See
-  // Hll.cpp for the full rationale (this class inherits the same design
-  // decision).
+  // Hydro branch: both sides packaged a positive sound speed, i.e. both sides
+  // are above the atmosphere cutoff and free of a magnetic field above
+  // MagneticFieldMagnitudeForHydro. Zero EOS calls on the fast-bounds path --
+  // the closed-form lambda_pm(v_avg, cs2_avg) uses packaged per-side data
+  // only. The previous "average primitives, EOS-lookup for p/h, then
+  // characteristic_speeds_..." recipe cost ~4 Togashi-trilinear lookups per
+  // interface per step; see Hll.cpp for the full rationale.
   //
-  // If restore_middle_block_ = true we still need the eigensystem, which in
-  // turn needs the on-EOS (p_avg, h_avg) at the averaged (rho, eps, Y_e). We
-  // fall into a second block that does that lookup once, only when middle-
-  // block anti-diffusion is requested.
-  const bool flat = max(get(metric_flatness_int)) <= 1.0e-12 and
-                    max(get(metric_flatness_ext)) <= 1.0e-12 and
-                    min(get(sound_speed_squared_int)) > 0.0 and
-                    min(get(sound_speed_squared_ext)) > 0.0;
+  // If restore_middle_block_ = true we additionally need the eigensystem,
+  // which needs the on-EOS (p_avg, h_avg) at the averaged (rho, eps, Y_e). A
+  // second block below does that lookup once, only when the middle-block
+  // anti-diffusion is requested.
+  //
+  // Unlike the earlier flat-space-only version, this branch has no
+  // metric-flatness gate: the eigenvectors of the coordinate-frame Jacobian
+  // A_coord = alpha A_Eulerian - beta^n_eff I are the Eulerian-frame ones, so
+  // characteristic_eigenvectors_hydro can be used as is on a curved
+  // background, with the eigenvalues mapped by HatTransform::inverse_speed.
+  // See the class documentation in HllemHydroYe.hpp.
+  const bool hydro_branch = min(get(sound_speed_squared_int)) > 0.0 and
+                            min(get(sound_speed_squared_ext)) > 0.0;
+  // One-frame interface geometry, built from the two packaged sides
+  // (HatTransform.hpp; HllcGr plan sec 3). Scalars and the spatial metric are
+  // averaged symmetrically; quantities linear in the normal (n_i itself and
+  // beta^n_eff) antisymmetrically, which is what conservation,
+  // G(int, ext) = -G(ext, int), requires on slightly mismatched faces.
   tnsr::I<DataVector, 3, Frame::Inertial> v_avg{num_points, 0.0};
+  tnsr::i<DataVector, 3, Frame::Inertial> n_avg{num_points, 0.0};
+  tnsr::ii<DataVector, 3, Frame::Inertial> gamma_avg{num_points, 0.0};
+  DataVector alpha_avg{num_points, 1.0};
+  DataVector beta_n_avg{num_points, 0.0};
   DataVector v_sq_avg{num_points, 0.0};
   DataVector v_n_avg{num_points, 0.0};
-  if (flat) {
+  if (hydro_branch) {
     const ScopedFpeState fpe(false);
+    alpha_avg = interface_lapse(get(lapse_at_interface_int),
+                                get(lapse_at_interface_ext));
+    beta_n_avg = interface_shift_dot_normal(get(shift_dot_normal_int),
+                                            get(shift_dot_normal_ext));
     for (size_t i = 0; i < 3; ++i) {
+      for (size_t j = i; j < 3; ++j) {
+        gamma_avg.get(i, j) =
+            0.5 * (spatial_metric_int.get(i, j) + spatial_metric_ext.get(i, j));
+      }
+      n_avg.get(i) = 0.5 * (interface_unit_normal_int.get(i) -
+                            interface_unit_normal_ext.get(i));
       v_avg.get(i) =
           0.5 * (spatial_velocity_int.get(i) + spatial_velocity_ext.get(i));
-      v_sq_avg += v_avg.get(i) * v_avg.get(i);
-      v_n_avg += v_avg.get(i) * interface_unit_normal_int.get(i);
+    }
+    const auto inv_gamma_avg = determinant_and_inverse(gamma_avg).second;
+    // Averaging does not preserve gamma^ij n_i n_j = 1, and each side's
+    // normal was normalized in its own metric, so renormalize in the averaged
+    // metric before handing the normal to the eigensystem (which assumes a
+    // unit normal).
+    DataVector normal_norm_squared{num_points, 0.0};
+    for (size_t i = 0; i < 3; ++i) {
+      for (size_t j = 0; j < 3; ++j) {
+        normal_norm_squared +=
+            inv_gamma_avg.get(i, j) * n_avg.get(i) * n_avg.get(j);
+      }
+    }
+    const DataVector inv_normal_norm = 1.0 / sqrt(normal_norm_squared);
+    for (size_t i = 0; i < 3; ++i) {
+      n_avg.get(i) *= inv_normal_norm;
+    }
+    // v^2 = gamma_ij v^i v^j and v_n = v^i n_i at the averaged state.
+    for (size_t i = 0; i < 3; ++i) {
+      for (size_t j = 0; j < 3; ++j) {
+        v_sq_avg += gamma_avg.get(i, j) * v_avg.get(i) * v_avg.get(j);
+      }
+      v_n_avg += v_avg.get(i) * n_avg.get(i);
     }
     v_sq_avg = clamp(v_sq_avg, 0.0, 1.0 - 1.0e-10);
+
     const DataVector cs2_avg =
         0.5 * (get(sound_speed_squared_int) + get(sound_speed_squared_ext));
     const DataVector one_minus_cs2 = 1.0 - cs2_avg;
@@ -395,13 +463,15 @@ void HllemHydroYe::dg_boundary_terms(
         sqrt(clamp(cs2_avg * (1.0 - v_sq_avg) *
                        (one_minus_v2_cs2 - v_n_avg * v_n_avg * one_minus_cs2),
                    0.0, 1.0));
-    // In flat space lapse = 1 and shift = 0, so the alpha/beta terms drop.
-    const DataVector lambda_plus =
+    // Eulerian-frame acoustic speeds nu_pm, then mapped to the coordinate
+    // frame by lambda = alpha nu - beta^n_eff.
+    const DataVector nu_plus =
         (v_n_avg * one_minus_cs2 + disc) / one_minus_v2_cs2;
-    const DataVector lambda_minus =
+    const DataVector nu_minus =
         (v_n_avg * one_minus_cs2 - disc) / one_minus_v2_cs2;
-    fast_max = max(0.0, lambda_plus);
-    fast_min = min(0.0, lambda_minus);
+    fast_max = max(0.0, coordinate_frame_speed(alpha_avg, beta_n_avg, nu_plus));
+    fast_min =
+        min(0.0, coordinate_frame_speed(alpha_avg, beta_n_avg, nu_minus));
   }
 
   // Middle-block eigensystem (only when the anti-diffusion is enabled).
@@ -409,7 +479,7 @@ void HllemHydroYe::dg_boundary_terms(
   // (p_avg, h_avg)); it's the price of the design's thermodynamic
   // consistency in the eigenvector construction. Kept gated so
   // RestoreMiddleBlock = false remains cheap.
-  if (flat and restore_middle_block_) {
+  if (hydro_branch and restore_middle_block_) {
     const ScopedFpeState fpe(false);
     const Scalar<DataVector> rho_avg{
         0.5 * (get(rest_mass_density_int) + get(rest_mass_density_ext))};
@@ -423,15 +493,15 @@ void HllemHydroYe::dg_boundary_terms(
                                                            ye_avg);
     const Scalar<DataVector> h_avg_eos =
         hydro::relativistic_specific_enthalpy(rho_avg, eps_avg, p_avg_eos);
-    tnsr::ii<DataVector, 3, Frame::Inertial> flat_metric{num_points, 0.0};
-    for (size_t i = 0; i < 3; ++i) {
-      flat_metric.get(i, i) = 1.0;
-    }
     characteristic_eigenvectors_hydro(
         make_not_null(&hydro_right), make_not_null(&hydro_left), v_avg, rho_avg,
-        eps_avg, h_avg_eos, ye_avg, w_avg, interface_unit_normal_int,
-        flat_metric, equation_of_state, use_physical_zeta_);
-    lambda_mid = v_n_avg;  // v_avg . n = HydroSpeed::NormalDotVelocity
+        eps_avg, h_avg_eos, ye_avg, w_avg, n_avg, gamma_avg, equation_of_state,
+        use_physical_zeta_);
+    // Eulerian-frame degenerate eigenvalue nu_mid = v . n (=
+    // HydroSpeed::NormalDotVelocity), mapped to the coordinate frame. Using
+    // the Eulerian value here instead would put the middle wave at the wrong
+    // place in the fan whenever alpha != 1 or beta^n != 0.
+    lambda_mid = coordinate_frame_speed(alpha_avg, beta_n_avg, v_n_avg);
     have_middle_block = true;
   }
 
@@ -479,7 +549,10 @@ void HllemHydroYe::dg_boundary_terms(
   }
 
   // Middle-block anti-diffusion (design v2 sec 1, 7). Only active in the
-  // flat + hydro branch where we built the eigensystem above.
+  // hydro branch where we built the eigensystem above. Curved backgrounds
+  // are handled by taking S_L, S_R and lambda_mid in the COORDINATE frame
+  // (the projectors are frame-independent); see the class documentation for
+  // why the flat-space formula is exact there rather than approximate.
   //
   //   F_new = F_HLL - (S_L S_R / (S_R - S_L)) * delta_mid * P_mid * (U_R - U_L)
   //
@@ -512,16 +585,15 @@ void HllemHydroYe::dg_boundary_terms(
         continue;
       }
       const double lam = lambda_mid[pt];
-      const double delta_mid =
-          1.0 - std::min(0.0, lam) / (s_l - 1.0e-30) -
-          std::max(0.0, lam) / (s_r + 1.0e-30);
+      const double delta_mid = 1.0 - std::min(0.0, lam) / (s_l - 1.0e-30) -
+                               std::max(0.0, lam) / (s_r + 1.0e-30);
       const double coeff = -s_l * s_r / denom * delta_mid;
       // Biorthogonal (not biorthonormal) diagonals.
       double diag_plus = 0.0;
       double diag_minus = 0.0;
       for (size_t n = 0; n < 6; ++n) {
-        diag_plus += hydro_left.get(plus_idx, n)[pt] *
-                     hydro_right.get(plus_idx, n)[pt];
+        diag_plus +=
+            hydro_left.get(plus_idx, n)[pt] * hydro_right.get(plus_idx, n)[pt];
         diag_minus += hydro_left.get(minus_idx, n)[pt] *
                       hydro_right.get(minus_idx, n)[pt];
       }
@@ -567,50 +639,17 @@ void HllemHydroYe::dg_boundary_terms(
     }
   }
 
-  // Magnetic field: the NORMAL component is part of the GLM subsystem (light
-  // speed), the TANGENTIAL component is MHD (fast bounds). Decompose along the
-  // interface normal, treat each part with its own bounds, and recombine
-  // G(B^i) = G(B_n) n^i + G(B_t^i). (In flat space n is a unit covector and the
-  // metric is the identity, so raising/lowering the normal is trivial.)
-  {
-    const auto& n = interface_unit_normal_int;
-    DataVector bn_int{num_points, 0.0};
-    DataVector bn_ext{num_points, 0.0};
-    DataVector nfbn_int{num_points, 0.0};
-    DataVector nfbn_ext{num_points, 0.0};
-    for (size_t i = 0; i < 3; ++i) {
-      bn_int += tilde_b_int.get(i) * n.get(i);
-      bn_ext += tilde_b_ext.get(i) * n.get(i);
-      nfbn_int += normal_dot_flux_tilde_b_int.get(i) * n.get(i);
-      nfbn_ext += normal_dot_flux_tilde_b_ext.get(i) * n.get(i);
-    }
-    const DataVector g_bn =
-        hll(lambda_max, lambda_min, bn_int, nfbn_int, bn_ext, nfbn_ext);
-    // The decomposition uses n as both covector and (raised) vector, which is
-    // only valid in flat space; where the background is curved fall back to the
-    // plain (light-speed) HLL flux for B, which keeps the scheme conservative.
-    for (size_t i = 0; i < 3; ++i) {
-      const DataVector bt_int = tilde_b_int.get(i) - bn_int * n.get(i);
-      const DataVector bt_ext = tilde_b_ext.get(i) - bn_ext * n.get(i);
-      const DataVector nfbt_int =
-          normal_dot_flux_tilde_b_int.get(i) - nfbn_int * n.get(i);
-      const DataVector nfbt_ext =
-          normal_dot_flux_tilde_b_ext.get(i) - nfbn_ext * n.get(i);
-      const DataVector g_bt =
-          hll(fast_max, fast_min, bt_int, nfbt_int, bt_ext, nfbt_ext);
-      const DataVector g_split = g_bn * n.get(i) + g_bt;
-      const DataVector g_plain =
-          hll(lambda_max, lambda_min, tilde_b_int.get(i),
-              normal_dot_flux_tilde_b_int.get(i), tilde_b_ext.get(i),
-              normal_dot_flux_tilde_b_ext.get(i));
-      for (size_t pt = 0; pt < num_points; ++pt) {
-        boundary_correction_tilde_b->get(i)[pt] =
-            (get(metric_flatness_int)[pt] > 1.0e-12 or
-             get(metric_flatness_ext)[pt] > 1.0e-12)
-                ? g_plain[pt]
-                : g_split[pt];
-      }
-    }
+  // Magnetic field: plain HLL with light-speed bounds, matching Hll.cpp
+  // (develop's pre-f5b73d016 behaviour). The GLM / MHD normal-tangential
+  // split that used to live here was gated on flat space and, where it was
+  // active, numerically vacuous: the split only differs from plain HLL when
+  // the fast and light bounds differ, which requires the hydro branch, which
+  // in turn requires |B| < MagneticFieldMagnitudeForHydro (1e-30 by default).
+  for (size_t i = 0; i < 3; ++i) {
+    boundary_correction_tilde_b->get(i) =
+        hll(lambda_max, lambda_min, tilde_b_int.get(i),
+            normal_dot_flux_tilde_b_int.get(i), tilde_b_ext.get(i),
+            normal_dot_flux_tilde_b_ext.get(i));
   }
 }
 

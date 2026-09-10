@@ -63,23 +63,58 @@ namespace grmhd::ValenciaDivClean::BoundaryCorrections {
  *
  * with
  * \f$\delta_\text{mid} = 1 - \min(0,\lambda_\text{mid})/S_L
- *                          - \max(0,\lambda_\text{mid})/S_R\f$ and
- * \f$\lambda_\text{mid} = v \cdot \hat n\f$.
+ *                          - \max(0,\lambda_\text{mid})/S_R\f$.
+ *
+ * ## Curved backgrounds
+ *
+ * The eigensystem returned by
+ * `grmhd::ValenciaDivClean::characteristic_eigenvectors_hydro` is the
+ * eigensystem of the **Eulerian-frame** normal-flux Jacobian
+ * \f$A_\text{Eul}\f$ for a general spatial metric \f$\gamma_{ij}\f$; its
+ * degenerate eigenvalue is \f$\nu_\text{mid} = v\cdot\hat n\f$. The
+ * coordinate-frame (Valencia) Jacobian is
+ *
+ * \f{align*}
+ *   A_\text{coord} = \alpha\,A_\text{Eul} - \beta^n_\text{eff}\,I ,
+ * \f}
+ *
+ * so the left and right eigenvectors -- and therefore \f$P_\pm\f$ and
+ * \f$P_\text{mid}\f$ -- are *identical* in the two frames, while the
+ * eigenvalues map as \f$\lambda = \alpha\nu - \beta^n_\text{eff}\f$
+ * (`HatTransform::inverse_speed`). Densitization by \f$\sqrt\gamma\f$
+ * rescales every slot of the state vector by the same factor and so leaves
+ * the projectors unchanged.
+ *
+ * The HLLEM flux above is therefore used **verbatim in curved space**,
+ * evaluated with coordinate-frame \f$S_L\f$, \f$S_R\f$ and
+ * \f$\lambda_\text{mid} = \alpha\,(v\cdot\hat n) -
+ * \beta^n_\text{eff}\f$. This is not an approximation: writing the
+ * anti-diffusion as an integral of the HLLEM fan profile,
+ * \f$G(\xi) = F^\text{HLL} - \xi U^\text{HLL} - \sum_k
+ * \int_{S_L}^{\xi}\Phi_k\f$, and sampling in the Eulerian frame at the
+ * ray \f$\xi = w_\text{face} = \beta^n_\text{eff}/\alpha\f$ at which the
+ * fixed DG interface moves, the lapse and shift cancel exactly against the
+ * hatted speeds and reproduce the flat-space \f$\delta_\text{mid}\f$
+ * formula in coordinate-frame speeds. Note that the *naive* reading -- run
+ * the flat-space algebra on hatted speeds \f$\nu\f$ while still sampling at
+ * \f$\xi = 0\f$ -- is **wrong**, because it samples the wrong ray.
+ *
+ * The outer bounds \f$S_{L,R}\f$ are the fluid characteristic speeds
+ * evaluated at the arithmetic-average interface state, mapped to the
+ * coordinate frame with the same transform. Taking \f$\lambda_\text{mid}\f$
+ * and \f$S_{L,R}\f$ from the *same* averaged state guarantees
+ * \f$S_L \le \lambda_\text{mid} \le S_R\f$ and hence
+ * \f$\delta_\text{mid}\in[0,1]\f$.
  *
  * Magnetized states with
- * \f$|B| \ge \text{MagneticFieldMagnitudeForHydro}\f$ bypass this class and
- * fall back to the existing full HLL solver (design phase 5 covers the GR
- * ONF wrapper reused from HllcGr; until then this class is flat-space-only
- * for the anti-diffusion path).
+ * \f$|B| \ge \text{MagneticFieldMagnitudeForHydro}\f$ still bypass the
+ * anti-diffusion entirely: the packaged sound speed is left at its zero
+ * sentinel, the averaged-state bounds are not built, and the class reduces
+ * to plain HLL with per-side (Davis) bounds on every slot.
  *
- * ---- Phase 1 (current) ----
- *
- * `RestoreMiddleBlock=false` and `UsePhysicalZeta=false` are the phase-1
- * defaults. In this configuration the class reduces bit-identically to the
- * existing `Hll` solver on the hydro slots; only the option/package/
- * boundary-term plumbing has been added. Phase 2 will wire up the
- * projector construction and enable `RestoreMiddleBlock` by default. See
- * `spectre_runs/hllem_hydroye_design/design.md` for the full design.
+ * See `spectre_runs/hllem_hydroye_design/design.md` for the full design and
+ * `spectre_runs/hllem_hydroye_design/PHASE5_GR_LOG.md` for the curved-space
+ * derivation and its verification.
  *
  * ---- HLL baseline (as inherited from `Hll`) ----
  *
@@ -148,11 +183,28 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
   struct InterfaceUnitNormal : db::SimpleTag {
     using type = tnsr::i<DataVector, 3, Frame::Inertial>;
   };
-  /// |lapse - 1| + |shift|, a measure of how far the background is from flat.
-  /// The scalar/MHD split only holds in flat space; where this is nonzero the
-  /// boundary correction falls back to the standard (light-speed) HLL flux.
-  struct MetricFlatness : db::SimpleTag {
+  /// Lapse \f$\alpha\f$ at the interface. Together with `ShiftDotNormal`
+  /// and `InterfaceSpatialMetric` this is the 3+1 geometry the interface
+  /// frame is built from (see `HatTransform.hpp`); it maps the Eulerian-frame
+  /// characteristic speeds of `characteristic_eigenvectors_hydro` into the
+  /// coordinate frame.
+  struct LapseAtInterface : db::SimpleTag {
     using type = Scalar<DataVector>;
+  };
+  /// \f$\beta^n_\text{eff} = \beta^i n_i + n \cdot v_\text{mesh}\f$ at
+  /// the interface, signed with the interior's outward normal (averaged
+  /// antisymmetrically in `dg_boundary_terms`). The mesh velocity is folded
+  /// in so that \f$\lambda = \alpha\nu - \beta^n_\text{eff}\f$ agrees
+  /// with the packaged characteristic speeds, which already subtract
+  /// \f$n\cdot v_\text{mesh}\f$.
+  struct ShiftDotNormal : db::SimpleTag {
+    using type = Scalar<DataVector>;
+  };
+  /// Spatial metric \f$\gamma_{ij}\f$ at the interface. Needed to build the
+  /// hydro eigensystem (which raises and lowers indices, and constructs the
+  /// two tangent one-forms) and to renormalize the averaged interface normal.
+  struct InterfaceSpatialMetric : db::SimpleTag {
+    using type = tnsr::ii<DataVector, 3, Frame::Inertial>;
   };
 
   struct MagneticFieldMagnitudeForHydro {
@@ -171,9 +223,8 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
     static constexpr Options::String help = {
         "If true, apply the middle-block anti-diffusion "
         "-(S_L S_R)/(S_R - S_L) * delta_mid * P_mid * (U_R - U_L) on top of "
-        "the HLL baseline. If false, the class reduces to the existing Hll "
-        "solver on the hydro slots. Phase 1 default is false; phase 2 will "
-        "enable this by default."};
+        "the HLL baseline. If false, the class is plain HLL with averaged-"
+        "state fluid bounds on the hydro slots."};
     using type = bool;
   };
   struct UsePhysicalZeta {
@@ -188,9 +239,9 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
       tmpl::list<MagneticFieldMagnitudeForHydro, LightSpeedDensityCutoff,
                  RestoreMiddleBlock, UsePhysicalZeta>;
   static constexpr Options::String help = {
-      "HLL + middle-block anti-diffusion for the hydro+Y_e subsystem. Phase 1 "
-      "reduces bit-identically to Hll (RestoreMiddleBlock=false); phase 2 "
-      "will wire up the projector construction."};
+      "HLL + middle-block anti-diffusion for the hydro+Y_e subsystem. Works "
+      "on curved backgrounds. With RestoreMiddleBlock=false the class is "
+      "plain HLL with averaged-state fluid bounds on the hydro slots."};
 
   HllemHydroYe() = default;
   HllemHydroYe(const HllemHydroYe&) = default;
@@ -221,7 +272,8 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
       ::Tags::NormalDotFlux<Tags::TildeS<Frame::Inertial>>,
       ::Tags::NormalDotFlux<Tags::TildeB<Frame::Inertial>>,
       ::Tags::NormalDotFlux<Tags::TildePhi>, LargestOutgoingCharSpeed,
-      LargestIngoingCharSpeed, InterfaceUnitNormal, MetricFlatness,
+      LargestIngoingCharSpeed, InterfaceUnitNormal, LapseAtInterface,
+      ShiftDotNormal, InterfaceSpatialMetric,
       hydro::Tags::RestMassDensity<DataVector>,
       hydro::Tags::ElectronFraction<DataVector>,
       hydro::Tags::SoundSpeedSquared<DataVector>,
@@ -231,7 +283,8 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
       hydro::Tags::SpecificInternalEnergy<DataVector>>;
   using dg_package_data_temporary_tags = tmpl::list<
       gr::Tags::Lapse<DataVector>, gr::Tags::Shift<DataVector, 3>,
-      hydro::Tags::SpatialVelocityOneForm<DataVector, 3, Frame::Inertial>>;
+      hydro::Tags::SpatialVelocityOneForm<DataVector, 3, Frame::Inertial>,
+      gr::Tags::SpatialMetric<DataVector, 3, Frame::Inertial>>;
   using dg_package_data_primitive_tags =
       tmpl::list<hydro::Tags::RestMassDensity<DataVector>,
                  hydro::Tags::ElectronFraction<DataVector>,
@@ -266,7 +319,10 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
       gsl::not_null<Scalar<DataVector>*> packaged_largest_ingoing_char_speed,
       gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
           packaged_interface_unit_normal,
-      gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
+      gsl::not_null<Scalar<DataVector>*> packaged_lapse_at_interface,
+      gsl::not_null<Scalar<DataVector>*> packaged_shift_dot_normal,
+      gsl::not_null<tnsr::ii<DataVector, 3, Frame::Inertial>*>
+          packaged_spatial_metric,
       gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
       gsl::not_null<Scalar<DataVector>*> packaged_electron_fraction,
       gsl::not_null<Scalar<DataVector>*> packaged_sound_speed_squared,
@@ -293,6 +349,7 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& lapse,
       const tnsr::I<DataVector, 3, Frame::Inertial>& shift,
       const tnsr::i<DataVector, 3, Frame::Inertial>& spatial_velocity_one_form,
+      const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
 
       const Scalar<DataVector>& rest_mass_density,
       const Scalar<DataVector>& electron_fraction,
@@ -310,9 +367,8 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
       const EquationsOfState::EquationOfState<true, 3>& equation_of_state)
       const;
 
-  // Non-static (unlike Hll) so phase 2 can consult restore_middle_block_ and
-  // use_physical_zeta_. In phase 1 the body is HLL-identical and does not
-  // depend on those flags.
+  // Non-static (unlike Hll) so the body can consult restore_middle_block_
+  // and use_physical_zeta_.
   void dg_boundary_terms(
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
@@ -339,7 +395,9 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& largest_outgoing_char_speed_int,
       const Scalar<DataVector>& largest_ingoing_char_speed_int,
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
-      const Scalar<DataVector>& metric_flatness_int,
+      const Scalar<DataVector>& lapse_at_interface_int,
+      const Scalar<DataVector>& shift_dot_normal_int,
+      const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric_int,
       const Scalar<DataVector>& rest_mass_density_int,
       const Scalar<DataVector>& electron_fraction_int,
       const Scalar<DataVector>& sound_speed_squared_int,
@@ -365,7 +423,9 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& largest_outgoing_char_speed_ext,
       const Scalar<DataVector>& largest_ingoing_char_speed_ext,
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_ext,
-      const Scalar<DataVector>& metric_flatness_ext,
+      const Scalar<DataVector>& lapse_at_interface_ext,
+      const Scalar<DataVector>& shift_dot_normal_ext,
+      const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric_ext,
       const Scalar<DataVector>& rest_mass_density_ext,
       const Scalar<DataVector>& electron_fraction_ext,
       const Scalar<DataVector>& sound_speed_squared_ext,
