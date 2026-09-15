@@ -361,17 +361,25 @@ void HllemHydroYe::dg_boundary_terms(
   // Fast-magnetosonic HLL bounds: used for the MHD variables (D, Ye, Tau, S),
   // which travel slower than light.
   //
-  // The bounds are computed from the fluid characteristic speeds evaluated at
-  // the ARITHMETIC-AVERAGE interface state (exactly like the HLLEM boundary
-  // correction). Evaluating a single interface eigensystem -- rather than the
-  // per-side, sign-of-v_n-dependent packaged fast speeds -- makes the bounds
-  // identical on mirror-image faces (invariant under v_n -> -v_n) and removes
-  // a small top/bottom asymmetry that the per-side approach seeded in the
-  // Kelvin-Helmholtz test. It also guarantees S_L <= lambda_mid <= S_R, since
-  // lambda_mid comes from the same averaged state, and hence
-  // delta_mid in [0, 1].
-  DataVector fast_max = lambda_max;
-  DataVector fast_min = lambda_min;
+  // NOTE: an earlier revision evaluated these at the ARITHMETIC-AVERAGE
+  // interface state, to make the bounds invariant under v_n -> -v_n (a
+  // top/bottom asymmetry in the Kelvin-Helmholtz test) and to guarantee
+  // S_L <= lambda_mid <= S_R by construction. That is not what HLLEM
+  // prescribes, and it is where the 2026-09-15 flat-space bug lived. The
+  // wider per-side interval still contains lambda_mid, so delta_mid in [0, 1]
+  // survives -- see below.
+  //
+  // Fluid-variable bounds: the per-side max/min combination (Recipe A,
+  // Davis 1988), identical to Hll.cpp:132-133. HLLEM requires lambda_L and
+  // lambda_R to be an UPPER BOUND on the true wave speeds, estimated from the
+  // left and right INPUT states -- see Mattia & Mignone 2021 (arXiv:2111.09369)
+  // sec. "HLL Formulation": the averaged (*) state enters ONLY the
+  // anti-diffusion term, via R*, L* and lambda_{m,*}. Evaluating the outer
+  // bounds at the averaged state instead ("Recipe B") under-bounds the fan at
+  // strongly-asymmetric interfaces and violates the Harten-Lax-van Leer
+  // premise; Hll.cpp:124-131 records that it was tried there and reverted.
+  const DataVector& fast_max = lambda_max;
+  const DataVector& fast_min = lambda_min;
   // Middle-block projector storage (populated only when we take the hydro
   // branch AND restore_middle_block_ is true).
   bool have_middle_block = false;
@@ -383,16 +391,13 @@ void HllemHydroYe::dg_boundary_terms(
   DataVector lambda_mid{num_points, 0.0};
   // Hydro branch: both sides packaged a positive sound speed, i.e. both sides
   // are above the atmosphere cutoff and free of a magnetic field above
-  // MagneticFieldMagnitudeForHydro. Zero EOS calls on the fast-bounds path --
-  // the closed-form lambda_pm(v_avg, cs2_avg) uses packaged per-side data
-  // only. The previous "average primitives, EOS-lookup for p/h, then
-  // characteristic_speeds_..." recipe cost ~4 Togashi-trilinear lookups per
-  // interface per step; see Hll.cpp for the full rationale.
+  // MagneticFieldMagnitudeForHydro. The outer bounds now cost nothing extra --
+  // they are the packaged per-side speeds, as in Hll.
   //
-  // If restore_middle_block_ = true we additionally need the eigensystem,
-  // which needs the on-EOS (p_avg, h_avg) at the averaged (rho, eps, Y_e). A
-  // second block below does that lookup once, only when the middle-block
-  // anti-diffusion is requested.
+  // The averaged interface state below is built ONLY when
+  // restore_middle_block_ is true, because only the anti-diffusion term needs
+  // it (R*, L*, lambda_{m,*}). A consequence worth keeping: with
+  // RestoreMiddleBlock = false this class is now bit-identical to Hll.
   //
   // Unlike the earlier flat-space-only version, this branch has no
   // metric-flatness gate: the eigenvectors of the coordinate-frame Jacobian
@@ -414,7 +419,7 @@ void HllemHydroYe::dg_boundary_terms(
   DataVector beta_n_avg{num_points, 0.0};
   DataVector v_sq_avg{num_points, 0.0};
   DataVector v_n_avg{num_points, 0.0};
-  if (hydro_branch) {
+  if (hydro_branch and restore_middle_block_) {
     const ScopedFpeState fpe(false);
     alpha_avg = interface_lapse(get(lapse_at_interface_int),
                                 get(lapse_at_interface_ext));
@@ -454,33 +459,6 @@ void HllemHydroYe::dg_boundary_terms(
       v_n_avg += v_avg.get(i) * n_avg.get(i);
     }
     v_sq_avg = clamp(v_sq_avg, 0.0, 1.0 - 1.0e-10);
-
-    const DataVector cs2_avg =
-        0.5 * (get(sound_speed_squared_int) + get(sound_speed_squared_ext));
-    const DataVector one_minus_cs2 = 1.0 - cs2_avg;
-    const DataVector one_minus_v2_cs2 = 1.0 - v_sq_avg * cs2_avg;
-    // Materialise the radicand BEFORE clamping. Handing the Blaze expression
-    // template straight to clamp() reads stale memory at a handful of points:
-    // the radicand comes back as a denormal ~1e-321 even though every operand
-    // (cs2_avg, v_sq_avg, v_n_avg, one_minus_v2_cs2) is finite and correct
-    // there. That collapses fast_max/fast_min to ~1e-161, the dl < 1e-30 guard
-    // in hll() then fires, and the numerical flux underflows to ~1e-136 --
-    // i.e. the momentum flux at that face becomes 0 instead of p. On a uniform
-    // static state this is the whole "HllemHydroYe corrupts flat spacetime"
-    // bug: see notes/current/tasks/3-tov-gmode-perturbation.md, 2026-09-15.
-    const DataVector disc_radicand =
-        cs2_avg * (1.0 - v_sq_avg) *
-        (one_minus_v2_cs2 - v_n_avg * v_n_avg * one_minus_cs2);
-    const DataVector disc = sqrt(clamp(disc_radicand, 0.0, 1.0));
-    // Eulerian-frame acoustic speeds nu_pm, then mapped to the coordinate
-    // frame by lambda = alpha nu - beta^n_eff.
-    const DataVector nu_plus =
-        (v_n_avg * one_minus_cs2 + disc) / one_minus_v2_cs2;
-    const DataVector nu_minus =
-        (v_n_avg * one_minus_cs2 - disc) / one_minus_v2_cs2;
-    fast_max = max(0.0, coordinate_frame_speed(alpha_avg, beta_n_avg, nu_plus));
-    fast_min =
-        min(0.0, coordinate_frame_speed(alpha_avg, beta_n_avg, nu_minus));
   }
 
   // Middle-block eigensystem (only when the anti-diffusion is enabled).
