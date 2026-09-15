@@ -459,10 +459,19 @@ void HllemHydroYe::dg_boundary_terms(
         0.5 * (get(sound_speed_squared_int) + get(sound_speed_squared_ext));
     const DataVector one_minus_cs2 = 1.0 - cs2_avg;
     const DataVector one_minus_v2_cs2 = 1.0 - v_sq_avg * cs2_avg;
-    const DataVector disc =
-        sqrt(clamp(cs2_avg * (1.0 - v_sq_avg) *
-                       (one_minus_v2_cs2 - v_n_avg * v_n_avg * one_minus_cs2),
-                   0.0, 1.0));
+    // Materialise the radicand BEFORE clamping. Handing the Blaze expression
+    // template straight to clamp() reads stale memory at a handful of points:
+    // the radicand comes back as a denormal ~1e-321 even though every operand
+    // (cs2_avg, v_sq_avg, v_n_avg, one_minus_v2_cs2) is finite and correct
+    // there. That collapses fast_max/fast_min to ~1e-161, the dl < 1e-30 guard
+    // in hll() then fires, and the numerical flux underflows to ~1e-136 --
+    // i.e. the momentum flux at that face becomes 0 instead of p. On a uniform
+    // static state this is the whole "HllemHydroYe corrupts flat spacetime"
+    // bug: see notes/current/tasks/3-tov-gmode-perturbation.md, 2026-09-15.
+    const DataVector disc_radicand =
+        cs2_avg * (1.0 - v_sq_avg) *
+        (one_minus_v2_cs2 - v_n_avg * v_n_avg * one_minus_cs2);
+    const DataVector disc = sqrt(clamp(disc_radicand, 0.0, 1.0));
     // Eulerian-frame acoustic speeds nu_pm, then mapped to the coordinate
     // frame by lambda = alpha nu - beta^n_eff.
     const DataVector nu_plus =
