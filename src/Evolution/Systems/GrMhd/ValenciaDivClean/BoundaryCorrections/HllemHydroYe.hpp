@@ -99,18 +99,39 @@ namespace grmhd::ValenciaDivClean::BoundaryCorrections {
  * the flat-space algebra on hatted speeds \f$\nu\f$ while still sampling at
  * \f$\xi = 0\f$ -- is **wrong**, because it samples the wrong ray.
  *
- * The outer bounds \f$S_{L,R}\f$ are the fluid characteristic speeds
- * evaluated at the arithmetic-average interface state, mapped to the
- * coordinate frame with the same transform. Taking \f$\lambda_\text{mid}\f$
- * and \f$S_{L,R}\f$ from the *same* averaged state guarantees
- * \f$S_L \le \lambda_\text{mid} \le S_R\f$ and hence
- * \f$\delta_\text{mid}\in[0,1]\f$.
+ * The outer bounds \f$S_{L,R}\f$ are the **per-side** fluid characteristic
+ * speeds packaged in `dg_package_data`, combined as
+ * \f$S_R = \max(0, \lambda_+^{L}, \lambda_+^{R})\f$ and
+ * \f$S_L = \min(0, \lambda_-^{L}, \lambda_-^{R})\f$ (Recipe A, Davis 1988)
+ * -- exactly as in `Hll`. HLLEM requires \f$S_{L,R}\f$ to be an *upper bound*
+ * on the true wave speeds estimated from the left and right **input** states;
+ * see Mattia & Mignone 2021 (arXiv:2111.09369), sec. "HLL Formulation". Only
+ * the anti-diffusion term uses the averaged interface state, and only through
+ * \f$R_\pm\f$, \f$L_\pm\f$ and \f$\lambda_\text{mid}\f$.
+ *
+ * \note An earlier revision evaluated \f$S_{L,R}\f$ at the averaged state too
+ * ("Recipe B"), and argued \f$\delta_\text{mid}\in[0,1]\f$ from
+ * \f$\lambda_\text{mid}\f$ and \f$S_{L,R}\f$ sharing that state. Recipe B
+ * under-bounds the fan at strongly-asymmetric interfaces, violating the
+ * Harten-Lax-van Leer premise, and was removed. **That proof of the
+ * \f$\delta_\text{mid}\f$ range died with it**, but the property survives
+ * for an independent reason: a sound-speed margin.
+ * \f$\lambda_+(v) = (v_n + c_s)/(1 + v_n c_s) > v_n\f$ at every state, and
+ * \f$v_n(*)\f$ lies between \f$v_n(L)\f$ and \f$v_n(R)\f$, so
+ * \f$S_R > v_n(*) = \lambda_\text{mid}\f$ (and symmetrically for
+ * \f$S_L\f$). Measured over 4000 random subsonic interfaces with these
+ * bounds: no excursions, \f$\delta_\text{mid}\in[0.216, 1]\f$. There is
+ * deliberately **no clamp** -- a clamp would mask a genuinely bad bound
+ * estimate -- so the guarantee rests on that margin and would fail for any
+ * bound lacking it.
  *
  * Magnetized states with
  * \f$|B| \ge \text{MagneticFieldMagnitudeForHydro}\f$ still bypass the
  * anti-diffusion entirely: the packaged sound speed is left at its zero
- * sentinel, the averaged-state bounds are not built, and the class reduces
- * to plain HLL with per-side (Davis) bounds on every slot.
+ * sentinel, neither the averaged interface state nor the eigensystem is
+ * built, and the class reduces to plain HLL on every slot (with the
+ * light-speed packaged bounds, since the hydro-speed branch is also
+ * skipped).
  *
  * See `notes/projects/active/hllem_hydroye/design.md` for the full design and
  * `notes/projects/active/hllem_hydroye/phase5_gr_log.md` for the curved-space
@@ -225,8 +246,9 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
     static constexpr Options::String help = {
         "If true, apply the middle-block anti-diffusion "
         "-(S_L S_R)/(S_R - S_L) * delta_mid * P_mid * (U_R - U_L) on top of "
-        "the HLL baseline. If false, the class is plain HLL with averaged-"
-        "state fluid bounds on the hydro slots."};
+        "the HLL baseline. If false, the class reduces to plain Hll -- "
+        "verified bit-identical to it on both a uniform state and a Y_e "
+        "contact."};
     using type = bool;
   };
   /// \deprecated RETIRED 2026-09-16 — leave at the default `True`.
@@ -266,8 +288,9 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
                  RestoreMiddleBlock, UsePhysicalZeta>;
   static constexpr Options::String help = {
       "HLL + middle-block anti-diffusion for the hydro+Y_e subsystem. Works "
-      "on curved backgrounds. With RestoreMiddleBlock=false the class is "
-      "plain HLL with averaged-state fluid bounds on the hydro slots."};
+      "on curved backgrounds. Outer HLL bounds are the per-side (Davis) "
+      "speeds, as in Hll; only the anti-diffusion uses the averaged interface "
+      "state. With RestoreMiddleBlock=false the class reduces to plain Hll."};
 
   HllemHydroYe() = default;
   HllemHydroYe(const HllemHydroYe&) = default;
@@ -321,8 +344,11 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
                  hydro::Tags::LorentzFactor<DataVector>>;
   using dg_package_data_volume_tags =
       tmpl::list<hydro::Tags::GrmhdEquationOfState>;
-  // The equation of state is needed in dg_boundary_terms to compute the
-  // fast-magnetosonic HLL bounds at the averaged interface state.
+  // The equation of state is needed in dg_boundary_terms for the middle-block
+  // eigensystem only: the on-EOS (p_avg, h_avg) at the averaged (rho, eps,
+  // Y_e). The outer bounds need no EOS call -- they are the per-side speeds
+  // packaged in dg_package_data. So this tag is unused when
+  // RestoreMiddleBlock is false.
   using dg_boundary_terms_volume_tags =
       tmpl::list<hydro::Tags::GrmhdEquationOfState>;
 

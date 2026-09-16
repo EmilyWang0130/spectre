@@ -236,21 +236,25 @@ double HllemHydroYe::dg_package_data(
     *packaged_shift_dot_normal = shift_dot_normal;
   }
 
-  // Package the interface unit normal. The fast-magnetosonic HLL bounds are
-  // not computed per-side here; they are computed at the AVERAGED interface
-  // state inside dg_boundary_terms (mirroring the HLLEM boundary correction),
-  // which fixes a top/bottom asymmetry that the per-side, sign-of-v_n-
-  // dependent bounds seeded in the Kelvin-Helmholtz test, and which keeps the
-  // outer bounds consistent with the middle-block speed (both come from the
-  // same averaged state, so S_L <= lambda_mid <= S_R by construction).
+  // Package the interface unit normal and metric. These are needed to build
+  // the averaged interface state for the MIDDLE-BLOCK eigensystem, not for the
+  // outer bounds: dg_boundary_terms takes S_L, S_R from the per-side speeds
+  // packaged just above (Recipe A), as Hll does.
+  //
+  // NOTE: an earlier revision computed the outer bounds at the averaged state
+  // too, to fix a top/bottom asymmetry the per-side, sign-of-v_n-dependent
+  // bounds seeded in the Kelvin-Helmholtz test, and argued that sharing the
+  // state gave S_L <= lambda_mid <= S_R by construction. That recipe
+  // under-bounds the fan and was removed; the delta_mid range now rests on a
+  // sound-speed margin instead. See the class documentation.
   *packaged_interface_unit_normal = normal_covector;
   *packaged_spatial_metric = spatial_metric;
 
-  // Package the primitives needed to reconstruct the averaged fast-magnetosonic
-  // bounds and the hydro+Y_e eigensystem in dg_boundary_terms. Note that
-  // Pressure, LorentzFactor and Temperature are packaged but not currently
-  // read there: the eigensystem is built from an on-EOS (p, h) at the
-  // AVERAGED (rho, eps, Y_e) rather than from averaged per-side values.
+  // Package the primitives needed to build the hydro+Y_e eigensystem in
+  // dg_boundary_terms. Note that Pressure, LorentzFactor and Temperature are
+  // packaged but not currently read there: the eigensystem is built from an
+  // on-EOS (p, h) at the AVERAGED (rho, eps, Y_e) rather than from averaged
+  // per-side values.
   *packaged_rest_mass_density = rest_mass_density;
   *packaged_electron_fraction = electron_fraction;
   *packaged_temperature = temperature;
