@@ -103,6 +103,39 @@ std::ostream& operator<<(std::ostream& os, HllemWaves waves);
  * The fan is reconstructed assuming flat space (the regime of the relativistic
  * M&M tests) with an HLL fallback for curved backgrounds and non-finite
  * results.
+ *
+ * \warning **UNVALIDATED ON THIS BRANCH -- do not trust results from it
+ * without re-deriving them.** As of 2026-09-15 this class is selected by no
+ * yaml in `spectre_runs/`, so none of its MHD/GLM machinery has ever been
+ * exercised here. Two specific reasons for caution:
+ *
+ * 1. It takes the outer HLL bounds `fast_lambda_max`/`fast_lambda_min` from
+ *    `characteristic_speeds_mhd` evaluated at the ARITHMETIC-AVERAGE interface
+ *    state, not from the two input states. Mattia & Mignone 2021
+ *    (arXiv:2111.09369, sec. "HLL Formulation") require lambda_L/lambda_R to be
+ *    an *upper bound* estimated from the left and right input states, with the
+ *    averaged state entering only the anti-diffusion term (R*, L*,
+ *    lambda_{m,*}). `Hll.cpp` records the same objection and reverted the
+ *    averaged recipe there; `HllemHydroYe` was switched to per-side bounds in
+ *    `faaaba1de`. This class was left as-is because it is unused.
+ *
+ *    Note this is NOT simply a bug: with divergence cleaning the outermost
+ *    waves are the +/-c GLM modes, which makes the fast-magnetosonic waves
+ *    genuinely *interior* waves that HLL smears, so restoring them is
+ *    defensible in a way it would not be in pure hydro. The averaged bounds are
+ *    what make delta_fast == 0 for the `*Fast` wave sets. Untangling that is a
+ *    real design question, not a one-line fix.
+ *
+ * 2. `HllemHydroYe`, which shares this class's lineage, was found on
+ *    2026-09-15 to zero the momentum flux at one face per element per
+ *    direction, via a stale-memory read in a Blaze expression handed to
+ *    `clamp()`. This class does not have that particular pattern (its `clamp`
+ *    calls all take a named lvalue), but nothing here has been checked against
+ *    a uniform-state control the way `HllemHydroYe` now is.
+ *
+ * Before using it: run the uniform-state control in
+ * `spectre_runs/shocktube/togashi_uniform_onset/` (17-40 s per arm) and
+ * confirm it stays exactly zero.
  */
 class Hllem final : public evolution::BoundaryCorrection {
  public:
