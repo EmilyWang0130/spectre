@@ -847,6 +847,15 @@ void test_tabulated3d_kappa_and_zeta_in_characteristics() {
                 1.0)) > 1.0e-12);
 }
 
+// Characterisation test for the RETIRED (2026-09-16) `use_physical_zeta`
+// switch. It is kept because the option still exists -- archived run yamls set
+// it -- so its behaviour should stay pinned even though nobody should use it
+// for physics. The comment below already states the essential reason it was
+// retired: the basis it returns is not an eigenbasis of the physical system.
+// A further wrinkle, recorded after the fact: because the override fires
+// before `zeta_max_abs` is taken, it also degenerates R3/R4/L3/L4, so it is
+// not equivalent to zeroing zeta only in L_pm.
+//
 // Exercises the `use_physical_zeta` diagnostic switch on
 // `characteristic_eigenvectors_hydro`. With the switch off, zeta is forced to
 // zero before the eigenvectors are assembled, so the routine must return the
