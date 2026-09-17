@@ -9,14 +9,19 @@
 #include <cstddef>
 #include <random>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "DataStructures/DataVector.hpp"
 #include "DataStructures/TaggedTuple.hpp"
 #include "DataStructures/Tensor/EagerMath/DeterminantAndInverse.hpp"
 #include "DataStructures/Tensor/Tensor.hpp"
 #include "Evolution/BoundaryCorrection.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/HllcGr.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/HllemHydroYe.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/Characteristics.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/ConservativeFromPrimitive.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/Fluxes.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/System.hpp"
 #include "Framework/SetupLocalPythonEnvironment.hpp"
 #include "Framework/TestCreation.hpp"
@@ -694,6 +699,574 @@ void test_lapse_scaling() {
   CHECK(max_magnitude > 1.0e-3);
 }
 
+// ---------------------------------------------------------------------------
+// Task A of notes/projects/active/hllem_hydroye/mbot_handoff_2026-09-16.md:
+// check the analytic HllemHydroYe - HllcGr flux difference against the code.
+//
+// The symbolic derivation (flux_difference_reference.md) predicts
+//
+//   F_HLLEM - F_HLLC = B[dU_ac, dU_mid] + A[dU_ac, dU_ac] + O(||dU||^3) ,
+//
+// i.e. the two solvers agree to FIRST order in the jump -- both linearise to
+// the exact upwind (Roe) flux -- and every contact and shear direction is
+// exactly null. This test pins that against the running C++ at one fully
+// specified state, with numbers predicted before the test existed.
+//
+// Setup (handoff "Setup, exactly"): IdealFluid Gamma = 5/3 so zeta == 0,
+// flat spatial metric, lapse 1, zero shift, B = 0, n_hat = x_hat, and
+//
+//   V_*  = (rho, v_x, v_y, v_z, eps, Y_e) = (1.0, 0.2, 0.15, -0.1, 0.5, 0.3)
+//   dV                                    = (0.5, -0.2, 0.3,  0.1, 0.4, -0.2)
+//   V_L = V_* - (eta/2) dV ,   V_R = V_* + (eta/2) dV .
+//
+// Both solvers are driven through their OWN dg_package_data, so the packaging
+// and sign conventions under test are the code's and not the test's. The
+// interior carries V_L with n = +x_hat, the exterior V_R with n = -x_hat; in
+// the weak form the returned "correction" is the numerical flux itself.
+//
+// An independent numpy implementation of the same analytic spec lives at
+// notes/projects/active/hllem_hydroye/scripts/task_a_reference.py and
+// reproduces every constant below.
+//
+// Measured on mbot 2026-09-17, clang Release, and agreeing with BOTH the
+// Mathematica prediction and the numpy reference on every entry:
+//
+//   bounds at eta = 1e-2:  S_L = -0.38737594   S_R = +0.67106011
+//
+//        eta   ||F_HLLEM-F_HLLC||      /eta^2   ||F_HLLEM-F_HLL||
+//       1e-1         1.066453e-3   1.066453e-1        1.344176e-2
+//       1e-2         1.056416e-5   1.056416e-1        1.312538e-3
+//       1e-3         1.055392e-7   1.055392e-1        1.309359e-4
+//       1e-4         1.055290e-9   1.055290e-1        1.309041e-5
+//
+//   null directions at eta = 1e-3, against 1.06e-7 for a generic one:
+//       rho contact at p-equilibrium   6.40e-17
+//       Y_e contact at p-equilibrium   5.59e-17
+//       shear v_y                      4.406251e-11
+//       shear v_z                      2.918855e-11
+//
+//   The two shear values are a deterministic cancellation floor, not a
+//   signal: the numpy reference reproduces them to seven significant
+//   figures, which a real O(eta^2) term could not do.
+
+// One interface point per value of eta, so a single pair of calls yields the
+// whole convergence table.
+constexpr std::array<double, 4> task_a_etas{{1.0e-1, 1.0e-2, 1.0e-3, 1.0e-4}};
+
+struct FlatPointStates {
+  Scalar<DataVector> rest_mass_density{};
+  Scalar<DataVector> electron_fraction{};
+  Scalar<DataVector> specific_internal_energy{};
+  Scalar<DataVector> pressure{};
+  Scalar<DataVector> temperature{};
+  Scalar<DataVector> lorentz_factor{};
+  tnsr::I<DataVector, 3, Frame::Inertial> spatial_velocity{};
+  tnsr::i<DataVector, 3, Frame::Inertial> spatial_velocity_one_form{};
+  // Conserved variables and their full spatial fluxes.
+  Scalar<DataVector> tilde_d{};
+  Scalar<DataVector> tilde_ye{};
+  Scalar<DataVector> tilde_tau{};
+  tnsr::i<DataVector, 3, Frame::Inertial> tilde_s{};
+  tnsr::I<DataVector, 3, Frame::Inertial> tilde_b{};
+  Scalar<DataVector> tilde_phi{};
+  tnsr::I<DataVector, 3, Frame::Inertial> flux_tilde_d{};
+  tnsr::I<DataVector, 3, Frame::Inertial> flux_tilde_ye{};
+  tnsr::I<DataVector, 3, Frame::Inertial> flux_tilde_tau{};
+  tnsr::Ij<DataVector, 3, Frame::Inertial> flux_tilde_s{};
+  tnsr::IJ<DataVector, 3, Frame::Inertial> flux_tilde_b{};
+  tnsr::I<DataVector, 3, Frame::Inertial> flux_tilde_phi{};
+};
+
+// Build one side's primitives, conserved variables and fluxes at a flat
+// background from the six primitives at each point.
+FlatPointStates make_flat_side(
+    const std::vector<std::array<double, 6>>& primitives,
+    const EquationsOfState::EquationOfState<true, 3>& eos,
+    const Scalar<DataVector>& lapse,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& shift,
+    const Scalar<DataVector>& sqrt_det_spatial_metric,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
+    const tnsr::II<DataVector, 3, Frame::Inertial>& inv_spatial_metric) {
+  const size_t num_pts = primitives.size();
+  FlatPointStates s{};
+  s.rest_mass_density = Scalar<DataVector>{DataVector{num_pts, 0.0}};
+  s.electron_fraction = Scalar<DataVector>{DataVector{num_pts, 0.0}};
+  s.specific_internal_energy = Scalar<DataVector>{DataVector{num_pts, 0.0}};
+  s.lorentz_factor = Scalar<DataVector>{DataVector{num_pts, 0.0}};
+  s.spatial_velocity = tnsr::I<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  s.spatial_velocity_one_form =
+      tnsr::i<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  s.tilde_b = tnsr::I<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  s.tilde_phi = Scalar<DataVector>{DataVector{num_pts, 0.0}};
+
+  for (size_t pt = 0; pt < num_pts; ++pt) {
+    const auto& v = primitives[pt];
+    get(s.rest_mass_density)[pt] = v[0];
+    get(s.specific_internal_energy)[pt] = v[4];
+    get(s.electron_fraction)[pt] = v[5];
+    double v_squared = 0.0;
+    for (size_t i = 0; i < 3; ++i) {
+      s.spatial_velocity.get(i)[pt] = gsl::at(v, i + 1);
+      // Flat metric, so the one-form components equal the vector ones.
+      s.spatial_velocity_one_form.get(i)[pt] = gsl::at(v, i + 1);
+      v_squared += gsl::at(v, i + 1) * gsl::at(v, i + 1);
+    }
+    get(s.lorentz_factor)[pt] = 1.0 / std::sqrt(1.0 - v_squared);
+  }
+
+  s.pressure = eos.pressure_from_density_and_energy(
+      s.rest_mass_density, s.specific_internal_energy, s.electron_fraction);
+  s.temperature = eos.temperature_from_density_and_energy(
+      s.rest_mass_density, s.specific_internal_energy, s.electron_fraction);
+
+  // No magnetic field and no divergence-cleaning field anywhere here.
+  const tnsr::I<DataVector, 3, Frame::Inertial> magnetic_field{num_pts, 0.0};
+  const Scalar<DataVector> divergence_cleaning_field{DataVector{num_pts, 0.0}};
+
+  s.tilde_d = Scalar<DataVector>{DataVector{num_pts, 0.0}};
+  s.tilde_ye = Scalar<DataVector>{DataVector{num_pts, 0.0}};
+  s.tilde_tau = Scalar<DataVector>{DataVector{num_pts, 0.0}};
+  s.tilde_s = tnsr::i<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  grmhd::ValenciaDivClean::ConservativeFromPrimitive::apply(
+      make_not_null(&s.tilde_d), make_not_null(&s.tilde_ye),
+      make_not_null(&s.tilde_tau), make_not_null(&s.tilde_s),
+      make_not_null(&s.tilde_b), make_not_null(&s.tilde_phi),
+      s.rest_mass_density, s.electron_fraction, s.specific_internal_energy,
+      s.pressure, s.spatial_velocity, s.lorentz_factor, magnetic_field,
+      sqrt_det_spatial_metric, spatial_metric, divergence_cleaning_field);
+
+  s.flux_tilde_d = tnsr::I<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  s.flux_tilde_ye = tnsr::I<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  s.flux_tilde_tau = tnsr::I<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  s.flux_tilde_s = tnsr::Ij<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  s.flux_tilde_b = tnsr::IJ<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  s.flux_tilde_phi = tnsr::I<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  grmhd::ValenciaDivClean::ComputeFluxes::apply(
+      make_not_null(&s.flux_tilde_d), make_not_null(&s.flux_tilde_ye),
+      make_not_null(&s.flux_tilde_tau), make_not_null(&s.flux_tilde_s),
+      make_not_null(&s.flux_tilde_b), make_not_null(&s.flux_tilde_phi),
+      s.tilde_d, s.tilde_ye, s.tilde_tau, s.tilde_s, s.tilde_b, s.tilde_phi,
+      lapse, shift, sqrt_det_spatial_metric, spatial_metric, inv_spatial_metric,
+      s.pressure, s.spatial_velocity, s.lorentz_factor, magnetic_field);
+  return s;
+}
+
+// Packaged data for HllcGr -- the tag list differs from HllemHydroYe's, so it
+// needs its own bundle.
+struct HllcSidePackage {
+  Scalar<DataVector> tilde_d{};
+  Scalar<DataVector> tilde_ye{};
+  Scalar<DataVector> tilde_tau{};
+  tnsr::i<DataVector, 3, Frame::Inertial> tilde_s{};
+  tnsr::I<DataVector, 3, Frame::Inertial> tilde_b{};
+  Scalar<DataVector> tilde_phi{};
+  Scalar<DataVector> nf_tilde_d{};
+  Scalar<DataVector> nf_tilde_ye{};
+  Scalar<DataVector> nf_tilde_tau{};
+  tnsr::i<DataVector, 3, Frame::Inertial> nf_tilde_s{};
+  tnsr::I<DataVector, 3, Frame::Inertial> nf_tilde_b{};
+  Scalar<DataVector> nf_tilde_phi{};
+  Scalar<DataVector> largest_outgoing{};
+  Scalar<DataVector> largest_ingoing{};
+  Scalar<DataVector> normal_dot_tilde_s{};
+  Scalar<DataVector> nf_normal_dot_tilde_s{};
+  Scalar<DataVector> advection_speed{};
+  Scalar<DataVector> pressure_flux_coefficient{};
+  tnsr::i<DataVector, 3, Frame::Inertial> normal{};
+  Scalar<DataVector> lapse{};
+  Scalar<DataVector> shift_dot_normal{};
+};
+
+void resize_hllem_package(const gsl::not_null<SidePackage*> p,
+                          const size_t num_pts) {
+  const auto scalar = [num_pts]() {
+    return Scalar<DataVector>{DataVector{num_pts, 0.0}};
+  };
+  p->tilde_d = scalar();
+  p->tilde_ye = scalar();
+  p->tilde_tau = scalar();
+  p->tilde_s = tnsr::i<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  p->tilde_b = tnsr::I<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  p->tilde_phi = scalar();
+  p->nf_tilde_d = scalar();
+  p->nf_tilde_ye = scalar();
+  p->nf_tilde_tau = scalar();
+  p->nf_tilde_s = tnsr::i<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  p->nf_tilde_b = tnsr::I<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  p->nf_tilde_phi = scalar();
+  p->largest_outgoing = scalar();
+  p->largest_ingoing = scalar();
+  p->normal = tnsr::i<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  p->lapse = scalar();
+  p->shift_dot_normal = scalar();
+  p->spatial_metric = tnsr::ii<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  p->rest_mass_density = scalar();
+  p->electron_fraction = scalar();
+  p->sound_speed_squared = scalar();
+  p->temperature = scalar();
+  p->spatial_velocity = tnsr::I<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  p->pressure = scalar();
+  p->lorentz_factor = scalar();
+  p->specific_internal_energy = scalar();
+}
+
+void resize_hllc_package(const gsl::not_null<HllcSidePackage*> p,
+                         const size_t num_pts) {
+  const auto scalar = [num_pts]() {
+    return Scalar<DataVector>{DataVector{num_pts, 0.0}};
+  };
+  p->tilde_d = scalar();
+  p->tilde_ye = scalar();
+  p->tilde_tau = scalar();
+  p->tilde_s = tnsr::i<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  p->tilde_b = tnsr::I<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  p->tilde_phi = scalar();
+  p->nf_tilde_d = scalar();
+  p->nf_tilde_ye = scalar();
+  p->nf_tilde_tau = scalar();
+  p->nf_tilde_s = tnsr::i<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  p->nf_tilde_b = tnsr::I<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  p->nf_tilde_phi = scalar();
+  p->largest_outgoing = scalar();
+  p->largest_ingoing = scalar();
+  p->normal_dot_tilde_s = scalar();
+  p->nf_normal_dot_tilde_s = scalar();
+  p->advection_speed = scalar();
+  p->pressure_flux_coefficient = scalar();
+  p->normal = tnsr::i<DataVector, 3, Frame::Inertial>{num_pts, 0.0};
+  p->lapse = scalar();
+  p->shift_dot_normal = scalar();
+}
+
+// Result of one side of the interface, packaged for both solvers.
+struct BothPackages {
+  SidePackage hllem{};
+  HllcSidePackage hllc{};
+};
+
+BothPackages package_flat_side(
+    const grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe& hllem_bc,
+    const grmhd::ValenciaDivClean::BoundaryCorrections::HllcGr& hllc_bc,
+    const FlatPointStates& s,
+    const EquationsOfState::EquationOfState<true, 3>& eos,
+    const Scalar<DataVector>& lapse,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& shift,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& normal_covector,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& normal_vector) {
+  const size_t num_pts = get(s.tilde_d).size();
+  BothPackages out{};
+  resize_hllem_package(make_not_null(&out.hllem), num_pts);
+  resize_hllc_package(make_not_null(&out.hllc), num_pts);
+
+  const std::optional<tnsr::I<DataVector, 3, Frame::Inertial>>
+      no_mesh_velocity{};
+  const std::optional<Scalar<DataVector>> no_normal_dot_mesh_velocity{};
+
+  hllem_bc.dg_package_data(
+      make_not_null(&out.hllem.tilde_d), make_not_null(&out.hllem.tilde_ye),
+      make_not_null(&out.hllem.tilde_tau), make_not_null(&out.hllem.tilde_s),
+      make_not_null(&out.hllem.tilde_b), make_not_null(&out.hllem.tilde_phi),
+      make_not_null(&out.hllem.nf_tilde_d),
+      make_not_null(&out.hllem.nf_tilde_ye),
+      make_not_null(&out.hllem.nf_tilde_tau),
+      make_not_null(&out.hllem.nf_tilde_s),
+      make_not_null(&out.hllem.nf_tilde_b),
+      make_not_null(&out.hllem.nf_tilde_phi),
+      make_not_null(&out.hllem.largest_outgoing),
+      make_not_null(&out.hllem.largest_ingoing),
+      make_not_null(&out.hllem.normal), make_not_null(&out.hllem.lapse),
+      make_not_null(&out.hllem.shift_dot_normal),
+      make_not_null(&out.hllem.spatial_metric),
+      make_not_null(&out.hllem.rest_mass_density),
+      make_not_null(&out.hllem.electron_fraction),
+      make_not_null(&out.hllem.sound_speed_squared),
+      make_not_null(&out.hllem.temperature),
+      make_not_null(&out.hllem.spatial_velocity),
+      make_not_null(&out.hllem.pressure),
+      make_not_null(&out.hllem.lorentz_factor),
+      make_not_null(&out.hllem.specific_internal_energy), s.tilde_d, s.tilde_ye,
+      s.tilde_tau, s.tilde_s, s.tilde_b, s.tilde_phi, s.flux_tilde_d,
+      s.flux_tilde_ye, s.flux_tilde_tau, s.flux_tilde_s, s.flux_tilde_b,
+      s.flux_tilde_phi, lapse, shift, s.spatial_velocity_one_form,
+      spatial_metric, s.rest_mass_density, s.electron_fraction, s.temperature,
+      s.spatial_velocity, s.specific_internal_energy, s.pressure,
+      s.lorentz_factor, normal_covector, normal_vector, no_mesh_velocity,
+      no_normal_dot_mesh_velocity, eos);
+
+  hllc_bc.dg_package_data(
+      make_not_null(&out.hllc.tilde_d), make_not_null(&out.hllc.tilde_ye),
+      make_not_null(&out.hllc.tilde_tau), make_not_null(&out.hllc.tilde_s),
+      make_not_null(&out.hllc.tilde_b), make_not_null(&out.hllc.tilde_phi),
+      make_not_null(&out.hllc.nf_tilde_d), make_not_null(&out.hllc.nf_tilde_ye),
+      make_not_null(&out.hllc.nf_tilde_tau),
+      make_not_null(&out.hllc.nf_tilde_s), make_not_null(&out.hllc.nf_tilde_b),
+      make_not_null(&out.hllc.nf_tilde_phi),
+      make_not_null(&out.hllc.largest_outgoing),
+      make_not_null(&out.hllc.largest_ingoing),
+      make_not_null(&out.hllc.normal_dot_tilde_s),
+      make_not_null(&out.hllc.nf_normal_dot_tilde_s),
+      make_not_null(&out.hllc.advection_speed),
+      make_not_null(&out.hllc.pressure_flux_coefficient),
+      make_not_null(&out.hllc.normal), make_not_null(&out.hllc.lapse),
+      make_not_null(&out.hllc.shift_dot_normal), s.tilde_d, s.tilde_ye,
+      s.tilde_tau, s.tilde_s, s.tilde_b, s.tilde_phi, s.flux_tilde_d,
+      s.flux_tilde_ye, s.flux_tilde_tau, s.flux_tilde_s, s.flux_tilde_b,
+      s.flux_tilde_phi, lapse, shift, s.spatial_velocity_one_form,
+      spatial_metric, s.rest_mass_density, s.electron_fraction, s.temperature,
+      s.spatial_velocity, s.specific_internal_energy, s.pressure,
+      s.lorentz_factor, normal_covector, normal_vector, no_mesh_velocity,
+      no_normal_dot_mesh_velocity, eos);
+  return out;
+}
+
+Correction apply_hllc_boundary_terms(const HllcSidePackage& in,
+                                     const HllcSidePackage& out,
+                                     const dg::Formulation formulation) {
+  Correction result{get(in.tilde_d).size()};
+  grmhd::ValenciaDivClean::BoundaryCorrections::HllcGr::dg_boundary_terms(
+      make_not_null(&result.tilde_d), make_not_null(&result.tilde_ye),
+      make_not_null(&result.tilde_tau), make_not_null(&result.tilde_s),
+      make_not_null(&result.tilde_b), make_not_null(&result.tilde_phi),
+      in.tilde_d, in.tilde_ye, in.tilde_tau, in.tilde_s, in.tilde_b,
+      in.tilde_phi, in.nf_tilde_d, in.nf_tilde_ye, in.nf_tilde_tau,
+      in.nf_tilde_s, in.nf_tilde_b, in.nf_tilde_phi, in.largest_outgoing,
+      in.largest_ingoing, in.normal_dot_tilde_s, in.nf_normal_dot_tilde_s,
+      in.advection_speed, in.pressure_flux_coefficient, in.normal, in.lapse,
+      in.shift_dot_normal, out.tilde_d, out.tilde_ye, out.tilde_tau,
+      out.tilde_s, out.tilde_b, out.tilde_phi, out.nf_tilde_d, out.nf_tilde_ye,
+      out.nf_tilde_tau, out.nf_tilde_s, out.nf_tilde_b, out.nf_tilde_phi,
+      out.largest_outgoing, out.largest_ingoing, out.normal_dot_tilde_s,
+      out.nf_normal_dot_tilde_s, out.advection_speed,
+      out.pressure_flux_coefficient, out.normal, out.lapse,
+      out.shift_dot_normal, formulation);
+  return result;
+}
+
+void test_task_a_hllem_vs_hllc() {
+  const std::array<double, 6> v_star{{1.0, 0.2, 0.15, -0.1, 0.5, 0.3}};
+  const std::array<double, 6> dv{{0.5, -0.2, 0.3, 0.1, 0.4, -0.2}};
+
+  // The jump directions of handoff prediction 3, which must be exactly null.
+  // chi/kappa = eps/rho at this state, so the density contact at pressure
+  // equilibrium is dV = (1, 0, 0, 0, -eps/rho, 0) = (1, 0, 0, 0, -0.5, 0).
+  const double chi_over_kappa = v_star[4] / v_star[0];
+  const std::array<std::pair<std::string, std::array<double, 6>>, 4>
+      null_directions{{{"rho contact at pressure equilibrium",
+                        {{1.0, 0.0, 0.0, 0.0, -chi_over_kappa, 0.0}}},
+                       {"Y_e contact at pressure equilibrium",
+                        {{0.0, 0.0, 0.0, 0.0, 0.0, 1.0}}},
+                       {"shear v_y", {{0.0, 0.0, 1.0, 0.0, 0.0, 0.0}}},
+                       {"shear v_z", {{0.0, 0.0, 0.0, 1.0, 0.0, 0.0}}}}};
+
+  const auto eos_2d =
+      EquationsOfState::IdealFluid<true>{5.0 / 3.0}.promote_to_3d_eos();
+  const auto& eos = *eos_2d;
+
+  // RestoreMiddleBlock = true; the retired UsePhysicalZeta stays at its
+  // documented value. zeta == 0 for IdealFluid regardless.
+  const grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe hllem_bc{
+      1.0e-30, 1.0e-8, true, true};
+  const grmhd::ValenciaDivClean::BoundaryCorrections::HllcGr hllc_bc{1.0e-30,
+                                                                     1.0e-8};
+
+  // Evaluate the flux difference along `direction` at every eta at once.
+  // Returns, per point, {||F_HLLEM - F_HLLC||, ||F_HLLEM - F_HLL||, S_L, S_R}
+  // plus the six components of the difference and of each flux.
+  struct Row {
+    double diff_norm{};
+    double hllem_minus_hll_norm{};
+    double s_left{};
+    double s_right{};
+    std::array<double, 6> difference{};
+    std::array<double, 6> hllem{};
+    std::array<double, 6> hllc{};
+  };
+
+  const auto evaluate = [&](const std::array<double, 6>& direction,
+                            const std::vector<double>& etas) {
+    const size_t num_pts = etas.size();
+    std::vector<std::array<double, 6>> left(num_pts);
+    std::vector<std::array<double, 6>> right(num_pts);
+    for (size_t pt = 0; pt < num_pts; ++pt) {
+      for (size_t k = 0; k < 6; ++k) {
+        gsl::at(left[pt], k) =
+            gsl::at(v_star, k) - 0.5 * etas[pt] * gsl::at(direction, k);
+        gsl::at(right[pt], k) =
+            gsl::at(v_star, k) + 0.5 * etas[pt] * gsl::at(direction, k);
+      }
+    }
+
+    // Flat background: lapse 1, zero shift, gamma_ij = delta_ij.
+    const Scalar<DataVector> lapse{DataVector{num_pts, 1.0}};
+    const tnsr::I<DataVector, 3, Frame::Inertial> shift{num_pts, 0.0};
+    const Scalar<DataVector> sqrt_det_spatial_metric{DataVector{num_pts, 1.0}};
+    tnsr::ii<DataVector, 3, Frame::Inertial> spatial_metric{num_pts, 0.0};
+    tnsr::II<DataVector, 3, Frame::Inertial> inv_spatial_metric{num_pts, 0.0};
+    for (size_t i = 0; i < 3; ++i) {
+      spatial_metric.get(i, i) = 1.0;
+      inv_spatial_metric.get(i, i) = 1.0;
+    }
+
+    // Interior carries V_L with n = +x_hat, exterior V_R with n = -x_hat.
+    tnsr::i<DataVector, 3, Frame::Inertial> normal_int{num_pts, 0.0};
+    tnsr::I<DataVector, 3, Frame::Inertial> normal_vector_int{num_pts, 0.0};
+    tnsr::i<DataVector, 3, Frame::Inertial> normal_ext{num_pts, 0.0};
+    tnsr::I<DataVector, 3, Frame::Inertial> normal_vector_ext{num_pts, 0.0};
+    get<0>(normal_int) = 1.0;
+    get<0>(normal_vector_int) = 1.0;
+    get<0>(normal_ext) = -1.0;
+    get<0>(normal_vector_ext) = -1.0;
+
+    const auto state_left =
+        make_flat_side(left, eos, lapse, shift, sqrt_det_spatial_metric,
+                       spatial_metric, inv_spatial_metric);
+    const auto state_right =
+        make_flat_side(right, eos, lapse, shift, sqrt_det_spatial_metric,
+                       spatial_metric, inv_spatial_metric);
+
+    const auto in =
+        package_flat_side(hllem_bc, hllc_bc, state_left, eos, lapse, shift,
+                          spatial_metric, normal_int, normal_vector_int);
+    const auto out =
+        package_flat_side(hllem_bc, hllc_bc, state_right, eos, lapse, shift,
+                          spatial_metric, normal_ext, normal_vector_ext);
+
+    // Weak form: the returned correction IS the numerical flux.
+    const auto f_hllem = apply_boundary_terms(
+        hllem_bc, in.hllem, out.hllem, dg::Formulation::WeakInertial, eos);
+    const auto f_hllc = apply_hllc_boundary_terms(
+        in.hllc, out.hllc, dg::Formulation::WeakInertial);
+    // RestoreMiddleBlock = false is bit-identical to Hll, which is the
+    // cheapest in-class way to get the HLL flux at exactly these bounds.
+    const grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe plain_hll{
+        1.0e-30, 1.0e-8, false, true};
+    const auto f_hll = apply_boundary_terms(plain_hll, in.hllem, out.hllem,
+                                            dg::Formulation::WeakInertial, eos);
+
+    std::vector<Row> rows(num_pts);
+    for (size_t pt = 0; pt < num_pts; ++pt) {
+      double diff_squared = 0.0;
+      double hll_diff_squared = 0.0;
+      for (size_t k = 0; k < 6; ++k) {
+        const double d = f_hllem.slot(k, pt) - f_hllc.slot(k, pt);
+        const double dh = f_hllem.slot(k, pt) - f_hll.slot(k, pt);
+        gsl::at(rows[pt].difference, k) = d;
+        gsl::at(rows[pt].hllem, k) = f_hllem.slot(k, pt);
+        gsl::at(rows[pt].hllc, k) = f_hllc.slot(k, pt);
+        diff_squared += d * d;
+        hll_diff_squared += dh * dh;
+      }
+      rows[pt].diff_norm = std::sqrt(diff_squared);
+      rows[pt].hllem_minus_hll_norm = std::sqrt(hll_diff_squared);
+      // The bounds each solver actually used, reconstructed from the
+      // packaged per-side speeds exactly as Hllc.cpp combines them.
+      rows[pt].s_right = std::max({0.0, get(in.hllc.largest_outgoing)[pt],
+                                   -get(out.hllc.largest_ingoing)[pt]});
+      rows[pt].s_left = std::min({0.0, get(in.hllc.largest_ingoing)[pt],
+                                  -get(out.hllc.largest_outgoing)[pt]});
+    }
+    return rows;
+  };
+
+  const std::vector<double> etas{task_a_etas[0], task_a_etas[1], task_a_etas[2],
+                                 task_a_etas[3]};
+  const auto rows = evaluate(dv, etas);
+
+  INFO("Task A: HllemHydroYe vs HllcGr at the handoff state");
+
+  // --- the bounds, checked first: if these are wrong the state is not being
+  // --- built the way the derivation assumed and nothing below is meaningful.
+  {
+    INFO("predicted bounds at eta = 1e-2");
+    const Approx bounds_approx = Approx::custom().epsilon(1.0e-7);
+    CHECK(rows[1].s_left == bounds_approx(-0.38737594));
+    CHECK(rows[1].s_right == bounds_approx(0.67106011));
+  }
+
+  // --- prediction 1: the difference is second order in the jump, while each
+  // --- solver's difference from Hll is first order.
+  {
+    INFO("prediction 1: O(eta^2) convergence");
+    const std::array<double, 4> predicted_diff{
+        {1.0665e-3, 1.0564e-5, 1.0554e-7, 1.0553e-9}};
+    const std::array<double, 4> predicted_hll{
+        {1.3442e-2, 1.3125e-3, 1.3094e-4, 1.3090e-5}};
+    // Five-digit predictions, so a relative tolerance of 1e-4 is the
+    // precision of the prediction itself rather than a loose margin.
+    const Approx table_approx = Approx::custom().epsilon(1.0e-4);
+    for (size_t pt = 0; pt < 4; ++pt) {
+      CAPTURE(gsl::at(task_a_etas, pt));
+      CHECK(rows[pt].diff_norm == table_approx(gsl::at(predicted_diff, pt)));
+      CHECK(rows[pt].hllem_minus_hll_norm ==
+            table_approx(gsl::at(predicted_hll, pt)));
+    }
+    // The third column of the handoff table CONVERGING to a constant is the
+    // result -- not the constant holding at every eta. The predicted column
+    // is 1.0665e-1, 1.0564e-1, 1.0554e-1, 1.0553e-1, so the ratio is still
+    // drifting at eta = 1e-1 and has settled by eta = 1e-3. Assert both the
+    // listed values and the monotone approach to the limit.
+    const std::array<double, 4> predicted_scaled{
+        {1.0665e-1, 1.0564e-1, 1.0554e-1, 1.0553e-1}};
+    std::array<double, 4> scaled{};
+    for (size_t pt = 0; pt < 4; ++pt) {
+      gsl::at(scaled, pt) = rows[pt].diff_norm / (gsl::at(task_a_etas, pt) *
+                                                  gsl::at(task_a_etas, pt));
+      CAPTURE(gsl::at(scaled, pt));
+      CHECK(gsl::at(scaled, pt) == table_approx(gsl::at(predicted_scaled, pt)));
+    }
+    // Monotone convergence, and settled to better than 1e-3 relative between
+    // the last two rows: that is what "the difference is O(eta^2)" means.
+    for (size_t pt = 1; pt < 4; ++pt) {
+      CHECK(std::abs(gsl::at(scaled, pt) - gsl::at(scaled, 3)) <=
+            std::abs(gsl::at(scaled, pt - 1) - gsl::at(scaled, 3)));
+    }
+    CHECK(std::abs(scaled[3] - scaled[2]) / scaled[3] < 1.0e-3);
+  }
+
+  // --- prediction 2: the six components at eta = 1e-2.
+  {
+    INFO("prediction 2: component breakdown at eta = 1e-2");
+    const std::array<double, 6> predicted_difference{{-2.85070e-6, -2.19849e-6,
+                                                      -7.76438e-6, -7.17845e-7,
+                                                      -6.03105e-6, 1.21128e-6}};
+    const std::array<double, 6> predicted_hllem{{0.20612478, 0.41204147,
+                                                 0.05815825, -0.03936560,
+                                                 0.18598115, 0.06204563}};
+    const std::array<double, 6> predicted_hllc{{0.20612763, 0.41204366,
+                                                0.05816602, -0.03936488,
+                                                0.18598718, 0.06204442}};
+    const Approx component_approx = Approx::custom().epsilon(1.0e-4);
+    const Approx flux_approx = Approx::custom().epsilon(1.0e-7);
+    for (size_t k = 0; k < 6; ++k) {
+      CAPTURE(k);
+      CHECK(gsl::at(rows[1].difference, k) ==
+            component_approx(gsl::at(predicted_difference, k)));
+      CHECK(gsl::at(rows[1].hllem, k) ==
+            flux_approx(gsl::at(predicted_hllem, k)));
+      CHECK(gsl::at(rows[1].hllc, k) ==
+            flux_approx(gsl::at(predicted_hllc, k)));
+    }
+  }
+
+  // --- prediction 3: four null directions. These are the sharpest part of
+  // --- the prediction: they are structural claims, not fitted numbers.
+  {
+    INFO("prediction 3: contact and shear directions are null");
+    const std::vector<double> null_etas{1.0e-3};
+    for (const auto& [name, direction] : null_directions) {
+      INFO(name);
+      const auto null_rows = evaluate(direction, null_etas);
+      CAPTURE(null_rows[0].diff_norm);
+      // The contacts are exactly zero and the shears sit on a round-off
+      // floor a few times 1e-11 (reproduced independently in numpy). The
+      // signal this is distinguishing itself from is the 1.06e-7 that a
+      // generic direction gives at this eta -- four orders of magnitude up.
+      CHECK(null_rows[0].diff_norm < 1.0e-9);
+    }
+  }
+}
+
 struct ConvertPolytropic {
   using unpacked_container = bool;
   using packed_container = EquationsOfState::EquationOfState<true, 3>;
@@ -727,6 +1300,7 @@ SPECTRE_TEST_CASE(
   test_projector_algebra();
   test_gr_stationary_contact();
   test_lapse_scaling();
+  test_task_a_hllem_vs_hllc();
 
   pypp::SetupLocalPythonEnvironment local_python_env{
       "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections"};
