@@ -159,16 +159,14 @@ double HllemHydroYe::dg_package_data(
       auto& v_dot_normal_times_one_minus_cs2 =
           get<::Tags::TempScalar<6>>(temp_buffer);
 
-      const Scalar<DataVector> specific_internal_energy =
-          equation_of_state
-              .specific_internal_energy_from_density_and_temperature(
-                  rest_mass_density, temperature, electron_fraction);
-      const Scalar<DataVector> pressure =
-          equation_of_state.pressure_from_density_and_energy(
-              rest_mass_density, specific_internal_energy, electron_fraction);
-      const Scalar<DataVector> specific_enthalpy =
-          hydro::relativistic_specific_enthalpy(
-              rest_mass_density, specific_internal_energy, pressure);
+      // Only the sound speed enters the characteristic speeds below. Earlier
+      // revisions also evaluated the specific internal energy, the pressure
+      // and the specific enthalpy here, but nothing ever read them: those
+      // locals SHADOWED the same-named function parameters, and it is the
+      // parameters that `*packaged_pressure` and
+      // `*packaged_specific_internal_energy` are assigned from below. On a
+      // tabulated 3D EOS the chain dominated this function's cost; Hll.cpp
+      // deleted the same three declarations in 136fc413c.
       const Scalar<DataVector> sound_speed_squared{
           clamp(get(equation_of_state
                         .sound_speed_squared_from_density_and_temperature(

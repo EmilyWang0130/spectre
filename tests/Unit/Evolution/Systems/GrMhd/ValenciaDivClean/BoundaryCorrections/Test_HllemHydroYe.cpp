@@ -1267,6 +1267,239 @@ void test_task_a_hllem_vs_hllc() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// U_L == U_R: the weak-form numerical flux must BE the physical flux.
+//
+// None of the four tests above covers a zero jump, and the invariant is
+// stronger than it looks. From the `hll` lambda in HllemHydroYe.cpp, the
+// weak form is
+//
+//   F = [l_max nf_int + l_min nf_ext + l_max l_min (u_ext - u_int)] / dl ,
+//   dl = l_max - l_min  (floored at 1e-30) .
+//
+// With the two sides built from the SAME state, `u_ext - u_int` is exactly
+// 0.0 and `nf_ext = -nf_int` exactly (the exterior normal is the negated
+// interior one), so
+//
+//   F = (l_max - l_min) nf_int / dl = nf_int
+//
+// for ANY bounds with l_max > 0 > l_min. The middle-block anti-diffusion
+// adds coeff * P_mid * du with du = 0, so it contributes nothing by algebra.
+// The identity is therefore insensitive to the bound RECIPE and sensitive
+// only to the bounds DEGENERATING: if `dl` ever collapses into the 1e-30
+// floor the weak flux returns (l_max - l_min) nf / 1e-30 instead of nf.
+//
+// This is why the assertion is "weak flux == nf_int" and NOT
+// "correction == 0". The strong form is
+// [l_min (nf_int + nf_ext) + l_max l_min (u_ext - u_int)] / dl; with
+// nf_ext = -nf_int and du = 0 BOTH numerator terms are identically zero, so
+// the strong-form correction is 0 whatever `dl` does -- including a `dl`
+// clamped to 1e-30 with the bounds collapsed to ~1e-161. A
+// correction-is-zero test passes while the flux has underflowed.
+//
+// HONEST SCOPE. This is a useful invariant, NOT a regression test for the
+// 2026-09-15 underflow. That defect was a composite Blaze expression passed
+// into `sqrt(clamp(...))` while building the averaged-state acoustic
+// discriminant; it was fixed in 0d37021e3 and the whole averaged-state
+// bounds block it lived in was then deleted by faaaba1de ("HLL bounds from
+// the input states, not the average"), so the code that carried it no
+// longer exists and cannot be re-broken here.
+//
+// What it DOES guard, demonstrated by injecting each failure and watching
+// this test go red: the `dl < 1e-30` floor in the `hll` lambda firing on a
+// healthy interface (scaling both bounds by 1e-160 fails all 3780 weak-form
+// checks and zero of the correction-is-zero ones), and a sign regression in
+// the packaged normal flux.
+//
+// What it does NOT guard, also measured rather than assumed: anything that
+// perturbs the WAVE SPEEDS while leaving them finite and ordered. Injecting
+// a 63% error into `sound_speed_squared` right after its clamp leaves this
+// test completely green -- 0 of its 16395 assertions fail -- because with
+// du = 0 the weak form returns nf_int for ANY bounds with l_max > 0 > l_min.
+// So this does not cover the class's `clamp` sites or the averaged-state
+// block, and must not be cited as if it did. The guard that demonstrably
+// catches the original defect remains the 30-step uniform driver in
+// spectre_runs/shocktube/togashi_uniform_onset/.
+//
+// SIMD SIZING. This build compiles with -march=native -mno-avx512f, so
+// blaze::SIMDTrait<double>::size == 4 (measured against the build's own
+// blaze 3.8 / xsimd 12.1.1 headers), and BLAZE_USE_PADDING=0 leaves a
+// genuine scalar tail. `num_points` is therefore swept over {41, 42, 43}:
+// ODD sizes have a nonzero remainder at every power-of-two width (2, 4, 8,
+// 16), so the test keeps its tail on an AVX-512 or SSE build too, and the
+// three values sweep every nonzero remainder at width 4. 41 = 32 + 8 + 1
+// also exercises all three of Blaze's tiers (4-way-unrolled block, single
+// SIMD step, scalar remainder) even at width 8. The existing tests use 3-5
+// points, which at width 4 is epilogue only.
+
+// Mirror of Correction::slot for a PACKAGED normal flux: same
+// [D, S_x, S_y, S_z, tau, D Y_e] ordering.
+double nf_slot(const SidePackage& p, const size_t n, const size_t pt) {
+  switch (n) {
+    case 0:
+      return get(p.nf_tilde_d)[pt];
+    case 1:
+    case 2:
+    case 3:
+      return p.nf_tilde_s.get(n - 1)[pt];
+    case 4:
+      return get(p.nf_tilde_tau)[pt];
+    default:
+      return get(p.nf_tilde_ye)[pt];
+  }
+}
+
+void test_zero_jump_flux_identity() {
+  const auto eos_2d =
+      EquationsOfState::IdealFluid<true>{5.0 / 3.0}.promote_to_3d_eos();
+  const auto& eos = *eos_2d;
+  const grmhd::ValenciaDivClean::BoundaryCorrections::HllcGr hllc_bc{1.0e-30,
+                                                                     1.0e-8};
+
+  struct Arm {
+    std::string name;
+    bool restore_middle_block{};
+    // 1.0 keeps rho above LightSpeedDensityCutoff (hydro branch, packaged
+    // cs^2 > 0); 1.0e-10 puts it below, so cs^2 stays at its 0 sentinel and
+    // dg_boundary_terms falls back to the light-speed bounds.
+    double rho_scale{};
+    bool hydro_branch_expected{};
+    // A deterministic point-varying state is the more discriminating one for
+    // a stale/misaligned SIMD read, because a value borrowed from a
+    // neighbouring point no longer coincides with the right answer. The
+    // exactly uniform arm is kept because that is the configuration the
+    // 2026-09-15 defect was observed in.
+    bool point_varying{};
+    double min_flux_magnitude{};
+  };
+  const std::array<Arm, 5> arms{
+      {{"hydro, RestoreMiddleBlock = true, varying", true, 1.0, true, true,
+        1.0e-3},
+       {"hydro, RestoreMiddleBlock = true, uniform", true, 1.0, true, false,
+        1.0e-3},
+       {"hydro, RestoreMiddleBlock = false (Hll-equivalent), varying", false,
+        1.0, true, true, 1.0e-3},
+       {"below atmosphere, light-speed bounds, varying", true, 1.0e-10, false,
+        true, 1.0e-12},
+       {"below atmosphere, light-speed bounds, uniform", true, 1.0e-10, false,
+        false, 1.0e-12}}};
+
+  const std::array<size_t, 3> point_counts{{41, 42, 43}};
+
+  for (const size_t num_pts : point_counts) {
+    for (const Arm& arm : arms) {
+      CAPTURE(num_pts);
+      CAPTURE(arm.name);
+      const grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe hllem_bc{
+          1.0e-30, 1.0e-8, arm.restore_middle_block, true};
+
+      std::vector<std::array<double, 6>> prims(num_pts);
+      for (size_t pt = 0; pt < num_pts; ++pt) {
+        const double i = arm.point_varying ? static_cast<double>(pt) : 0.0;
+        prims[pt] = {{arm.rho_scale * (1.0 + 0.01 * i), 0.2 + 0.001 * i, 0.15,
+                      -0.1, 0.5 + 0.002 * i, 0.30 + 0.001 * i}};
+      }
+
+      // Flat background: lapse 1, zero shift, gamma_ij = delta_ij.
+      const Scalar<DataVector> lapse{DataVector{num_pts, 1.0}};
+      const tnsr::I<DataVector, 3, Frame::Inertial> shift{num_pts, 0.0};
+      const Scalar<DataVector> sqrt_det_spatial_metric{
+          DataVector{num_pts, 1.0}};
+      tnsr::ii<DataVector, 3, Frame::Inertial> spatial_metric{num_pts, 0.0};
+      tnsr::II<DataVector, 3, Frame::Inertial> inv_spatial_metric{num_pts, 0.0};
+      for (size_t i = 0; i < 3; ++i) {
+        spatial_metric.get(i, i) = 1.0;
+        inv_spatial_metric.get(i, i) = 1.0;
+      }
+
+      // Interior face carries n = +x_hat, exterior n = -x_hat.
+      tnsr::i<DataVector, 3, Frame::Inertial> normal_int{num_pts, 0.0};
+      tnsr::I<DataVector, 3, Frame::Inertial> normal_vector_int{num_pts, 0.0};
+      tnsr::i<DataVector, 3, Frame::Inertial> normal_ext{num_pts, 0.0};
+      tnsr::I<DataVector, 3, Frame::Inertial> normal_vector_ext{num_pts, 0.0};
+      get<0>(normal_int) = 1.0;
+      get<0>(normal_vector_int) = 1.0;
+      get<0>(normal_ext) = -1.0;
+      get<0>(normal_vector_ext) = -1.0;
+
+      // ONE state for both sides -- that is what makes U_L == U_R bitwise.
+      const auto s =
+          make_flat_side(prims, eos, lapse, shift, sqrt_det_spatial_metric,
+                         spatial_metric, inv_spatial_metric);
+      const auto in =
+          package_flat_side(hllem_bc, hllc_bc, s, eos, lapse, shift,
+                            spatial_metric, normal_int, normal_vector_int);
+      const auto out =
+          package_flat_side(hllem_bc, hllc_bc, s, eos, lapse, shift,
+                            spatial_metric, normal_ext, normal_vector_ext);
+
+      // Which branch of dg_package_data / dg_boundary_terms we actually
+      // landed in. Without this the arm could silently stop testing the
+      // path it is named for.
+      for (size_t pt = 0; pt < num_pts; ++pt) {
+        if (arm.hydro_branch_expected) {
+          CHECK(get(in.hllem.sound_speed_squared)[pt] > 0.0);
+          CHECK(get(out.hllem.sound_speed_squared)[pt] > 0.0);
+        } else {
+          CHECK(get(in.hllem.sound_speed_squared)[pt] == 0.0);
+          CHECK(get(out.hllem.sound_speed_squared)[pt] == 0.0);
+        }
+        // The packaged primitives are the INPUT primitives, not an EOS
+        // re-derivation. This pins the premise of the dead-chain deletion in
+        // dg_package_data: the locals that used to be evaluated there
+        // shadowed these parameters and were never read. No pypp arm reaches
+        // the hydro branch, so this is the only place it is asserted.
+        CHECK(get(in.hllem.pressure)[pt] == get(s.pressure)[pt]);
+        CHECK(get(in.hllem.specific_internal_energy)[pt] ==
+              get(s.specific_internal_energy)[pt]);
+      }
+
+      const auto weak = apply_boundary_terms(
+          hllem_bc, in.hllem, out.hllem, dg::Formulation::WeakInertial, eos);
+      const auto strong = apply_boundary_terms(
+          hllem_bc, in.hllem, out.hllem, dg::Formulation::StrongInertial, eos);
+
+      double max_flux_magnitude = 0.0;
+      for (size_t pt = 0; pt < num_pts; ++pt) {
+        CAPTURE(pt);
+        double scale_pt = 0.0;
+        for (size_t k = 0; k < 6; ++k) {
+          scale_pt = std::max(scale_pt, std::abs(nf_slot(in.hllem, k, pt)));
+        }
+        max_flux_magnitude = std::max(max_flux_magnitude, scale_pt);
+        // nf_int is the EXACT reference here (it is the physical flux of the
+        // one state, computed by production ComputeFluxes), not a second
+        // approximate solver, so a relative tolerance is legitimate. The
+        // margin only covers a component that happens to be ~0. Either way
+        // this is ~12 orders of magnitude above the ~1e-131 that a collapsed
+        // `dl` would produce.
+        const Approx point_approx =
+            Approx::custom().epsilon(1.0e-13).margin(1.0e-14 * scale_pt);
+        for (size_t k = 0; k < 6; ++k) {
+          CAPTURE(k);
+          const double nf_int = nf_slot(in.hllem, k, pt);
+          CHECK(weak.slot(k, pt) == point_approx(nf_int));
+          CHECK(strong.slot(k, pt) == point_approx(0.0));
+          // Free invariant that catches a normal-sign regression in
+          // dg_package_data, and is the other half of the identity above.
+          CHECK(nf_slot(out.hllem, k, pt) == point_approx(-nf_int));
+        }
+        // B and phi are zero throughout, but they go through the same `hll`
+        // lambda, so they get the same identity.
+        CHECK(get(weak.tilde_phi)[pt] ==
+              point_approx(get(in.hllem.nf_tilde_phi)[pt]));
+        for (size_t i = 0; i < 3; ++i) {
+          CHECK(weak.tilde_b.get(i)[pt] ==
+                point_approx(in.hllem.nf_tilde_b.get(i)[pt]));
+        }
+      }
+      // Guard against the whole arm passing on an all-zero (or underflowed)
+      // flux -- without this, `nf == 0` makes every CHECK above vacuous.
+      CHECK(max_flux_magnitude > arm.min_flux_magnitude);
+    }
+  }
+}
+
 struct ConvertPolytropic {
   using unpacked_container = bool;
   using packed_container = EquationsOfState::EquationOfState<true, 3>;
@@ -1301,6 +1534,7 @@ SPECTRE_TEST_CASE(
   test_gr_stationary_contact();
   test_lapse_scaling();
   test_task_a_hllem_vs_hllc();
+  test_zero_jump_flux_identity();
 
   pypp::SetupLocalPythonEnvironment local_python_env{
       "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections"};
