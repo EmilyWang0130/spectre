@@ -853,11 +853,10 @@ void characteristic_speeds_mhd(
     // on states we cannot guess. Set SPECTRE_QUARTIC_DIAG=1 to dump every
     // failing point and CONTINUE (so one run yields many samples); unset, the
     // ASSERT below behaves exactly as before.
-    const bool slow_roots_bad =
-        not (std::abs(evaluate_quartic(slow_minus[point], point)) <
-                 10.0 * tolerance and
-             std::abs(evaluate_quartic(slow_plus[point], point)) <
-                 10.0 * tolerance);
+    const bool slow_roots_bad = not(
+        std::abs(evaluate_quartic(slow_minus[point], point)) <
+            10.0 * tolerance and
+        std::abs(evaluate_quartic(slow_plus[point], point)) < 10.0 * tolerance);
     static const bool quartic_diag =
         std::getenv("SPECTRE_QUARTIC_DIAG") != nullptr;
     if (slow_roots_bad and quartic_diag) {
@@ -872,12 +871,10 @@ void characteristic_speeds_mhd(
               get(lorentz_factor)[point], get(normal_magnetic_field)[point],
               get(magnetic_field_dot_spatial_velocity)[point],
               get(magnetic_field_squared)[point],
-              get(comoving_magnetic_field_squared)[point],
-              c0[point], c1[point], c2[point], c3[point],
-              fast_minus[point], fast_plus[point],
-              alfven_minus[point], alfven_plus[point],
-              slow_minus[point], slow_plus[point],
-              evaluate_quartic(slow_minus[point], point),
+              get(comoving_magnetic_field_squared)[point], c0[point], c1[point],
+              c2[point], c3[point], fast_minus[point], fast_plus[point],
+              alfven_minus[point], alfven_plus[point], slow_minus[point],
+              slow_plus[point], evaluate_quartic(slow_minus[point], point),
               evaluate_quartic(slow_plus[point], point));
       continue;  // keep going so a single run samples the whole failure set
     }
@@ -1447,8 +1444,7 @@ void characteristic_eigenvectors_hydro(
     const tnsr::i<DataVector, 3>& unit_normal,
     const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
     const EquationsOfState::EquationOfState<true, ThermodynamicDim>&
-        equation_of_state,
-    const bool use_physical_zeta) {
+        equation_of_state) {
   const size_t num_grid_points = get(lorentz_factor).size();
   // Zero the outputs (only a subset of the 6x6 entries are nonzero).
   for (size_t wave = 0; wave < 6; ++wave) {
@@ -1615,12 +1611,6 @@ void characteristic_eigenvectors_hydro(
   // Diagnostic override: force the composition coupling off. Placed after
   // every branch that assigns zeta (lines ~1551, ~1584, ~1611) and before
   // zeta_max_abs is taken, so the existing zeta == 0 code paths below pick
-  // it up unchanged. Not a physically valid setting for a tabulated 3D EoS
-  // -- it exists so a run can be compared against itself with the
-  // zeta-driven eigenspace rotation removed.
-  if (not use_physical_zeta) {
-    get(zeta) = 0.0;
-  }
 
   // This is for the case for zeta = 0.
   const double zeta_max_abs = max(abs(get(zeta)));
@@ -3125,8 +3115,7 @@ GENERATE_INSTANTIATIONS(FUNCTION_INSTANTIATION, (1, 2, 3))
       const tnsr::i<DataVector, 3>& unit_normal,                               \
       const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,          \
       const EquationsOfState::EquationOfState<true, GET_DIM(data)>&            \
-          equation_of_state,                                                   \
-      bool use_physical_zeta);                                                 \
+          equation_of_state);                                                  \
   template void flux_jacobian_hydro<GET_DIM(data)>(                            \
       const gsl::not_null<tnsr::iJ<DataVector, 6>*> characteristic_matrix,     \
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity,         \

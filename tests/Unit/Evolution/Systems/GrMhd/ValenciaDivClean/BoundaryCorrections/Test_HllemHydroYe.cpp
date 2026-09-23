@@ -518,9 +518,9 @@ void test_gr_stationary_contact() {
   };
 
   const grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe hllem{
-      1.0e-30, 1.0e-8, true, true};
+      1.0e-30, 1.0e-8, true};
   const grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe plain_hll{
-      1.0e-30, 1.0e-8, false, true};
+      1.0e-30, 1.0e-8, false};
 
   const auto point_approx = [&projection_conditioning](const size_t pt) {
     return Approx::custom()
@@ -678,7 +678,7 @@ void test_lapse_scaling() {
   };
 
   const grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe hllem{
-      1.0e-30, 1.0e-8, true, true};
+      1.0e-30, 1.0e-8, true};
   constexpr double scale = 0.6;
   const auto reference =
       apply_boundary_terms(hllem, build(1.0, false), build(1.0, true),
@@ -1063,10 +1063,9 @@ void test_task_a_hllem_vs_hllc() {
       EquationsOfState::IdealFluid<true>{5.0 / 3.0}.promote_to_3d_eos();
   const auto& eos = *eos_2d;
 
-  // RestoreMiddleBlock = true; the retired UsePhysicalZeta stays at its
-  // documented value. zeta == 0 for IdealFluid regardless.
+  // RestoreMiddleBlock = true. zeta == 0 for IdealFluid regardless.
   const grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe hllem_bc{
-      1.0e-30, 1.0e-8, true, true};
+      1.0e-30, 1.0e-8, true};
   const grmhd::ValenciaDivClean::BoundaryCorrections::HllcGr hllc_bc{1.0e-30,
                                                                      1.0e-8};
 
@@ -1140,7 +1139,7 @@ void test_task_a_hllem_vs_hllc() {
     // RestoreMiddleBlock = false is bit-identical to Hll, which is the
     // cheapest in-class way to get the HLL flux at exactly these bounds.
     const grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe plain_hll{
-        1.0e-30, 1.0e-8, false, true};
+        1.0e-30, 1.0e-8, false};
     const auto f_hll = apply_boundary_terms(plain_hll, in.hllem, out.hllem,
                                             dg::Formulation::WeakInertial, eos);
 
@@ -1391,7 +1390,7 @@ void test_zero_jump_flux_identity() {
       CAPTURE(num_pts);
       CAPTURE(arm.name);
       const grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe hllem_bc{
-          1.0e-30, 1.0e-8, arm.restore_middle_block, true};
+          1.0e-30, 1.0e-8, arm.restore_middle_block};
 
       std::vector<std::array<double, 6>> prims(num_pts);
       for (size_t pt = 0; pt < num_pts; ++pt) {
@@ -1551,8 +1550,8 @@ SPECTRE_TEST_CASE(
 
   TestHelpers::evolution::dg::test_boundary_correction_conservation<system>(
       make_not_null(&gen),
-      grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{
-          1.0e-30, 1.0e-8, false, true},
+      grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{1.0e-30,
+                                                                 1.0e-8, false},
       Mesh<2>{5, Spectral::Basis::Legendre, Spectral::Quadrature::Gauss},
       volume_data, ranges);
 
@@ -1560,8 +1559,8 @@ SPECTRE_TEST_CASE(
       system, tmpl::list<ConvertPolytropic>>(
       make_not_null(&gen), "HllemHydroYe", "dg_package_data",
       "dg_boundary_terms",
-      grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{
-          1.0e-30, 1.0e-8, false, true},
+      grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{1.0e-30,
+                                                                 1.0e-8, false},
       Mesh<2>{5, Spectral::Basis::Legendre, Spectral::Quadrature::Gauss},
       volume_data, ranges);
 
@@ -1576,8 +1575,8 @@ SPECTRE_TEST_CASE(
       system, tmpl::list<ConvertPolytropic>>(
       make_not_null(&gen), "HllemHydroYe", "dg_package_data",
       "dg_boundary_terms",
-      grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{
-          1.0e-30, 1.0e-8, false, true},
+      grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{1.0e-30,
+                                                                 1.0e-8, false},
       Mesh<2>{5, Spectral::Basis::Legendre, Spectral::Quadrature::Gauss},
       volume_data, ranges_hydro);
 
@@ -1601,8 +1600,8 @@ SPECTRE_TEST_CASE(
       system, tmpl::list<ConvertPolytropic>>(
       make_not_null(&gen), "HllemHydroYe", "dg_package_data",
       "dg_boundary_terms",
-      grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{
-          1.0e-30, 1.0e-8, false, true},
+      grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{1.0e-30,
+                                                                 1.0e-8, false},
       Mesh<2>{5, Spectral::Basis::Legendre, Spectral::Quadrature::Gauss},
       volume_data, ranges_atmo);
 
@@ -1612,8 +1611,7 @@ SPECTRE_TEST_CASE(
       "HllemHydroYe:\n"
       "  MagneticFieldMagnitudeForHydro: 1.0e-30\n"
       "  LightSpeedDensityCutoff: 1.0e-8\n"
-      "  RestoreMiddleBlock: False\n"
-      "  UsePhysicalZeta: True\n");
+      "  RestoreMiddleBlock: False\n");
 
   TestHelpers::evolution::dg::test_boundary_correction_with_python<
       system, tmpl::list<ConvertPolytropic>>(
@@ -1626,16 +1624,16 @@ SPECTRE_TEST_CASE(
       volume_data, ranges);
 
   CHECK_FALSE(grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{
-                  1.0e-30, 1.0e-8, false, true} !=
+                  1.0e-30, 1.0e-8, false} !=
               grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{
-                  1.0e-30, 1.0e-8, false, true});
+                  1.0e-30, 1.0e-8, false});
   CHECK(grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{
-            1.0e-30, 1.0e-8, false, true} !=
+            1.0e-30, 1.0e-8, false} !=
         grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{
-            2.0e-30, 1.0e-8, false, true});
+            2.0e-30, 1.0e-8, false});
   CHECK(grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{
-            1.0e-30, 1.0e-8, false, true} !=
+            1.0e-30, 1.0e-8, false} !=
         grmhd::ValenciaDivClean::BoundaryCorrections::HllemHydroYe{
-            1.0e-30, 2.0e-8, false, true});
+            1.0e-30, 2.0e-8, false});
 }
 }  // namespace

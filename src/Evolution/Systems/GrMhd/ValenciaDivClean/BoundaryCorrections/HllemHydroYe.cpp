@@ -29,12 +29,10 @@
 namespace grmhd::ValenciaDivClean::BoundaryCorrections {
 HllemHydroYe::HllemHydroYe(const double magnetic_field_magnitude_for_hydro,
                            const double light_speed_density_cutoff,
-                           const bool restore_middle_block,
-                           const bool use_physical_zeta)
+                           const bool restore_middle_block)
     : magnetic_field_magnitude_for_hydro_(magnetic_field_magnitude_for_hydro),
       light_speed_density_cutoff_(light_speed_density_cutoff),
-      restore_middle_block_(restore_middle_block),
-      use_physical_zeta_(use_physical_zeta) {}
+      restore_middle_block_(restore_middle_block) {}
 
 HllemHydroYe::HllemHydroYe(CkMigrateMessage* /*unused*/) {}
 
@@ -47,7 +45,6 @@ void HllemHydroYe::pup(PUP::er& p) {
   p | magnetic_field_magnitude_for_hydro_;
   p | light_speed_density_cutoff_;
   p | restore_middle_block_;
-  p | use_physical_zeta_;
 }
 
 double HllemHydroYe::dg_package_data(
@@ -484,8 +481,7 @@ void HllemHydroYe::dg_boundary_terms(
         hydro::relativistic_specific_enthalpy(rho_avg, eps_avg, p_avg_eos);
     characteristic_eigenvectors_hydro(
         make_not_null(&hydro_right), make_not_null(&hydro_left), v_avg, rho_avg,
-        eps_avg, h_avg_eos, ye_avg, w_avg, n_avg, gamma_avg, equation_of_state,
-        use_physical_zeta_);
+        eps_avg, h_avg_eos, ye_avg, w_avg, n_avg, gamma_avg, equation_of_state);
     // Eulerian-frame degenerate eigenvalue nu_mid = v . n (=
     // HydroSpeed::NormalDotVelocity), mapped to the coordinate frame. Using
     // the Eulerian value here instead would put the middle wave at the wrong
@@ -646,8 +642,7 @@ bool operator==(const HllemHydroYe& lhs, const HllemHydroYe& rhs) {
   return lhs.magnetic_field_magnitude_for_hydro_ ==
              rhs.magnetic_field_magnitude_for_hydro_ and
          lhs.light_speed_density_cutoff_ == rhs.light_speed_density_cutoff_ and
-         lhs.restore_middle_block_ == rhs.restore_middle_block_ and
-         lhs.use_physical_zeta_ == rhs.use_physical_zeta_;
+         lhs.restore_middle_block_ == rhs.restore_middle_block_;
 }
 bool operator!=(const HllemHydroYe& lhs, const HllemHydroYe& rhs) {
   return not(lhs == rhs);

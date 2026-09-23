@@ -253,16 +253,6 @@ tnsr::i<DataVector, 3> characteristic_speeds_hydro(
  *
  * Used by the Marquina boundary correction.
  *
- * \deprecated `use_physical_zeta = false` is RETIRED (2026-09-16); leave it
- * at the default. It forces \f$\zeta = (\partial p / \partial
- * Y_e)_{\rho,\epsilon}\f$ to zero before the eigenvectors are assembled, but
- * the EoS still supplies \f$\zeta \neq 0\f$, so the returned basis is not an
- * eigenbasis of any flux Jacobian — `Test_Characteristics.cpp` says as much
- * and deliberately skips the \f$A R = \lambda R\f$ check for it. Because the
- * override fires before `zeta_max_abs` is taken, it also switches R3's
- * coupling off and R4/L3/L4 to their degenerate forms, so it is a blunter
- * operation than "set zeta to zero". Its only defensible use is bug
- * localisation, where nothing is claimed to be physical. Defaults to true.
  */
 template <size_t ThermodynamicDim>
 void characteristic_eigenvectors_hydro(
@@ -277,8 +267,7 @@ void characteristic_eigenvectors_hydro(
     const tnsr::i<DataVector, 3>& unit_normal,
     const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
     const EquationsOfState::EquationOfState<true, ThermodynamicDim>&
-        equation_of_state,
-    bool use_physical_zeta = true);
+        equation_of_state);
 /// @}
 
 /// @{

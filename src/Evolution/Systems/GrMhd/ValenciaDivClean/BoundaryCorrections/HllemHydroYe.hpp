@@ -251,41 +251,8 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
         "contact."};
     using type = bool;
   };
-  /// \deprecated RETIRED 2026-09-16 — leave at the default `True`.
-  ///
-  /// Setting this to `False` does not produce a physical limit: it zeroes
-  /// zeta while the EoS still supplies zeta != 0, so the resulting vectors
-  /// are not an eigenbasis of any flux Jacobian. The comparison it was built
-  /// for (P_mid(zeta) vs P_mid(0), design.md 13.5) is not a correctness test
-  /// either — both sides come from the same code and neither is ground truth.
-  ///
-  /// It is also a blunter operation than its name suggests. The override
-  /// fires *before* `zeta_max_abs` in `characteristic_eigenvectors_hydro`
-  /// (`Characteristics.cpp:1621`), so it additionally flips R3's coupling off
-  /// and R4/L3/L4 to their degenerate forms. That makes it NOT equivalent to
-  /// the "fake zeta" patch in `scripts/projector_diagnostic.py`, which
-  /// touches only L_pm. Harmless for `P_mid` itself, since R_pm/L_pm carry no
-  /// such branch.
-  ///
-  /// The option is kept, rather than deleted, only so that the 29 archived
-  /// run yamls that set it still parse — SpECTRE hard-errors on unknown
-  /// options, and editing a completed run's yaml would misrepresent what ran.
-  /// It has been removed from `spectre_runs/_templates/`. Its one legitimate
-  /// use is bug localisation ("does this failure depend on zeta at all?"),
-  /// where nothing is claimed to be physical.
-  struct UsePhysicalZeta {
-    static constexpr Options::String help = {
-        "RETIRED -- leave at True. False does not give a physical zeta = 0 "
-        "limit (the EoS still supplies zeta != 0, so the basis is not an "
-        "eigenbasis of any flux Jacobian) and it also degenerates R3/R4/L3/L4, "
-        "so it is not a clean zeta switch. Kept only so archived yamls parse. "
-        "Diagnostic use only. Has no effect while RestoreMiddleBlock is "
-        "false."};
-    using type = bool;
-  };
-  using options =
-      tmpl::list<MagneticFieldMagnitudeForHydro, LightSpeedDensityCutoff,
-                 RestoreMiddleBlock, UsePhysicalZeta>;
+  using options = tmpl::list<MagneticFieldMagnitudeForHydro,
+                             LightSpeedDensityCutoff, RestoreMiddleBlock>;
   static constexpr Options::String help = {
       "HLL + middle-block anti-diffusion for the hydro+Y_e subsystem. Works "
       "on curved backgrounds. Outer HLL bounds are the per-side (Davis) "
@@ -300,8 +267,7 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
   ~HllemHydroYe() override = default;
 
   HllemHydroYe(double magnetic_field_magnitude_for_hydro,
-               double light_speed_density_cutoff, bool restore_middle_block,
-               bool use_physical_zeta);
+               double light_speed_density_cutoff, bool restore_middle_block);
 
   /// \cond
   explicit HllemHydroYe(CkMigrateMessage* /*unused*/);
@@ -419,8 +385,8 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
       const EquationsOfState::EquationOfState<true, 3>& equation_of_state)
       const;
 
-  // Non-static (unlike Hll) so the body can consult restore_middle_block_
-  // and use_physical_zeta_.
+  // Non-static (unlike Hll) so the body can consult
+  // restore_middle_block_.
   void dg_boundary_terms(
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
@@ -498,7 +464,6 @@ class HllemHydroYe final : public evolution::BoundaryCorrection {
   double light_speed_density_cutoff_{
       std::numeric_limits<double>::signaling_NaN()};
   bool restore_middle_block_{false};
-  bool use_physical_zeta_{true};
 };
 bool operator!=(const HllemHydroYe& lhs, const HllemHydroYe& rhs);
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections
