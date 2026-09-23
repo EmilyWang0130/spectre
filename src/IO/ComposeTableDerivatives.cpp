@@ -48,10 +48,12 @@ size_t idx_of(const size_t in, const size_t iT, const size_t iYe,
 DataVector compute_zeta_from_free_energy_derivatives(
     const DataVector& d2f_dt2, const DataVector& d2f_dt_dnb,
     const DataVector& d2f_dt_dye, const DataVector& d2f_dnb_dye,
-    const DataVector& df_dye, const std::vector<double>& number_density_grid,
+    const DataVector& df_dye, const DataVector& kappa,
+    const std::vector<double>& number_density_grid,
     const std::vector<double>& temperature_grid,
     const size_t number_density_points, const size_t temperature_points,
-    const size_t electron_fraction_points) {
+    const size_t electron_fraction_points, const double cold_repair_temperature,
+    const double cold_repair_minimum_number_density) {
   // Local aliases for the densely-used grid sizes.
   const size_t nN = number_density_points;
   const size_t nT = temperature_points;
@@ -72,6 +74,9 @@ DataVector compute_zeta_from_free_energy_derivatives(
   ASSERT(df_dye.size() == ntot, "dF/dY_e size " << df_dye.size()
                                                 << " does not match table size "
                                                 << ntot << ".");
+  ASSERT(kappa.size() == ntot, "kappa size " << kappa.size()
+                                             << " does not match table size "
+                                             << ntot << ".");
   ASSERT(number_density_grid.size() == nN,
          "Number-density grid size " << number_density_grid.size()
                                      << " does not match nN " << nN << ".");
@@ -85,17 +90,51 @@ DataVector compute_zeta_from_free_energy_derivatives(
   // = 0).
   constexpr double eps_T_floor = 1e-300;
 
+  // Lowest temperature index at or above the cold-repair switch. Rows below it
+  // take their kappa frozen from this row instead of forming the 0/0 ratio
+  // p_T/eps_T; see the "Cold-temperature repair" section of the declaration.
+  // iT_switch == 0 means no repair: either it was disabled by a non-positive
+  // switch temperature, or no row is warm enough to freeze from.
+  size_t iT_switch = 0;
+  if (cold_repair_temperature > 0.0) {
+    while (iT_switch < nT and
+           temperature_grid[iT_switch] < cold_repair_temperature) {
+      ++iT_switch;
+    }
+    if (iT_switch == nT) {
+      iT_switch = 0;
+    }
+  }
+
   for (size_t in = 0; in < nN; ++in) {
     const double nb = number_density_grid[in];
     const double nb_squared = nb * nb;
+    const bool repair_at_this_density =
+        nb >= cold_repair_minimum_number_density;
     for (size_t iT = 0; iT < nT; ++iT) {
       const double temperature = temperature_grid[iT];
+      const bool repair = repair_at_this_density and iT < iT_switch;
       for (size_t iYe = 0; iYe < nYe; ++iYe) {
         const size_t idx = idx_of(in, iT, iYe, nN, nYe);
 
         // epsilon = F - T F_T, so its derivatives are
         //   eps_Ye = F_Ye - T F_{T,Ye},  eps_T = -T F_{T,T}.
         const double eps_Ye = df_dye[idx] - temperature * d2f_dt_dye[idx];
+
+        // pressure p = n_b^2 F_{n_b}, so
+        //   p_Ye = n_b^2 F_{n_b,Ye},  p_T = n_b^2 F_{n_b,T}.
+        const double p_Ye = nb_squared * d2f_dnb_dye[idx];
+
+        if (repair) {
+          // p_T / eps_T is kappa in fm^-3, and kappa is T-independent in the
+          // degenerate regime, so use the reconstructed value from the lowest
+          // trustworthy temperature row. Note eps_T is deliberately not formed
+          // here: it is exactly the quantity that has lost its digits.
+          zeta[idx] =
+              p_Ye - kappa[idx_of(in, iT_switch, iYe, nN, nYe)] * eps_Ye;
+          continue;
+        }
+
         const double eps_T = -temperature * d2f_dt2[idx];
 
         if (std::abs(eps_T) < eps_T_floor) {
@@ -104,9 +143,6 @@ DataVector compute_zeta_from_free_energy_derivatives(
               << idx << "; cannot hold epsilon fixed when changing Y_e.");
         }
 
-        // pressure p = n_b^2 F_{n_b}, so
-        //   p_Ye = n_b^2 F_{n_b,Ye},  p_T = n_b^2 F_{n_b,T}.
-        const double p_Ye = nb_squared * d2f_dnb_dye[idx];
         const double p_T = nb_squared * d2f_dt_dnb[idx];
 
         zeta[idx] = p_Ye - p_T * eps_Ye / eps_T;

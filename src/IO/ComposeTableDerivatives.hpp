@@ -68,13 +68,61 @@ double log_log_derivative(double q_minus, double q_center, double q_plus,
  *
  * The CompOSE table is flattened in file order, with \f$Y_e\f$ varying
  * fastest, then \f$n_b\f$, then \f$T\f$: idx = (iT * nN + in) * nYe + iYe.
+ *
+ * ### Cold-temperature repair
+ *
+ * The ratio \f$p_T/\epsilon_T\f$ above *is* \f$\kappa = (\partial p/\partial
+ * E)_{n_b,Y_e}\f$ in fm\f$^{-3}\f$, formed from two tabulated free-energy
+ * derivative columns rather than from \f$p\f$ and \f$\epsilon\f$ directly. In
+ * degenerate matter nothing depends on temperature, so \f$p_T \to 0\f$ and
+ * \f$\epsilon_T \to 0\f$ together and the ratio becomes a numerically
+ * catastrophic 0/0: on the Togashi table \f$\epsilon\f$ changes by only
+ * \f$6\times10^{-7}\f$ relative between the two lowest \f$T\f$ nodes, losing
+ * about six digits to cancellation, and the lowest row is also the grid
+ * boundary where CompOSE's derivative generator extrapolates. The damage is
+ * measurable and large: 26.4% of nodes in the stellar band \f$n_b \in
+ * [0.05,0.62]\f$ fm\f$^{-3}\f$ have \f$\mathcal{F}_{TT} > 0\f$ at \f$T =
+ * 0.1\f$ MeV, i.e. a *negative* specific heat \f$c_V = -T\mathcal{F}_{TT}\f$,
+ * which is thermodynamically impossible; 39.5% of those nodes end up with a
+ * \f$\zeta\f$ of the wrong sign, and \f$\zeta\f$ at the centre of a Togashi
+ * TOV star comes out at \f$-18.97\f$ instead of \f$-10.82\f$ MeV/fm\f$^3\f$.
+ *
+ * \f$\kappa\f$ itself is genuinely temperature-independent in the degenerate
+ * regime (measured flat to 0.15% over \f$0.17 \le T \le 4\f$ MeV), so the
+ * repair is to *freeze* it: for every temperature row below
+ * `cold_repair_temperature` the ratio \f$p_T/\epsilon_T\f$ is replaced by the
+ * value of `kappa` at the lowest row at or above that temperature, at the same
+ * \f$(n_b, Y_e)\f$. `kappa` must be the finite-difference reconstruction from
+ * \f$p\f$ and \f$\epsilon\f$ returned by
+ * `compute_kappa_from_pressure_and_energy` (in fm\f$^{-3}\f$), which is the
+ * same field `ConvertComposeTable` writes to the output table, and which is
+ * already floored and free of the 0/0. Rows at or above the switch keep the
+ * unmodified analytic formula, so the warm table is bit-for-bit unchanged;
+ * this matters because the stored \f$\zeta\f$ is independently good to 1-3%
+ * for \f$T \gtrsim 0.4\f$ MeV and only degrades below it (median error 9.5% at
+ * 0.398 MeV, 39% at 0.120 MeV, 125% at 0.100 MeV). The repair is skipped for
+ * \f$n_b <\f$ `cold_repair_minimum_number_density`, where the table is so
+ * dilute that the finite-difference \f$\kappa\f$ has itself collapsed onto its
+ * floor and carries no information.
+ *
+ * Validation: on the \f$\beta\f$-equilibrium curve \f$\mu_l = \partial
+ * \mathcal{F}/\partial Y_e = 0\f$, so \f$\epsilon_{Y_e} = \mathcal{F}_{Y_e} -
+ * T\mathcal{F}_{TY_e} \to 0\f$ and \f$\zeta \to p_{Y_e}\f$ exactly as
+ * \f$T \to 0\f$, independently of \f$\kappa\f$. Against that reference the
+ * repair cuts the worst error on the \f$T = 0.1\f$ MeV \f$\beta\f$ curve from
+ * 573% to 18%.
+ *
+ * Pass a non-positive `cold_repair_temperature` to disable the repair and
+ * recover the unmodified analytic formula everywhere.
  */
 DataVector compute_zeta_from_free_energy_derivatives(
     const DataVector& d2f_dt2, const DataVector& d2f_dt_dnb,
     const DataVector& d2f_dt_dye, const DataVector& d2f_dnb_dye,
-    const DataVector& df_dye, const std::vector<double>& number_density_grid,
+    const DataVector& df_dye, const DataVector& kappa,
+    const std::vector<double>& number_density_grid,
     const std::vector<double>& temperature_grid, size_t number_density_points,
-    size_t temperature_points, size_t electron_fraction_points);
+    size_t temperature_points, size_t electron_fraction_points,
+    double cold_repair_temperature, double cold_repair_minimum_number_density);
 
 /*!
  * \brief Reconstruct the adiabatic sound speed squared from the tabulated

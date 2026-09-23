@@ -211,6 +211,10 @@ void convert_file(const std::string& compose_directory,
   // Floor matches the cs² treatment: 1e-6 in input units (MeV/fm^3 when called
   // on CompOSE data).
   constexpr double kappa_floor = 1.0e-6;
+  // The reconstructed kappa is also what repairs zeta at low temperature
+  // below, so keep a copy of it (and of whether we actually reconstructed it).
+  DataVector kappa_for_zeta_repair(ntot, 0.0);
+  bool have_reconstructed_kappa = false;
   const bool have_inputs_for_kappa_reconstruction =
       nT >= 2 and data.count("pressure") == 1 and
       data.count("specific internal energy") == 1;
@@ -266,6 +270,8 @@ void convert_file(const std::string& compose_directory,
           kappa_floor);
     }
     spectre_eos.write_quantity("kappa", reconstructed_kappa);
+    kappa_for_zeta_repair = reconstructed_kappa;
+    have_reconstructed_kappa = true;
   }
 
   // zeta = ∂P/∂Ye is computed analytically from the CompOSE free-energy
@@ -293,11 +299,77 @@ void convert_file(const std::string& compose_directory,
     const auto nb_grid =
         make_grid_1d(compose_table.number_density_bounds(), nN,
                      compose_table.number_density_log_spacing());
+
+    // The analytic zeta divides by eps_T = -T d²F/dT², which vanishes together
+    // with its numerator p_T in degenerate matter: at low T the formula is a
+    // 0/0 evaluated on two extrapolated derivative columns, and it fails
+    // loudly. On the Togashi table at T = 0.1 MeV, 26.4% of nodes in the
+    // stellar band n_b ∈ [0.05, 0.62] fm^-3 have d²F/dT² > 0 — a negative
+    // specific heat c_V = -T d²F/dT², which no stable EoS can have — and 39.5%
+    // of the resulting zeta values come out with the wrong sign. Below
+    // zeta_cold_repair_temperature we therefore replace the ratio p_T/eps_T
+    // (which is exactly kappa, in fm^-3) by the reconstructed kappa frozen at
+    // the lowest trustworthy row; kappa is genuinely T-independent there.
+    // Rows above the switch are untouched, so the warm table — where the
+    // stored zeta is independently good to 1-3% — is bit-for-bit unchanged.
+    // This mirrors what we already do for CompOSE's Q11 and Q12; zeta was the
+    // one derived quantity still taken on trust. See
+    // compute_zeta_from_free_energy_derivatives for the full justification.
+    //
+    // 0.4 MeV selects T = 0.4365 MeV on the Togashi grid, the lowest row at
+    // which the stored zeta is still good to a few percent.
+    constexpr double zeta_cold_repair_temperature = 0.4;
+    // Below this density the finite-difference kappa has collapsed onto its
+    // own floor and carries no information, so leave zeta alone there.
+    constexpr double zeta_cold_repair_minimum_number_density = 1.0e-6;
+
+    if (not have_reconstructed_kappa) {
+      Parallel::printf(
+          "WARNING: kappa was not reconstructed from p and ε, so the "
+          "low-temperature repair of zeta is disabled. zeta below %.2f MeV is "
+          "formed from the 0/0 ratio (∂p/∂T)/(∂ε/∂T) of two CompOSE "
+          "free-energy derivative columns and is unreliable there.\n",
+          zeta_cold_repair_temperature);
+    } else {
+      // Count the points the repair covers, and how many of them are provably
+      // unphysical in the source table (c_V = -T d²F/dT² <= 0).
+      const DataVector& d2f_dt2 = data.at("d2 F / d T2");
+      size_t n_repaired = 0;
+      size_t n_negative_heat_capacity = 0;
+      for (size_t iT = 0; iT < nT; ++iT) {
+        if (T_grid[iT] >= zeta_cold_repair_temperature) {
+          continue;
+        }
+        for (size_t in = 0; in < nN; ++in) {
+          if (nb_grid[in] < zeta_cold_repair_minimum_number_density) {
+            continue;
+          }
+          for (size_t iYe = 0; iYe < nYe; ++iYe) {
+            ++n_repaired;
+            if (d2f_dt2[(iT * nN + in) * nYe + iYe] >= 0.0) {
+              ++n_negative_heat_capacity;
+            }
+          }
+        }
+      }
+      Parallel::printf(
+          "Repairing zeta below T = %.2f MeV by freezing the reconstructed "
+          "kappa at the lowest row at or above it: %zu/%zu points rebuilt, of "
+          "which %zu had d²F/dT² >= 0 (negative specific heat) in the source "
+          "table. Warmer rows keep the analytic p_Ye - p_T eps_Ye / eps_T.\n",
+          zeta_cold_repair_temperature, n_repaired, ntot,
+          n_negative_heat_capacity);
+    }
+
     spectre_eos.write_quantity(
-        "zeta", io::compute_zeta_from_free_energy_derivatives(
-                    data.at("d2 F / d T2"), data.at("d2 F / d T d n_b"),
-                    data.at("d2 F / d T d Y_e"), data.at("d2 F / d n_b d Y_e"),
-                    data.at("d F / d Y_e"), nb_grid, T_grid, nN, nT, nYe));
+        "zeta",
+        io::compute_zeta_from_free_energy_derivatives(
+            data.at("d2 F / d T2"), data.at("d2 F / d T d n_b"),
+            data.at("d2 F / d T d Y_e"), data.at("d2 F / d n_b d Y_e"),
+            data.at("d F / d Y_e"), kappa_for_zeta_repair, nb_grid, T_grid, nN,
+            nT, nYe,
+            have_reconstructed_kappa ? zeta_cold_repair_temperature : -1.0,
+            zeta_cold_repair_minimum_number_density));
   }
 }
 }  // namespace

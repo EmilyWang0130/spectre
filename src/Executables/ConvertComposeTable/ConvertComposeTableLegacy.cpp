@@ -141,11 +141,17 @@ void convert_file(const std::string& compose_directory,
     const auto nb_grid =
         make_grid_1d(compose_table.number_density_bounds(), nN,
                      compose_table.number_density_log_spacing());
+    // The legacy converter writes CompOSE's quantities verbatim and does not
+    // reconstruct kappa, so it has nothing to freeze: the low-temperature
+    // repair of zeta is disabled here (negative switch temperature) and this
+    // executable reproduces its historical output exactly. Use
+    // ConvertComposeTable for a table with a trustworthy cold zeta.
     spectre_eos.write_quantity(
         "zeta", io::compute_zeta_from_free_energy_derivatives(
                     data.at("d2 F / d T2"), data.at("d2 F / d T d n_b"),
                     data.at("d2 F / d T d Y_e"), data.at("d2 F / d n_b d Y_e"),
-                    data.at("d F / d Y_e"), nb_grid, T_grid, nN, nT, nYe));
+                    data.at("d F / d Y_e"), DataVector(ntot, 0.0), nb_grid,
+                    T_grid, nN, nT, nYe, -1.0, 0.0));
   }
 }
 }  // namespace
