@@ -18,6 +18,7 @@ spectre_target_sources(
   MagnetizedFmDisk.cpp
   MagnetizedTovStar.cpp
   OrszagTangVortex.cpp
+  PerturbedTovStar.cpp
   PolarMagnetizedFmDisk.cpp
   RiemannProblem.cpp
   SlabJet.cpp
@@ -40,6 +41,7 @@ spectre_target_headers(
   MagnetizedFmDisk.hpp
   MagnetizedTovStar.hpp
   OrszagTangVortex.hpp
+  PerturbedTovStar.hpp
   PolarMagnetizedFmDisk.hpp
   RiemannProblem.hpp
   SlabJet.hpp
@@ -53,6 +55,7 @@ target_link_libraries(
   DataStructures
   ErrorHandling
   Hydro
+  Interpolation
   Options
   RelativisticEulerSolutions
   Serialization

@@ -16,6 +16,7 @@ set(LIBRARY_SOURCES
   Test_MagnetizedFmDisk.cpp
   Test_MagnetizedTovStar.cpp
   Test_OrszagTangVortex.cpp
+  Test_PerturbedTovStar.cpp
   Test_PolarMagnetizedFmDisk.cpp
   Test_RiemannProblem.cpp
   Test_SlabJet.cpp
@@ -37,6 +38,7 @@ target_link_libraries(
   ErrorHandling
   GrMhdAnalyticData
   Hydro
+  Informer
   LinearOperators
   Options
   Spectral

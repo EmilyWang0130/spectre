@@ -14,6 +14,7 @@
 #include "PointwiseFunctions/AnalyticData/GrMhd/MagnetizedFmDisk.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/MagnetizedTovStar.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/OrszagTangVortex.hpp"
+#include "PointwiseFunctions/AnalyticData/GrMhd/PerturbedTovStar.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/PolarMagnetizedFmDisk.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/RiemannProblem.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/SlabJet.hpp"
@@ -35,11 +36,11 @@ using initial_data_list = tmpl::list<
     AnalyticData::KhInstability, AnalyticData::MagneticFieldLoop,
     AnalyticData::MagneticRotor, AnalyticData::MagnetizedFmDisk,
     AnalyticData::MagnetizedTovStar, AnalyticData::OrszagTangVortex,
-    AnalyticData::PolarMagnetizedFmDisk, AnalyticData::RiemannProblem,
-    AnalyticData::SlabJet, AnalyticData::Tabulated3DShockTube,
-    Solutions::AlfvenWave, grmhd::Solutions::BondiMichel,
-    Solutions::KomissarovShock, Solutions::SmoothFlow,
-    RelativisticEuler::Solutions::FishboneMoncriefDisk,
+    AnalyticData::PerturbedTovStar, AnalyticData::PolarMagnetizedFmDisk,
+    AnalyticData::RiemannProblem, AnalyticData::SlabJet,
+    AnalyticData::Tabulated3DShockTube, Solutions::AlfvenWave,
+    grmhd::Solutions::BondiMichel, Solutions::KomissarovShock,
+    Solutions::SmoothFlow, RelativisticEuler::Solutions::FishboneMoncriefDisk,
     RelativisticEuler::Solutions::RotatingStar,
     RelativisticEuler::Solutions::TovStar>;
 }  // namespace grmhd::ValenciaDivClean::InitialData
