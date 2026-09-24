@@ -77,14 +77,22 @@ constexpr double omega = 5.0e-3;
 
 // An analytic stand-in for a mode: xi_r ~ r near the centre, vanishing at the
 // surface; xi_perp half of it. Tabulated on [0, R].
-ModeProfile make_profile(const double outer_radius, const size_t n = 201) {
+// An analytic stand-in for a mode: xi_r ~ r near the centre, vanishing at the
+// surface; xi_perp half of it. Tabulated on [0, R].
+constexpr size_t profile_points = 201;
+
+double analytic_xi_r(const double r, const double outer_radius) {
+  return 0.02 * r * (1.0 - r / outer_radius);
+}
+
+ModeProfile make_profile(const double outer_radius) {
+  const size_t n = profile_points;
   std::vector<double> r(n);
   std::vector<double> xi_r(n);
   std::vector<double> xi_perp(n);
   for (size_t i = 0; i < n; ++i) {
-    const double x = static_cast<double>(i) / static_cast<double>(n - 1);
-    r[i] = x * outer_radius;
-    xi_r[i] = 0.02 * r[i] * (1.0 - x);
+    r[i] = outer_radius * static_cast<double>(i) / static_cast<double>(n - 1);
+    xi_r[i] = analytic_xi_r(r[i], outer_radius);
     xi_perp[i] = 0.5 * xi_r[i];
   }
   return ModeProfile{2, omega, std::move(r), std::move(xi_r),
@@ -93,15 +101,20 @@ ModeProfile make_profile(const double outer_radius, const size_t n = 201) {
 
 std::string write_profile_file(const ModeProfile& mode,
                                const std::string& filename) {
+  // Write the same analytic values make_profile tabulated, not spline samples:
+  // GSL evaluates the last knot through the previous interval's cubic, so a
+  // sampled file would differ from the in-memory profile at round-off and the
+  // exact operator== below would fail.
   std::ofstream file(filename);
   file.precision(17);
   file << "# test profile\n";
-  const size_t n = 201;
+  const size_t n = profile_points;
   const double R = mode.outer_radius();
   file << mode.l() << " " << mode.omega() << " " << n << "\n";
   for (size_t i = 0; i < n; ++i) {
     const double r = R * static_cast<double>(i) / static_cast<double>(n - 1);
-    file << r << " " << mode.xi_r(r) << " " << mode.xi_perp(r) << "\n";
+    const double xr = analytic_xi_r(r, R);
+    file << r << " " << xr << " " << 0.5 * xr << "\n";
   }
   return filename;
 }
@@ -128,6 +141,7 @@ void test_mode_profile() {
   CHECK(from_file.omega() == omega);
   CHECK(from_file.outer_radius() == 10.0);
   CHECK(from_file.xi_r(3.3) == approx(mode.xi_r(3.3)).epsilon(1.0e-10));
+  CHECK(from_file == mode);
   file_system::rm(filename, false);
 
   CHECK_THROWS_WITH(
@@ -256,8 +270,9 @@ void test_physics(const TovCoordinates coord_system) {
       const double expected = get(
           tov_var<hydro::Tags::ElectronFraction<DataVector>>(tov, x_source))[0];
       CHECK(get(ye)[p] == approx(expected));
-      if (p < 3) {
-        // the displacement really moved something
+      if (p < 2) {
+        // the displacement really moved something (point 2 sits at P_2 = 0,
+        // where zero radial displacement is the correct answer)
         CHECK(std::abs(r_source - r) > 1.0e-4 * R);
         CHECK(
             get(ye)[p] !=
