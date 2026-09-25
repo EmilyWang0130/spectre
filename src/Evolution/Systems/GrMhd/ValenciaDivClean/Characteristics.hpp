@@ -252,7 +252,6 @@ tnsr::i<DataVector, 3> characteristic_speeds_hydro(
  *   (`i` follows `HydroVectorL`).
  *
  * Used by the Marquina boundary correction.
- *
  */
 template <size_t ThermodynamicDim>
 void characteristic_eigenvectors_hydro(

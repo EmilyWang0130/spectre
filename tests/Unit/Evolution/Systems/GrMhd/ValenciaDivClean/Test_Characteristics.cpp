@@ -36,15 +36,10 @@
 #include "Helpers/Domain/DomainTestHelpers.hpp"
 #include "Helpers/PointwiseFunctions/GeneralRelativity/TestHelpers.hpp"
 #include "Helpers/PointwiseFunctions/Hydro/TestHelpers.hpp"
-#include "IO/H5/AccessType.hpp"
-#include "IO/H5/EosTable.hpp"
-#include "IO/H5/File.hpp"
-#include "Informer/InfoFromBuild.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/Equilibrium3D.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/IdealFluid.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/PolytropicFluid.hpp"
-#include "PointwiseFunctions/Hydro/EquationsOfState/Tabulated3d.hpp"
 #include "PointwiseFunctions/Hydro/SpecificEnthalpy.hpp"
 #include "PointwiseFunctions/Hydro/Tags.hpp"
 #include "Utilities/ConstantExpressions.hpp"
@@ -54,6 +49,11 @@
 
 // Quad-precision reference implementation for MHD characteristic speeds
 #include "Characteristics.hpp"
+#include "IO/H5/AccessType.hpp"
+#include "IO/H5/EosTable.hpp"
+#include "IO/H5/File.hpp"
+#include "Informer/InfoFromBuild.hpp"
+#include "PointwiseFunctions/Hydro/EquationsOfState/Tabulated3d.hpp"
 
 namespace {
 
@@ -712,141 +712,6 @@ void test_hydro_analytic_eigenvectors(const DataVector& used_for_size) {
   }
 }
 
-// Restored 2026-08-20 from tov-2d-axi (dropped by the 2026-08-14 Iago merge,
-// see the paired restore in Characteristics.cpp). Validates that
-// `characteristic_eigenvectors_hydro` and `flux_jacobian_hydro` produce a
-// consistent eigensystem when the tabulated 3D EoS actually supplies a
-// non-zero \f$\zeta = \partial p/\partial Y_e |_{\rho, \epsilon}\f$. This
-// exercises the composition-coupling branches (`zeta_max_abs >= 1e-14`) of
-// the analytic left eigenvectors, which are otherwise dead code when
-// \f$\zeta\f$ is hard-coded to zero.
-void test_tabulated3d_kappa_and_zeta_in_characteristics() {
-  const size_t num_points = 3;
-  const DataVector used_for_size(num_points, 0.0);
-
-  const std::string eos_file_name{
-      unit_test_src_path() +
-      "PointwiseFunctions/Hydro/EquationsOfState/dd2_unit_test.h5"};
-  h5::H5File<h5::AccessType::ReadOnly> eos_file{eos_file_name};
-  const auto& compose_eos = eos_file.get<h5::EosTable>("/dd2");
-  EquationsOfState::Tabulated3D<true> equation_of_state;
-  equation_of_state.initialize(compose_eos);
-
-  Scalar<DataVector> temperature{DataVector(num_points, 0.1)};
-  Scalar<DataVector> rest_mass_density{DataVector(num_points, 1.0e-4)};
-  Scalar<DataVector> electron_fraction{DataVector(num_points, 0.01)};
-
-  const auto specific_internal_energy =
-      equation_of_state.specific_internal_energy_from_density_and_temperature(
-          rest_mass_density, temperature, electron_fraction);
-  const auto pressure = equation_of_state.pressure_from_density_and_temperature(
-      rest_mass_density, temperature, electron_fraction);
-  const auto specific_enthalpy = hydro::relativistic_specific_enthalpy(
-      rest_mass_density, specific_internal_energy, pressure);
-  const auto kappa = equation_of_state.kappa_from_density_and_temperature(
-      rest_mass_density, temperature, electron_fraction);
-  const auto zeta = equation_of_state.zeta_from_density_and_temperature(
-      rest_mass_density, temperature, electron_fraction);
-
-  // Confirm the tabulated EoS actually supplies non-zero derivatives.
-  CHECK(max(abs(get(kappa))) > 1.0e-12);
-  CHECK(max(abs(get(zeta))) > 1.0e-12);
-
-  tnsr::ii<DataVector, 3, Frame::Inertial> spatial_metric{
-      make_with_value<tnsr::ii<DataVector, 3, Frame::Inertial>>(used_for_size,
-                                                                0.0)};
-  for (size_t i = 0; i < 3; ++i) {
-    spatial_metric.get(i, i) = 1.0;
-  }
-  const auto inv_spatial_metric =
-      determinant_and_inverse(spatial_metric).second;
-
-  tnsr::I<DataVector, 3, Frame::Inertial> spatial_velocity{
-      make_with_value<tnsr::I<DataVector, 3, Frame::Inertial>>(used_for_size,
-                                                               0.0)};
-  spatial_velocity.get(0) = 0.1;
-  spatial_velocity.get(1) = 0.02;
-  spatial_velocity.get(2) = -0.03;
-
-  const double velocity_squared = 0.1 * 0.1 + 0.02 * 0.02 + 0.03 * 0.03;
-  Scalar<DataVector> lorentz_factor{
-      DataVector(num_points, 1.0 / sqrt(1.0 - velocity_squared))};
-
-  const auto unit_normal =
-      unit_basis_form(Direction<3>::upper_xi(), inv_spatial_metric);
-
-  constexpr size_t matrix_size = 6;
-
-  // Analytic eigenvectors, standardized modes/projectors layout.
-  tnsr::ij<DataVector, matrix_size> characteristic_modes{num_points};
-  tnsr::IJ<DataVector, matrix_size> characteristic_projectors{num_points};
-  grmhd::ValenciaDivClean::characteristic_eigenvectors_hydro(
-      make_not_null(&characteristic_modes),
-      make_not_null(&characteristic_projectors), spatial_velocity,
-      rest_mass_density, specific_internal_energy, specific_enthalpy,
-      electron_fraction, lorentz_factor, unit_normal, spatial_metric,
-      equation_of_state);
-
-  // Analytic speeds, packed to match the HydroVectorR ordering.
-  tnsr::i<DataVector, 3> hydro_speeds{num_points};
-  grmhd::ValenciaDivClean::characteristic_speeds_hydro(
-      make_not_null(&hydro_speeds), spatial_velocity, rest_mass_density,
-      specific_internal_energy, electron_fraction, lorentz_factor,
-      specific_enthalpy, spatial_metric, unit_normal, equation_of_state);
-  tnsr::i<DataVector, matrix_size> eigenvalues{num_points};
-  for (size_t i = 0; i < 4; ++i) {
-    eigenvalues.get(i) = hydro_speeds.get(
-        grmhd::ValenciaDivClean::HydroSpeed::NormalDotVelocity);
-  }
-  eigenvalues.get(grmhd::ValenciaDivClean::HydroVectorR::Rplus) =
-      hydro_speeds.get(grmhd::ValenciaDivClean::HydroSpeed::LambdaPlus);
-  eigenvalues.get(grmhd::ValenciaDivClean::HydroVectorR::Rminus) =
-      hydro_speeds.get(grmhd::ValenciaDivClean::HydroSpeed::LambdaMinus);
-
-  // Flux Jacobian for the eigensystem consistency check.
-  tnsr::iJ<DataVector, matrix_size> characteristic_matrix{num_points};
-  grmhd::ValenciaDivClean::flux_jacobian_hydro(
-      make_not_null(&characteristic_matrix), spatial_velocity,
-      rest_mass_density, specific_internal_energy, electron_fraction,
-      lorentz_factor, specific_enthalpy, spatial_metric, inv_spatial_metric,
-      unit_normal, equation_of_state);
-
-  // Eigensystem relation A.R = lambda R and L.A = lambda L for each wave.
-  constexpr double tolerance = 1.0e-10;
-  for (size_t i = 0; i < matrix_size; ++i) {
-    const Scalar<DataVector> eigenvalue{};
-    const tnsr::i<DataVector, matrix_size> right_eigenvector{};
-    const tnsr::I<DataVector, matrix_size> left_eigenvector{};
-    make_const_view(make_not_null(&get(eigenvalue)), eigenvalues.get(i), 0,
-                    num_points);
-    for (size_t k = 0; k < matrix_size; ++k) {
-      make_const_view(make_not_null(&right_eigenvector.get(k)),
-                      characteristic_modes.get(i, k), 0, num_points);
-      make_const_view(make_not_null(&left_eigenvector.get(k)),
-                      characteristic_projectors.get(i, k), 0, num_points);
-    }
-    const Scalar<DataVector> right_residual = magnitude(tenex::evaluate<ti::k>(
-        characteristic_matrix(ti::k, ti::J) * right_eigenvector(ti::j) -
-        eigenvalue() * right_eigenvector(ti::k)));
-    const Scalar<DataVector> left_residual = magnitude(tenex::evaluate<ti::K>(
-        left_eigenvector(ti::J) * characteristic_matrix(ti::j, ti::K) -
-        eigenvalue() * left_eigenvector(ti::K)));
-    CHECK(max(get(right_residual)) < tolerance);
-    CHECK(max(get(left_residual)) < tolerance);
-  }
-
-  // When zeta != 0 the composition eigenvector must depart from the trivial
-  // passive-advection form. In the zeta = 0 limit `R4[5] = 1` and
-  // `L4[5] = 1`, `L4[0] = -Y_e`. Verify that neither collapses to the
-  // trivial values.
-  CHECK(max(abs(characteristic_modes.get(
-                    grmhd::ValenciaDivClean::HydroVectorR::R4, 5) -
-                1.0)) > 1.0e-12);
-  CHECK(max(abs(characteristic_projectors.get(
-                    grmhd::ValenciaDivClean::HydroVectorL::L4, 5) -
-                1.0)) > 1.0e-12);
-}
-
 void test_hydro_characteristics_match_unoptimized_version(
     const DataVector& used_for_size) {
   MAKE_GENERATOR(generator);
@@ -987,6 +852,347 @@ void test_quartic_rootfinding(const DataVector& used_for_size) {
                                custom_approx);
   CHECK_ITERABLE_CUSTOM_APPROX(fast_minus, DataVector(num_points, -0.8),
                                custom_approx);
+}
+
+// The characteristic speeds must INTERLACE. For any admissible state the seven
+// physical RMHD speeds satisfy
+//
+//   lambda_f^- <= lambda_a^- <= lambda_s^- <= lambda_e
+//              <= lambda_s^+ <= lambda_a^+ <= lambda_f^+
+//
+// -- Anton, Miralles, Marti, Ibanez, Aloy & Mimica (2010), Eq. (42)
+// (papers/2010-anton-et-al-eigenvectors), which is also the ordering
+// `MhdSpeed` is documented with in Characteristics.hpp. NOTE THE ORDER: the
+// Alfven speed sits OUTSIDE the slow speed and INSIDE the fast one. Writing the
+// chain with slow and Alfven swapped is the easy mistake, and the swapped chain
+// is violated by ordinary, perfectly healthy states -- so a check asserting it
+// would be a false alarm generator rather than a diagnostic.
+//
+// This is the ONLY test of the IDENTITY of the slow roots anywhere in
+// `characteristic_speeds_mhd`. The residual check inside that function asks
+// whether the returned slow pair SOLVES the quartic; the quartic has four roots
+// and |Q| is ~0 at every one of them, so a deflation that returns the FAST
+// roots -- or one fast and one slow -- in the slow slots satisfies it exactly.
+// Ordering is what tells the roots apart, and this sweep plus the ASSERT in the
+// source is where that is enforced.
+//
+// The sweep deliberately includes the degeneracies: B = 0, B_n = 0 (Type I,
+// where alfven+- = slow+- = entropy), purely normal B (Type II), a nearly cold
+// state and a nearly force-free one, at W up to 7, on two normals and both
+// reduced-quadratic methods.
+void test_mhd_speeds_interlace() {
+  const std::array<std::array<double, 3>, 6> velocities{{{{0.0, 0.0, 0.0}},
+                                                         {{0.4, 0.0, 0.0}},
+                                                         {{-0.6, 0.3, 0.1}},
+                                                         {{0.1, -0.2, 0.9}},
+                                                         {{0.99, 0.0, 0.0}},
+                                                         {{0.2, -0.5, -0.2}}}};
+  const std::array<std::array<double, 3>, 7> magnetic_fields{
+      {{{0.0, 0.0, 0.0}},
+       {{1.0e-8, 0.0, 0.0}},
+       {{0.0, 3.0, 0.0}},
+       {{2.0, 0.0, 0.0}},
+       {{-0.3, 0.1, 0.2}},
+       {{5.0, -4.0, 3.0}},
+       {{0.05, 0.02, -0.01}}}};
+  const std::array<std::array<double, 2>, 4> rho_and_pressure{
+      {{{1.0, 1.0}}, {{1.0, 1.0e-6}}, {{1.0e-3, 1.0}}, {{5.0, 0.5}}}};
+
+  tnsr::ii<DataVector, 3, Frame::Inertial> flat_metric{1_st, 0.0};
+  for (size_t i = 0; i < 3; ++i) {
+    flat_metric.get(i, i) = 1.0;
+  }
+  const double skew = 1.0 / sqrt(3.0);
+  const std::array<std::array<double, 3>, 2> normals{
+      {{{1.0, 0.0, 0.0}}, {{skew, skew, skew}}}};
+
+  // How far out of order the chain may be, per state. This mirrors the rule
+  // the ASSERT in Characteristics.cpp uses, and the reason it is not a
+  // constant is measured rather than assumed: for a monic quartic, |Q'(root)|
+  // is the product of the distances to the other three roots, so a cluster of
+  // nearly coincident speeds drives it down like the cube of the cluster
+  // width, and the root cannot be LOCATED more finely than noise/|Q'|. One
+  // state in this very sweep (cs^2 = 1.67e-4, b^2/(rho h) = 2.4e-5, W = 3.3)
+  // puts all four magnetosonic roots inside 2.5e-3, where that floor is 9.8e-6
+  // -- and the slow-minus root indeed comes back 4.8e-6 below the Alfven
+  // speed, half the floor. A constant slack tight enough to be useful on
+  // separated roots is a false alarm there.
+  //
+  // For a monic quartic whose roots all lie inside the light cone the
+  // coefficients are bounded by 6 in magnitude, which bounds the Horner noise.
+  const double quartic_noise =
+      8.0 * std::numeric_limits<double>::epsilon() * 6.0;
+  const auto root_uncertainty =
+      [&quartic_noise](const double root, const double other_1,
+                       const double other_2, const double other_3) {
+        const double derivative =
+            std::abs((root - other_1) * (root - other_2) * (root - other_3));
+        return derivative > 0.0 ? quartic_noise / derivative
+                                : std::numeric_limits<double>::infinity();
+      };
+
+  size_t states_checked = 0;
+  for (const double adiabatic_index : {4.0 / 3.0, 5.0 / 3.0}) {
+    const EquationsOfState::IdealFluid<true> eos(adiabatic_index, 0.0);
+    for (const auto& normal_components : normals) {
+      tnsr::i<DataVector, 3> unit_normal{1_st, 0.0};
+      for (size_t i = 0; i < 3; ++i) {
+        unit_normal.get(i) = gsl::at(normal_components, i);
+      }
+      for (const auto method :
+           {grmhd::ValenciaDivClean::SlowMagnetosonicSpeedMethod::
+                ReducedQuadratic,
+            grmhd::ValenciaDivClean::SlowMagnetosonicSpeedMethod::
+                ReducedQuadraticThenNewton}) {
+        for (const auto& velocity : velocities) {
+          double v_squared = 0.0;
+          for (size_t i = 0; i < 3; ++i) {
+            v_squared += square(gsl::at(velocity, i));
+          }
+          REQUIRE(v_squared < 1.0);
+          const double lorentz = 1.0 / sqrt(1.0 - v_squared);
+          for (const auto& b_field : magnetic_fields) {
+            for (const auto& rho_p : rho_and_pressure) {
+              const double rho = rho_p[0];
+              const double pressure = rho_p[1];
+              const double eps = pressure / ((adiabatic_index - 1.0) * rho);
+              const Scalar<DataVector> rest_mass_density{DataVector{1_st, rho}};
+              const Scalar<DataVector> specific_internal_energy{
+                  DataVector{1_st, eps}};
+              const Scalar<DataVector> lorentz_factor{
+                  DataVector{1_st, lorentz}};
+              const Scalar<DataVector> specific_enthalpy{
+                  DataVector{1_st, 1.0 + eps + pressure / rho}};
+              tnsr::I<DataVector, 3, Frame::Inertial> spatial_velocity{1_st,
+                                                                       0.0};
+              tnsr::I<DataVector, 3, Frame::Inertial> magnetic_field{1_st, 0.0};
+              for (size_t i = 0; i < 3; ++i) {
+                spatial_velocity.get(i) = gsl::at(velocity, i);
+                magnetic_field.get(i) = gsl::at(b_field, i);
+              }
+              tnsr::i<DataVector, 9> speeds{1_st, 0.0};
+              grmhd::ValenciaDivClean::characteristic_speeds_mhd(
+                  make_not_null(&speeds), spatial_velocity, magnetic_field,
+                  rest_mass_density, specific_internal_energy, lorentz_factor,
+                  specific_enthalpy, flat_metric, unit_normal, eos, method);
+
+              namespace speed = grmhd::ValenciaDivClean;
+              const double fast_minus =
+                  speeds.get(speed::MhdSpeed::FastMagnetosonicMinus)[0];
+              const double alfven_minus =
+                  speeds.get(speed::MhdSpeed::AlfvenMinus)[0];
+              const double slow_minus =
+                  speeds.get(speed::MhdSpeed::SlowMagnetosonicMinus)[0];
+              const double entropy = speeds.get(speed::MhdSpeed::Entropy)[0];
+              const double slow_plus =
+                  speeds.get(speed::MhdSpeed::SlowMagnetosonicPlus)[0];
+              const double alfven_plus =
+                  speeds.get(speed::MhdSpeed::AlfvenPlus)[0];
+              const double fast_plus =
+                  speeds.get(speed::MhdSpeed::FastMagnetosonicPlus)[0];
+              CAPTURE(adiabatic_index);
+              CAPTURE(rho);
+              CAPTURE(pressure);
+              CAPTURE(lorentz);
+              CAPTURE(fast_minus);
+              CAPTURE(alfven_minus);
+              CAPTURE(slow_minus);
+              CAPTURE(entropy);
+              CAPTURE(slow_plus);
+              CAPTURE(alfven_plus);
+              CAPTURE(fast_plus);
+              const double slack = std::max(
+                  1.0e-10, 4.0 * (root_uncertainty(slow_minus, fast_minus,
+                                                   slow_plus, fast_plus) +
+                                  root_uncertainty(slow_plus, fast_minus,
+                                                   slow_minus, fast_plus)));
+              CAPTURE(slack);
+              CHECK(fast_minus <= alfven_minus + slack);
+              CHECK(alfven_minus <= slow_minus + slack);
+              CHECK(slow_minus <= entropy + slack);
+              CHECK(entropy <= slow_plus + slack);
+              CHECK(slow_plus <= alfven_plus + slack);
+              CHECK(alfven_plus <= fast_plus + slack);
+              // And the roots really are inside the light cone, which is what
+              // makes the unconditional clamps in the source inert.
+              CHECK(std::abs(slow_minus) <= 1.0);
+              CHECK(std::abs(slow_plus) <= 1.0);
+              ++states_checked;
+            }
+          }
+        }
+      }
+    }
+  }
+  CHECK(states_checked == 2 * 2 * 2 * 6 * 7 * 4);
+}
+
+// Regression test for an abort of a Del Zanna et al. (2003) jet run, "reduced
+// quadratic has negative discriminant below tolerance. discriminant =
+// -7.8677713958712506894".
+//
+// The point of the test is that NEITHER of the two states below is bad. Each
+// one is an admissible RMHD state whose magnetosonic quartic has four real
+// roots strictly inside the light cone. What is not a state is an interface
+// value that averages rho, eps and p between them INDEPENDENTLY, because
+// `characteristic_speeds_mhd` then forms
+// c_s^2 = (chi + kappa p/rho^2)/h with chi and kappa from (rho_avg, eps_avg)
+// but h from p_avg. For an ideal fluid that ratio tends to Gamma(Gamma-1) as
+// p_avg/rho_avg -> 0, which EXCEEDS 1 for every Gamma above the golden ratio
+// 1.618 -- so Gamma = 5/3 is exposed and Gamma = 4/3 is not.
+//
+// The states here are the jet's own cocoon/ambient contact in miniature: a hot
+// rarefied cell (rho = 0.01, eps = 45) against a cold dense one (rho = 5,
+// eps = 0.15). Their independent average has c_s^2 = 1.0568, and the quartic
+// then puts its extremal roots at -1.6163 and +1.2338, OUTSIDE the light cone.
+// That is what breaks the +/-1 Newton seeds in
+// `find_magnetosonic_speed_from_quartic`: those seeds find the fast pair only
+// because, for x beyond every root of a monic quartic with all roots real, the
+// derivatives alternate in sign and Newton converges monotonically to the
+// nearest root. With a root past +1 that is void, and here BOTH seeds converge
+// to +1.2338. The deflation is then performed with fast_minus == fast_plus and
+// the discriminant comes out at -3.6635 (the production run's state gave
+// -7.8678; the magnitude is state-dependent, the mechanism is not).
+//
+// Note what the discriminant being -3.66 means. When the deflation is valid the
+// discriminant is identically (slow_plus - slow_minus)^2, so for roots inside
+// the light cone it lies in [0, 4]. A negative value of order unity is not an
+// accuracy problem and no tolerance widening addresses it.
+//
+// So `characteristic_speeds_mhd` must not solve that quartic at all: the
+// sound-speed check at its top reports the non-state, for every slow-speed
+// algorithm, instead of repairing it.
+void test_superluminal_interface_sound_speed() {
+  const double adiabatic_index = 5.0 / 3.0;
+  const EquationsOfState::IdealFluid<true> eos(adiabatic_index, 0.0);
+
+  const double rho_left = 0.01;
+  const double pressure_left = 0.3;
+  const double rho_right = 5.0;
+  const double pressure_right = 0.5;
+  const double eps_left = pressure_left / ((adiabatic_index - 1.0) * rho_left);
+  const double eps_right =
+      pressure_right / ((adiabatic_index - 1.0) * rho_right);
+  CHECK(eps_left == approx(45.0));
+  CHECK(eps_right == approx(0.15));
+
+  // The velocity is continuous across the interface (as across a contact); the
+  // magnetic field is not.
+  const std::array<double, 3> velocity{{0.2, -0.9, -0.2}};
+  const std::array<double, 3> b_field_left{{-0.3, 0.1, 0.2}};
+  const std::array<double, 3> b_field_right{{0.1, 0.3, -0.2}};
+  const double v_squared = 0.2 * 0.2 + 0.9 * 0.9 + 0.2 * 0.2;
+  REQUIRE(v_squared < 1.0);
+  const double lorentz = 1.0 / sqrt(1.0 - v_squared);
+
+  tnsr::ii<DataVector, 3, Frame::Inertial> flat_metric{1_st, 0.0};
+  for (size_t i = 0; i < 3; ++i) {
+    flat_metric.get(i, i) = 1.0;
+  }
+  tnsr::i<DataVector, 3> unit_normal{1_st, 0.0};
+  get<0>(unit_normal) = 1.0;
+
+  const auto speeds_at = [&eos, &flat_metric, &unit_normal, &lorentz,
+                          &velocity](const double rho, const double eps,
+                                     const double pressure_for_enthalpy,
+                                     const std::array<double, 3>& b_field,
+                                     const grmhd::ValenciaDivClean::
+                                         SlowMagnetosonicSpeedMethod method) {
+    const Scalar<DataVector> rest_mass_density{DataVector{1_st, rho}};
+    const Scalar<DataVector> specific_internal_energy{DataVector{1_st, eps}};
+    const Scalar<DataVector> pressure{DataVector{1_st, pressure_for_enthalpy}};
+    const Scalar<DataVector> lorentz_factor{DataVector{1_st, lorentz}};
+    const Scalar<DataVector> specific_enthalpy =
+        hydro::relativistic_specific_enthalpy(
+            rest_mass_density, specific_internal_energy, pressure);
+    tnsr::I<DataVector, 3, Frame::Inertial> spatial_velocity{1_st, 0.0};
+    tnsr::I<DataVector, 3, Frame::Inertial> magnetic_field{1_st, 0.0};
+    for (size_t i = 0; i < 3; ++i) {
+      spatial_velocity.get(i) = gsl::at(velocity, i);
+      magnetic_field.get(i) = gsl::at(b_field, i);
+    }
+    tnsr::i<DataVector, 9> speeds{1_st, 0.0};
+    grmhd::ValenciaDivClean::characteristic_speeds_mhd(
+        make_not_null(&speeds), spatial_velocity, magnetic_field,
+        rest_mass_density, specific_internal_energy, lorentz_factor,
+        specific_enthalpy, flat_metric, unit_normal, eos, method);
+    return speeds;
+  };
+
+  const auto check_physical = [](const tnsr::i<DataVector, 9>& speeds,
+                                 const std::string& what) {
+    CAPTURE(what);
+    for (size_t i = 0; i < 9; ++i) {
+      CAPTURE(i);
+      CAPTURE(speeds.get(i)[0]);
+      CHECK(std::isfinite(speeds.get(i)[0]));
+      CHECK(std::abs(speeds.get(i)[0]) <= 1.0 + 1.0e-12);
+    }
+    const double fast_minus =
+        speeds.get(grmhd::ValenciaDivClean::MhdSpeed::FastMagnetosonicMinus)[0];
+    const double slow_minus =
+        speeds.get(grmhd::ValenciaDivClean::MhdSpeed::SlowMagnetosonicMinus)[0];
+    const double entropy =
+        speeds.get(grmhd::ValenciaDivClean::MhdSpeed::Entropy)[0];
+    const double slow_plus =
+        speeds.get(grmhd::ValenciaDivClean::MhdSpeed::SlowMagnetosonicPlus)[0];
+    const double fast_plus =
+        speeds.get(grmhd::ValenciaDivClean::MhdSpeed::FastMagnetosonicPlus)[0];
+    CAPTURE(fast_minus);
+    CAPTURE(slow_minus);
+    CAPTURE(entropy);
+    CAPTURE(slow_plus);
+    CAPTURE(fast_plus);
+    CHECK(fast_minus <= slow_minus + 1.0e-12);
+    CHECK(slow_minus <= entropy + 1.0e-12);
+    CHECK(entropy <= slow_plus + 1.0e-12);
+    CHECK(slow_plus <= fast_plus + 1.0e-12);
+  };
+
+  // 1. Each side, on its own, is an admissible state: a consistent (rho, eps,
+  //    p) triple, four real magnetosonic speeds inside the light cone.
+  const auto left = speeds_at(
+      rho_left, eps_left, pressure_left, b_field_left,
+      grmhd::ValenciaDivClean::SlowMagnetosonicSpeedMethod::ReducedQuadratic);
+  const auto right = speeds_at(
+      rho_right, eps_right, pressure_right, b_field_right,
+      grmhd::ValenciaDivClean::SlowMagnetosonicSpeedMethod::ReducedQuadratic);
+  check_physical(left, "left state");
+  check_physical(right, "right state");
+
+  // 2. Their independently averaged interface value is not a state: its
+  //    sound speed is superluminal.
+  const double rho_avg = 0.5 * (rho_left + rho_right);
+  const double eps_avg = 0.5 * (eps_left + eps_right);
+  const double p_avg = 0.5 * (pressure_left + pressure_right);
+  std::array<double, 3> b_field_avg{};
+  for (size_t i = 0; i < 3; ++i) {
+    gsl::at(b_field_avg, i) =
+        0.5 * (gsl::at(b_field_left, i) + gsl::at(b_field_right, i));
+  }
+  const double enthalpy_avg = 1.0 + eps_avg + p_avg / rho_avg;
+  const double naive_sound_speed_squared =
+      adiabatic_index * (adiabatic_index - 1.0) * eps_avg / enthalpy_avg;
+  CAPTURE(naive_sound_speed_squared);
+  CHECK(naive_sound_speed_squared > 1.0);
+  // ... while the state that IS consistent at (rho_avg, eps_avg) is nowhere
+  // near the light cone. The gap is the defect, not the magnitude of c_s^2.
+  const double consistent_sound_speed_squared =
+      adiabatic_index * (adiabatic_index - 1.0) * eps_avg /
+      (1.0 + adiabatic_index * eps_avg);
+  CHECK(consistent_sound_speed_squared < 0.67);
+
+  // 3. The interface call is refused, for every one of the three slow-speed
+  //    algorithms, with the offending state in the message.
+  for (const auto method :
+       {grmhd::ValenciaDivClean::SlowMagnetosonicSpeedMethod::ReducedQuadratic,
+        grmhd::ValenciaDivClean::SlowMagnetosonicSpeedMethod::
+            ReducedQuadraticThenNewton,
+        grmhd::ValenciaDivClean::SlowMagnetosonicSpeedMethod::Toms748}) {
+    CHECK_THROWS_WITH(speeds_at(rho_avg, eps_avg, p_avg, b_field_avg, method),
+                      Catch::Matchers::ContainsSubstring(
+                          "The sound speed squared is outside [0, 1)"));
+  }
 }
 
 void test_mhd_characteristics(const DataVector& used_for_size) {
@@ -3627,7 +3833,119 @@ void test_numeric_vs_analytic_flux(const bool output) {
 // exact solver only outputs primitives, so the speeds (and hence the degeneracy
 // structure) are computed here.  Env-driven:
 // SPECTRE_WAVESTRUCT="profile.dat:gamma:Bx"; output goes to
-// "profile.dat.speeds" (x + 9 speeds in MhdSpeed order).
+// "profile.dat.speeds" (x + 9 speeds in MhdSpeed order). BB2: double-vs-quad
+// accuracy of the MHD characteristic speeds over the SAME (sigma, theta, W)
+// grid used by the Task B2 slow-content sweep, so the two maps can be overlaid.
+// The question BB2 answers is not "does the solver crash" but "are the
+// characteristic-speed errors acceptable in the region where slow-wave content
+// actually matters (sigma ~ 0.1-1)".
+//
+// No-op unless SPECTRE_BB2_SWEEP is set, following dump_wave_structure below.
+// Emits one BB2 line per grid point; parse with
+// meetings/2026-09-03/scripts/plot_bb2_error_map.py.
+void bb2_error_sweep() {
+  if (std::getenv("SPECTRE_BB2_SWEEP") == nullptr) {
+    return;
+  }
+  constexpr size_t num_points = 1;
+  const auto eos_2d = EquationsOfState::IdealFluid<true>(2.0, 0.0);
+  tnsr::ii<DataVector, 3, Frame::Inertial> spatial_metric{num_points, 0.0};
+  for (size_t i = 0; i < 3; ++i) {
+    spatial_metric.get(i, i) = 1.0;
+  }
+  tnsr::i<DataVector, 3, Frame::Inertial> unit_normal{num_points, 0.0};
+  unit_normal.get(0) = 1.0;
+
+  constexpr size_t n_sigma = 31;
+  constexpr size_t n_theta = 23;
+  // (W, pressure): hot and cold, at rest and boosted. The cold rows matter
+  // because cs^2 -> 0 is where fast and Alfven degenerate (see BB1).
+  const std::array<std::pair<double, double>, 4> regimes{
+      {{1.0, 1.0}, {1.0, 1.0e-4}, {2.0, 1.0}, {2.0, 1.0e-4}}};
+
+  printf(
+      "BB2_HEADER sigma theta_deg W pressure cs2 "
+      "err_fast err_slow err_alfven err_entropy relerr_slow slow_sep\n");
+  for (const auto& [W, p_val] : regimes) {
+    Scalar<DataVector> rest_mass_density{DataVector(num_points, 1.0)};
+    const Scalar<DataVector> pressure{DataVector(num_points, p_val)};
+    const Scalar<DataVector> specific_internal_energy =
+        eos_2d.specific_internal_energy_from_density_and_pressure(
+            rest_mass_density, pressure);
+    const Scalar<DataVector> specific_enthalpy =
+        hydro::relativistic_specific_enthalpy(
+            rest_mass_density, specific_internal_energy, pressure);
+    Scalar<DataVector> sound_speed_squared{DataVector(num_points, 0.0)};
+    get(sound_speed_squared) =
+        get(eos_2d.chi_from_density_and_energy(rest_mass_density,
+                                               specific_internal_energy)) +
+        get(eos_2d.kappa_times_p_over_rho_squared_from_density_and_energy(
+            rest_mass_density, specific_internal_energy));
+    get(sound_speed_squared) /= get(specific_enthalpy);
+
+    const double vmag = std::sqrt(std::max(0.0, 1.0 - 1.0 / square(W)));
+    for (size_t is = 0; is < n_sigma; ++is) {
+      const double ts =
+          static_cast<double>(is) / static_cast<double>(n_sigma - 1);
+      const double sigma = std::pow(10.0, -3.0 + 4.0 * ts);  // 1e-3 .. 10
+      const double Bmag = std::sqrt(sigma * get(rest_mass_density)[0] *
+                                    get(specific_enthalpy)[0]);
+      for (size_t it = 0; it < n_theta; ++it) {
+        const double theta_deg = 1.0 + 88.0 * static_cast<double>(it) /
+                                           static_cast<double>(n_theta - 1);
+        const double theta = theta_deg * M_PI / 180.0;
+        Scalar<DataVector> lorentz_factor{DataVector(num_points, W)};
+        tnsr::I<DataVector, 3, Frame::Inertial> spatial_velocity{num_points,
+                                                                 0.0};
+        spatial_velocity.get(0) = vmag;  // boost along the normal
+        tnsr::I<DataVector, 3, Frame::Inertial> magnetic_field{num_points, 0.0};
+        magnetic_field.get(0) = Bmag * std::cos(theta);
+        magnetic_field.get(1) = Bmag * std::sin(theta);
+
+        tnsr::i<DataVector, 9> speeds{num_points, 0.0};
+        grmhd::ValenciaDivClean::characteristic_speeds_mhd(
+            make_not_null(&speeds), spatial_velocity, magnetic_field,
+            rest_mass_density, specific_internal_energy, lorentz_factor,
+            specific_enthalpy, spatial_metric, unit_normal, eos_2d);
+
+        std::array<quad_ref::Quad, 3> q_v{};
+        std::array<quad_ref::Quad, 3> q_B{};
+        std::array<quad_ref::Quad, 3> q_n{};
+        std::array<std::array<quad_ref::Quad, 3>, 3> q_g{};
+        for (size_t i = 0; i < 3; ++i) {
+          q_v[i] = spatial_velocity.get(i)[0];
+          q_B[i] = magnetic_field.get(i)[0];
+          q_n[i] = unit_normal.get(i)[0];
+          for (size_t j = 0; j < 3; ++j) {
+            q_g[i][j] = spatial_metric.get(i, j)[0];
+          }
+        }
+        const auto q_speeds = quad_ref::characteristic_speeds_mhd(
+            q_v, q_B, get(rest_mass_density)[0],
+            get(specific_internal_energy)[0], W, get(specific_enthalpy)[0], q_g,
+            q_n);
+
+        // speed index order: 0/8 GLM, 1/7 fast, 2/6 alfven, 3/5 slow, 4 entropy
+        const auto err = [&speeds, &q_speeds](const size_t i) {
+          return std::abs(speeds.get(i)[0] - static_cast<double>(q_speeds[i]));
+        };
+        const double e_fast = std::max(err(1), err(7));
+        const double e_slow = std::max(err(3), err(5));
+        const double e_alf = std::max(err(2), err(6));
+        const double e_ent = err(4);
+        const double slow_scale =
+            std::max(std::abs(static_cast<double>(q_speeds[3])),
+                     std::abs(static_cast<double>(q_speeds[5])));
+        const double slow_sep = static_cast<double>(q_speeds[5] - q_speeds[3]);
+        printf("BB2 %.6e %.4f %.3f %.6e %.6e %.6e %.6e %.6e %.6e %.6e %.6e\n",
+               sigma, theta_deg, W, p_val, get(sound_speed_squared)[0], e_fast,
+               e_slow, e_alf, e_ent,
+               slow_scale > 0.0 ? e_slow / slow_scale : 0.0, slow_sep);
+      }
+    }
+  }
+}
+
 void dump_wave_structure() {
   const char* spec = std::getenv("SPECTRE_WAVESTRUCT");
   if (spec == nullptr) {
@@ -3710,12 +4028,148 @@ void dump_wave_structure() {
 
 }  // namespace
 
+// Restored 2026-08-20 from tov-2d-axi (dropped by the 2026-08-14 Iago merge,
+// see the paired restore in Characteristics.cpp). Validates that
+// `characteristic_eigenvectors_hydro` and `flux_jacobian_hydro` produce a
+// consistent eigensystem when the tabulated 3D EoS actually supplies a
+// non-zero \f$\zeta = \partial p/\partial Y_e |_{\rho, \epsilon}\f$. This
+// exercises the composition-coupling branches (`zeta_max_abs >= 1e-14`) of
+// the analytic left eigenvectors, which are otherwise dead code when
+// \f$\zeta\f$ is hard-coded to zero.
+void test_tabulated3d_kappa_and_zeta_in_characteristics() {
+  const size_t num_points = 3;
+  const DataVector used_for_size(num_points, 0.0);
+
+  const std::string eos_file_name{
+      unit_test_src_path() +
+      "PointwiseFunctions/Hydro/EquationsOfState/dd2_unit_test.h5"};
+  h5::H5File<h5::AccessType::ReadOnly> eos_file{eos_file_name};
+  const auto& compose_eos = eos_file.get<h5::EosTable>("/dd2");
+  EquationsOfState::Tabulated3D<true> equation_of_state;
+  equation_of_state.initialize(compose_eos);
+
+  Scalar<DataVector> temperature{DataVector(num_points, 0.1)};
+  Scalar<DataVector> rest_mass_density{DataVector(num_points, 1.0e-4)};
+  Scalar<DataVector> electron_fraction{DataVector(num_points, 0.01)};
+
+  const auto specific_internal_energy =
+      equation_of_state.specific_internal_energy_from_density_and_temperature(
+          rest_mass_density, temperature, electron_fraction);
+  const auto pressure = equation_of_state.pressure_from_density_and_temperature(
+      rest_mass_density, temperature, electron_fraction);
+  const auto specific_enthalpy = hydro::relativistic_specific_enthalpy(
+      rest_mass_density, specific_internal_energy, pressure);
+  const auto kappa = equation_of_state.kappa_from_density_and_temperature(
+      rest_mass_density, temperature, electron_fraction);
+  const auto zeta = equation_of_state.zeta_from_density_and_temperature(
+      rest_mass_density, temperature, electron_fraction);
+
+  // Confirm the tabulated EoS actually supplies non-zero derivatives.
+  CHECK(max(abs(get(kappa))) > 1.0e-12);
+  CHECK(max(abs(get(zeta))) > 1.0e-12);
+
+  tnsr::ii<DataVector, 3, Frame::Inertial> spatial_metric{
+      make_with_value<tnsr::ii<DataVector, 3, Frame::Inertial>>(used_for_size,
+                                                                0.0)};
+  for (size_t i = 0; i < 3; ++i) {
+    spatial_metric.get(i, i) = 1.0;
+  }
+  const auto inv_spatial_metric =
+      determinant_and_inverse(spatial_metric).second;
+
+  tnsr::I<DataVector, 3, Frame::Inertial> spatial_velocity{
+      make_with_value<tnsr::I<DataVector, 3, Frame::Inertial>>(used_for_size,
+                                                               0.0)};
+  spatial_velocity.get(0) = 0.1;
+  spatial_velocity.get(1) = 0.02;
+  spatial_velocity.get(2) = -0.03;
+
+  const double velocity_squared = 0.1 * 0.1 + 0.02 * 0.02 + 0.03 * 0.03;
+  Scalar<DataVector> lorentz_factor{
+      DataVector(num_points, 1.0 / sqrt(1.0 - velocity_squared))};
+
+  const auto unit_normal =
+      unit_basis_form(Direction<3>::upper_xi(), inv_spatial_metric);
+
+  constexpr size_t matrix_size = 6;
+
+  // Analytic eigenvectors, standardized modes/projectors layout.
+  tnsr::ij<DataVector, matrix_size> characteristic_modes{num_points};
+  tnsr::IJ<DataVector, matrix_size> characteristic_projectors{num_points};
+  grmhd::ValenciaDivClean::characteristic_eigenvectors_hydro(
+      make_not_null(&characteristic_modes),
+      make_not_null(&characteristic_projectors), spatial_velocity,
+      rest_mass_density, specific_internal_energy, specific_enthalpy,
+      electron_fraction, lorentz_factor, unit_normal, spatial_metric,
+      equation_of_state);
+
+  // Analytic speeds, packed to match the HydroVectorR ordering.
+  tnsr::i<DataVector, 3> hydro_speeds{num_points};
+  grmhd::ValenciaDivClean::characteristic_speeds_hydro(
+      make_not_null(&hydro_speeds), spatial_velocity, rest_mass_density,
+      specific_internal_energy, electron_fraction, lorentz_factor,
+      specific_enthalpy, spatial_metric, unit_normal, equation_of_state);
+  tnsr::i<DataVector, matrix_size> eigenvalues{num_points};
+  for (size_t i = 0; i < 4; ++i) {
+    eigenvalues.get(i) = hydro_speeds.get(
+        grmhd::ValenciaDivClean::HydroSpeed::NormalDotVelocity);
+  }
+  eigenvalues.get(grmhd::ValenciaDivClean::HydroVectorR::Rplus) =
+      hydro_speeds.get(grmhd::ValenciaDivClean::HydroSpeed::LambdaPlus);
+  eigenvalues.get(grmhd::ValenciaDivClean::HydroVectorR::Rminus) =
+      hydro_speeds.get(grmhd::ValenciaDivClean::HydroSpeed::LambdaMinus);
+
+  // Flux Jacobian for the eigensystem consistency check.
+  tnsr::iJ<DataVector, matrix_size> characteristic_matrix{num_points};
+  grmhd::ValenciaDivClean::flux_jacobian_hydro(
+      make_not_null(&characteristic_matrix), spatial_velocity,
+      rest_mass_density, specific_internal_energy, electron_fraction,
+      lorentz_factor, specific_enthalpy, spatial_metric, inv_spatial_metric,
+      unit_normal, equation_of_state);
+
+  // Eigensystem relation A.R = lambda R and L.A = lambda L for each wave.
+  constexpr double tolerance = 1.0e-10;
+  for (size_t i = 0; i < matrix_size; ++i) {
+    const Scalar<DataVector> eigenvalue{};
+    const tnsr::i<DataVector, matrix_size> right_eigenvector{};
+    const tnsr::I<DataVector, matrix_size> left_eigenvector{};
+    make_const_view(make_not_null(&get(eigenvalue)), eigenvalues.get(i), 0,
+                    num_points);
+    for (size_t k = 0; k < matrix_size; ++k) {
+      make_const_view(make_not_null(&right_eigenvector.get(k)),
+                      characteristic_modes.get(i, k), 0, num_points);
+      make_const_view(make_not_null(&left_eigenvector.get(k)),
+                      characteristic_projectors.get(i, k), 0, num_points);
+    }
+    const Scalar<DataVector> right_residual = magnitude(tenex::evaluate<ti::k>(
+        characteristic_matrix(ti::k, ti::J) * right_eigenvector(ti::j) -
+        eigenvalue() * right_eigenvector(ti::k)));
+    const Scalar<DataVector> left_residual = magnitude(tenex::evaluate<ti::K>(
+        left_eigenvector(ti::J) * characteristic_matrix(ti::j, ti::K) -
+        eigenvalue() * left_eigenvector(ti::K)));
+    CHECK(max(get(right_residual)) < tolerance);
+    CHECK(max(get(left_residual)) < tolerance);
+  }
+
+  // When zeta != 0 the composition eigenvector must depart from the trivial
+  // passive-advection form. In the zeta = 0 limit `R4[5] = 1` and
+  // `L4[5] = 1`, `L4[0] = -Y_e`. Verify that neither collapses to the
+  // trivial values.
+  CHECK(max(abs(characteristic_modes.get(
+                    grmhd::ValenciaDivClean::HydroVectorR::R4, 5) -
+                1.0)) > 1.0e-12);
+  CHECK(max(abs(characteristic_projectors.get(
+                    grmhd::ValenciaDivClean::HydroVectorL::L4, 5) -
+                1.0)) > 1.0e-12);
+}
+
 SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.Characteristics",
                   "[Unit][Evolution]") {
   const pypp::SetupLocalPythonEnvironment local_python_env{
       "Evolution/Systems/GrMhd/ValenciaDivClean"};
 
   dump_wave_structure();  // no-op unless SPECTRE_WAVESTRUCT is set
+  bb2_error_sweep();      // no-op unless SPECTRE_BB2_SWEEP is set
   const DataVector dv(5);
   test_characteristic_speeds(dv);
   // Test with aligned normals to check the code works
@@ -3724,9 +4178,10 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.Characteristics",
   test_hydro_characteristic_speed(dv);
   test_hydro_numerical_characteristics(dv);
   test_hydro_analytic_eigenvectors(dv);
-  test_tabulated3d_kappa_and_zeta_in_characteristics();
   test_hydro_characteristics_match_unoptimized_version(dv);
   test_quartic_rootfinding(dv);
+  test_mhd_speeds_interlace();
+  test_superluminal_interface_sound_speed();
   // Run data-producing sweeps — quartic_shape and typical_vn_sweep first
   // since they use moderate W.  test_mhd_characteristics_errors pushes to
   // W=100 at high sigma where the tighter production tolerance (1e-15)
@@ -3751,4 +4206,5 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.Characteristics",
   TestHelpers::db::test_compute_tag<
       grmhd::ValenciaDivClean::Tags::CharacteristicSpeedsCompute>(
       "CharacteristicSpeeds");
+  test_tabulated3d_kappa_and_zeta_in_characteristics();
 }

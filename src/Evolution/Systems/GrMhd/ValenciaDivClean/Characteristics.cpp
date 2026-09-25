@@ -3,11 +3,6 @@
 
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/Characteristics.hpp"
 
-// BB1 diagnostic (opt-in via SPECTRE_QUARTIC_DIAG=1); see
-// runs-ai/mhd_marquina/meetings/2026-09-03/plan.md Task BB.
-#include <cstdio>
-#include <cstdlib>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -19,6 +14,7 @@
 #include <gsl/gsl_math.h>
 #include <gsl/gsl_matrix.h>
 #include <gsl/gsl_vector.h>
+#include <limits>
 #include <stdexcept>
 
 #include "DataStructures/DataVector.hpp"
@@ -177,6 +173,91 @@ DataVector floored_denominator(const DataVector& denominator,
     }
   }
   return result;
+}
+
+// The floor on the interlacing slack, for well-separated roots where the
+// conditioning estimate below is meaningless.
+constexpr double interlacing_slack_floor = 1.0e-10;
+
+// How finely a root of the magnetosonic quartic can be LOCATED AT ALL.
+//
+// A perturbation of size `noise` in the evaluation of Q displaces a root x by
+// noise/|Q'(x)|, and for a monic quartic |Q'(x)| is the product of the
+// distances from x to the other three roots. In a cluster of nearly coincident
+// speeds it therefore collapses like the CUBE of the cluster width, and the
+// roots cannot be ordered more finely than that no matter how the solve is
+// done. Cold, weakly magnetized, fast-moving fluid sits in exactly that
+// cluster, and that is the Del Zanna jet's cocoon.
+//
+// MEASURED, on a state the unit-test sweep generates (cs^2 = 1.67e-4,
+// b^2/(rho h) = 2.4e-5, W = 3.3): all four magnetosonic roots lie inside
+// 2.5e-3, |Q'| at the slow roots is 9.8e-10, the achievable root accuracy is
+// 9.8e-6, and the slow-minus root comes back 4.8e-6 BELOW the Alfven speed --
+// half the noise floor. That is not a misidentified root, it is two speeds
+// that are equal to within what double precision can resolve, and a fixed
+// tolerance cannot tell the two situations apart. Hence the slack is stated
+// relative to the conditioning.
+double quartic_root_uncertainty(const double c0, const double c1,
+                                const double c2, const double c3,
+                                const double x) {
+  const double derivative =
+      std::abs(((4.0 * x + 3.0 * c3) * x + 2.0 * c2) * x + c1);
+  if (not(derivative > 0.0)) {
+    // A genuine multiple root: the ordering carries no information at all.
+    return std::numeric_limits<double>::infinity();
+  }
+  const double noise =
+      8.0 * std::numeric_limits<double>::epsilon() *
+      std::max({1.0, std::abs(c0), std::abs(c1), std::abs(c2), std::abs(c3)});
+  return noise / derivative;
+}
+
+// The slack the interlacing chain is checked against at one point. The factor
+// of four is margin over the estimate above; on the measured state it leaves
+// the healthy violation sixteen times inside the slack, while a fast root
+// substituted into a slow slot there overshoots it by eighteen times, so the
+// check still discriminates where it is loosest.
+double interlacing_tolerance(const double c0, const double c1, const double c2,
+                             const double c3, const double slow_minus,
+                             const double slow_plus) {
+  return std::max(interlacing_slack_floor,
+                  4.0 * (quartic_root_uncertainty(c0, c1, c2, c3, slow_minus) +
+                         quartic_root_uncertainty(c0, c1, c2, c3, slow_plus)));
+}
+
+// The physical interlacing of the RMHD characteristic speeds,
+//
+//   lambda_f^- <= lambda_a^- <= lambda_s^- <= lambda_e
+//              <= lambda_s^+ <= lambda_a^+ <= lambda_f^+,
+//
+// which is Anton, Miralles, Marti, Ibanez, Aloy & Mimica (2010), Eq. (42)
+// (papers/2010-anton-et-al-eigenvectors), and is also the ordering the
+// `MhdSpeed` enum in Characteristics.hpp is documented with. NOTE THE ORDER:
+// the Alfven speed sits OUTSIDE the slow speed and INSIDE the fast one. It is
+// easy to write the chain down with slow and Alfven swapped, and a check
+// asserting that swapped chain would fire on every ordinary state.
+//
+// This is the check the residual test structurally cannot do. The quartic has
+// four roots and |Q(root)| is ~0 at ANY of them, so verifying the residual at
+// the returned "slow" pair says nothing about WHICH pair came back: a
+// deflation that hands the fast roots (or one fast and one slow) back as the
+// slow pair passes the residual check exactly. The ORDERING is what identifies
+// the roots, and nothing else here does.
+//
+// Returns the largest amount by which a member of the chain exceeds its
+// successor, and 0.0 when the chain is ordered.
+double interlacing_violation(const double fast_minus, const double alfven_minus,
+                             const double slow_minus, const double entropy,
+                             const double slow_plus, const double alfven_plus,
+                             const double fast_plus) {
+  const std::array<double, 7> chain{{fast_minus, alfven_minus, slow_minus,
+                                     entropy, slow_plus, alfven_plus,
+                                     fast_plus}};
+  double worst = 0.0;
+  for (size_t i = 0; i + 1 < chain.size(); ++i) {
+    worst = std::max(worst, gsl::at(chain, i) - gsl::at(chain, i + 1));
+  }
+  return worst;
 }
 
 }  // namespace
@@ -514,17 +595,61 @@ void find_magnetosonic_speed_from_quartic(
   // Find the root using Newton-Rapshon
   DataVector& F = get(get<::Tags::TempScalar<0>>(temp_tensors));
   DataVector& dF = get(get<::Tags::TempScalar<1>>(temp_tensors));
+
+  // Evaluating F by Horner cannot resolve below the cancellation floor
+  //   eps * sum_k |c_k x^k|,
+  // because at a root the O(|c_k x^k|) terms must cancel to zero. The quartic
+  // coefficients grow with magnetisation, so at high sigma that floor can
+  // exceed the fixed 1e-14 target -- the old test `max(abs(F)) < tolerance`
+  // then becomes UNSATISFIABLE and Newton spins in round-off noise until the
+  // iteration cap and ERRORs out. Observed on a magnetization sweep:
+  //   sigma=20 stalled at |F| = 5.5e-13 (only ~55x the target),
+  //   sigma=10 stalled at |F| = 4.2e-8.
+  // Accept a point once |F| reaches the larger of `tolerance` and that
+  // achievable floor. This is strictly MORE permissive than the old test, so
+  // every state that converged before still converges; it only stops us
+  // demanding accuracy that double precision cannot deliver.
+  constexpr double eps_mach = std::numeric_limits<double>::epsilon();
+  const auto achievable_tolerance = [&c0, &c1, &c2, &c3, tolerance](
+                                        const double x_point,
+                                        const size_t point) {
+    const double ax = std::abs(x_point);
+    const double sum_abs =
+        (((ax + std::abs(c3[point])) * ax + std::abs(c2[point])) * ax +
+         std::abs(c1[point])) *
+            ax +
+        std::abs(c0[point]);
+    return std::max(tolerance, 8.0 * eps_mach * sum_abs);
+  };
+
   for (size_t iter = 0; iter < max_iters; ++iter) {
     // Horner form minimizes intermediate temporary vectors in the hot loop.
     // F(x) = x^4 + c3 x^3 + c2 x^2 + c1 x + c0
     F = (((x + c3) * x + c2) * x + c1) * x + c0;
 
-    if (max(abs(F)) < tolerance) {
+    bool all_converged = true;
+    for (size_t point = 0; point < x.size(); ++point) {
+      if (std::abs(F[point]) >= achievable_tolerance(x[point], point)) {
+        all_converged = false;
+        break;
+      }
+    }
+    if (all_converged) {
       return;
     }
 
     // F'(x) = 4 x^3 + 3 c3 x^2 + 2 c2 x + c1
     dF = ((4.0 * x + 3.0 * c3) * x + 2.0 * c2) * x + c1;
+
+    // Freeze points that have already reached their achievable accuracy, so a
+    // single hard point cannot keep stepping -- and degrading -- the ones that
+    // are already as good as double precision allows.
+    for (size_t point = 0; point < x.size(); ++point) {
+      if (std::abs(F[point]) < achievable_tolerance(x[point], point)) {
+        F[point] = 0.0;
+        dF[point] = 1.0;
+      }
+    }
 
     // Avoid FPE from dividing by a small derivative
     if (min(abs(dF)) < tolerance) {
@@ -556,10 +681,24 @@ void find_magnetosonic_speed_from_quartic(
   }
 
   F = (((x + c3) * x + c2) * x + c1) * x + c0;
+  // Report the achievable floor alongside |F| so a residual failure says
+  // whether the target was reachable at all.
+  size_t worst_point = 0;
+  double worst_ratio = 0.0;
+  for (size_t point = 0; point < x.size(); ++point) {
+    const double ratio =
+        std::abs(F[point]) / achievable_tolerance(x[point], point);
+    if (ratio > worst_ratio) {
+      worst_ratio = ratio;
+      worst_point = point;
+    }
+  }
   ERROR(
       "Failed to compute magnetosonic speed from quartic: exceeded maximum "
       "number of iterations. Max |F| = "
-      << max(abs(F)));
+      << max(abs(F)) << ", worst |F|/achievable_floor = " << worst_ratio
+      << " at x = " << x[worst_point] << " (floor = "
+      << achievable_tolerance(x[worst_point], worst_point) << ")");
 }
 
 template <size_t ThermodynamicDim>
@@ -630,6 +769,73 @@ void characteristic_speeds_mhd(
                 .kappa_times_p_over_rho_squared_from_density_and_energy(
                     rest_mass_density, specific_internal_energy));
     get(sound_speed_squared) /= get(specific_enthalpy);
+  }
+
+  // --- admissibility guard on the sound speed --------------------------------
+  // Ideal RMHD is hyperbolic -- and the magnetosonic quartic below has four
+  // real roots, all inside the light cone -- only for 0 <= c_s^2 < 1 (Anile
+  // 1989; Del Zanna, Bucciantini & Londrillo, A&A 400, 397 (2003), Sect. 2.2,
+  // their Eq. 16). Every physical equation of state respects that, but a
+  // state that is not consistent with its equation of state need not: if rho,
+  // eps and p are averaged INDEPENDENTLY across a face to build one interface
+  // eigensystem, the triple satisfies no equation of state, and
+  // since c_s^2 is formed here as (chi + kappa p/rho^2)/h with chi and kappa
+  // evaluated at (rho_avg, eps_avg) but h built from p_avg, it can come out
+  // ABOVE 1. For an ideal fluid the ceiling of that mismatch is
+  // Gamma (Gamma - 1), which exceeds 1 for every Gamma above the golden ratio
+  // 1.618 -- so Gamma = 5/3 is exposed and Gamma = 4/3 is not. Reaching it
+  // needs eps_avg >~ 9 with p_avg/rho_avg small, i.e. a strong contact between
+  // a hot rarefied cell and a cold dense one: exactly the cocoon/ambient
+  // interface of the Del Zanna jet.
+  //
+  // What a superluminal c_s^2 does downstream is not a rounding problem.
+  // Measured on 300,000 random states with geometrically consistent (v, B, n):
+  //     c_s^2 <= 1     -> reduced-quadratic discriminant in [-6.2e-7, +4.00],
+  //                       which is exactly the round-off the clamp further
+  //                       down was written for (the -6.2e-7 floor is from an
+  //                       adversarial search over admissible states; a random
+  //                       sweep at fixed c_s^2 = 0.2 reaches only -3.6e-8);
+  //     c_s^2 = 1.001  -> discriminant down to -7.2e+03, 1.2% of states below
+  //                       -1e-3; c_s^2 = 1.111 -> down to -1.9e+03, 24%.
+  // The practical onset is not exactly c_s^2 = 1 but c_s^2 - 1 ~ 0.25/W^2:
+  // the quartic's leading coefficient carries W^2 (1 - c_s^2), so a state with
+  // W <= 1.5 cannot be broken by this mechanism at all even at the Gamma = 5/3
+  // ceiling 1.1111 (0 of 20,000 draws), while at the jet's W ~ 7 the onset is
+  // an overshoot of 5.2e-3. Gamma > 1.618 makes c_s^2 > 1 REACHABLE; W decides
+  // whether it breaks anything. Both are necessary, neither is sufficient.
+  // The quartic either acquires a complex-conjugate pair (>90% of the
+  // failures) or pushes its extremal roots outside [-1, 1]. The latter also
+  // destroys the property that makes the +/-1 seeds in
+  // `find_magnetosonic_speed_from_quartic` land on the FAST pair -- for x
+  // beyond every root the quartic's derivatives alternate in sign, so Newton
+  // converges monotonically to the nearest root, and once a root passes +/-1
+  // that guarantee is gone and BOTH seeds can converge to the same root. The
+  // deflation below is then performed with fast_minus == fast_plus. That is
+  // the origin of the
+  //   "reduced quadratic has negative discriminant ... discriminant = -7.8678"
+  // abort of a Del Zanna et al. (2003) jet run: a discriminant is
+  // (slow_plus - slow_minus)^2 when the deflation is valid, so it can only lie
+  // in [-4, +4] for roots inside the light cone, and -7.87 is outside that
+  // band -- it cannot come from a valid deflation at all, however inaccurate.
+  //
+  // So a sound speed outside [0, 1) is not repaired here: the quartic below
+  // would no longer be the RMHD one, and saturating c_s^2 would hide the
+  // caller that produced it. Every caller must pass a state consistent with
+  // its equation of state -- each face's own state, or an interface state
+  // whose pressure and enthalpy come from the equation of state at the
+  // averaged (rho, eps) -- and for a causal equation of state such a state
+  // always has 0 <= c_s^2 < 1.
+  for (size_t point = 0; point < num_points; ++point) {
+    const double cs2 = get(sound_speed_squared)[point];
+    if (not(cs2 >= 0.0 and cs2 < 1.0)) {
+      ERROR("The sound speed squared is outside [0, 1): c_s^2 = "
+            << cs2 << " at point " << point << ", rest-mass density = "
+            << get(rest_mass_density)[point] << ", specific internal energy = "
+            << get(specific_internal_energy)[point]
+            << ", specific enthalpy = " << get(specific_enthalpy)[point]
+            << ". Either the equation of state is acausal here, or the "
+               "caller passed a state that is not consistent with it.");
+    }
   }
 
   // Scalar speeds
@@ -770,22 +976,90 @@ void characteristic_speeds_mhd(
     const double N_alfven_plus_eps = evaluate_quartic(alfven_plus_eps_i, point);
     // Check if we have one of the possible degeneracies and use it to avoid
     // rootfinding / reduced-quadratic solve for the slow roots
+    // A degeneracy shortcut is only a HYPOTHESIS: the tests below ask whether
+    // v_n or an Alfven speed happens to be a root of the magnetosonic quartic,
+    // which does NOT establish WHICH root it is. When the fluid is cold
+    // (cs^2 -> 0) the FAST speed degenerates onto the Alfven speed, so
+    // |Q(alfven+)| < tolerance is satisfied by alfven+ = fast+ -- a different
+    // degeneracy entirely. Accepting it then sets slow+ := fast+ and Vieta
+    // propagates the error into slow-, returning the OUTER pair as the slow
+    // pair. Measured on 14 captured failing states (cs^2 ~ 1e-6..3e-5,
+    // b^2/(rho h) ~ 2e-5..1e-3): slow roots wrong by up to 1.8e-2, while the
+    // quartic itself was perfectly well conditioned (|Q| at the returned roots
+    // sat 1e3..1e8 ABOVE the Horner noise floor, and double vs exact-rational
+    // evaluation of Q was indistinguishable). This was never a precision
+    // problem, so no amount of extra precision would have fixed it.
+    //
+    // So: form the shortcut candidate, VERIFY the resulting PAIR against the
+    // quartic, and fall through to the general solve if it does not hold.
+    // Verifying the pair is what catches the misclassification -- alfven+ on
+    // its own is a genuine root and passes, but the Vieta partner it implies
+    // does not. No tolerance tuning is required, and the general path is known
+    // to recover all 14 states correctly.
+    double degenerate_slow_minus = 0.0;
+    double degenerate_slow_plus = 0.0;
+    bool degeneracy_hypothesis = false;
     if (std::abs(N_vn) < tolerance) {
       // Type I: alfven- = slow- = entropy = slow+ = alfven+
-      slow_minus[point] = vn_i;
-      slow_plus[point] = vn_i;
+      degenerate_slow_minus = vn_i;
+      degenerate_slow_plus = vn_i;
+      degeneracy_hypothesis = true;
     } else if (std::abs(N_alfven_minus) < tolerance and
                N_alfven_minus_eps > 0.0) {
       // Type II on the minus side: alfven- = slow-
-      slow_minus[point] = alfven_minus_i;
-      slow_plus[point] =
-          -c3[point] - slow_minus[point] - fast_minus[point] - fast_plus[point];
+      degenerate_slow_minus = alfven_minus_i;
+      degenerate_slow_plus = -c3[point] - degenerate_slow_minus -
+                             fast_minus[point] - fast_plus[point];
+      degeneracy_hypothesis = true;
     } else if (std::abs(N_alfven_plus) < tolerance and
                N_alfven_plus_eps < 0.0) {
       // Type II on the plus side: slow+ = alfven+
-      slow_plus[point] = alfven_plus_i;
-      slow_minus[point] =
-          -c3[point] - fast_minus[point] - fast_plus[point] - slow_plus[point];
+      degenerate_slow_plus = alfven_plus_i;
+      degenerate_slow_minus = -c3[point] - fast_minus[point] -
+                              fast_plus[point] - degenerate_slow_plus;
+      degeneracy_hypothesis = true;
+    }
+    // The residual test below is necessary but NOT sufficient, and on the Del
+    // Zanna jet it was not enough. The quartic has four roots and |Q| ~ 0 at
+    // every one of them, so a candidate that is a root of the WRONG wave
+    // passes it. Measured on a Del Zanna et al. (2003) jet run (t = 3.0):
+    // alfven+ sat 5.06e-08 below fast+, so the Type II plus-side test fired on
+    // the FAST root; its disambiguating sign probe steps eps = 1e-12, five
+    // orders smaller than the distance to the root it was actually near, and
+    // so reported the wrong side. The shortcut then set slow+ := alfven+ ~
+    // fast+, Vieta handed back slow- ~ fast-, and BOTH candidates satisfied
+    // this residual test at ~1e-15. The solver returned the fast pair,
+    // duplicated, in the slow slots -- 4.40e-05 from the true slow roots,
+    // which the general path finds to 8.0e-15. Hllem then anti-diffuses the
+    // "slow" wave along an eigenvector belonging to a different wave.
+    //
+    // So also require that the candidates OCCUPY THE SLOW POSITIONS in the
+    // characteristic ordering (Anton et al. 2010, Eq. 42). The residual tests
+    // whether a number is a root; this tests WHICH root it is.
+    //
+    // The fixed floor is used here rather than the conditioning-scaled
+    // `interlacing_tolerance`, and the asymmetry with the ASSERT below is
+    // deliberate. The scaled slack exists so an ASSERT does not fire on a
+    // state whose roots are genuinely unresolvable; it is the wrong test for
+    // ACCEPTING a shortcut, because the only cost of rejecting one is that the
+    // general solve runs -- the path every non-degenerate point takes anyway.
+    // On that point the scaled slack leaves the inversion a factor 1.09
+    // INSIDE tolerance (it would still be accepted); the fixed floor leaves it
+    // a factor ~900 outside. Genuine Type I and Type II degeneracies interlace
+    // by construction and are unaffected.
+    const bool degeneracy_accepted =
+        degeneracy_hypothesis and
+        std::abs(evaluate_quartic(degenerate_slow_minus, point)) <
+            10.0 * tolerance and
+        std::abs(evaluate_quartic(degenerate_slow_plus, point)) <
+            10.0 * tolerance and
+        interlacing_violation(fast_minus[point], alfven_minus_i,
+                              degenerate_slow_minus, vn_i, degenerate_slow_plus,
+                              alfven_plus_i,
+                              fast_plus[point]) <= interlacing_slack_floor;
+    if (degeneracy_accepted) {
+      slow_minus[point] = degenerate_slow_minus;
+      slow_plus[point] = degenerate_slow_plus;
     } else {
       if (slow_speed_method == SlowMagnetosonicSpeedMethod::ReducedQuadratic or
           slow_speed_method ==
@@ -795,13 +1069,96 @@ void characteristic_speeds_mhd(
                            b_i * (fast_minus[point] + fast_plus[point]) -
                            fast_minus[point] * fast_plus[point];
         double discriminant_i = square(b_i) - 4.0 * c_i;
-        ASSERT(discriminant_i >= -discriminant_tolerance,
-               "Failed to compute slow magnetosonic speeds: reduced quadratic "
-               "has negative discriminant below tolerance. discriminant = "
-                   << discriminant_i << ", tolerance = "
-                   << discriminant_tolerance << ", point = " << point);
-        // Clamp discriminant to zero if it's slightly negative due to
-        // numerical error.
+        // The discriminant is (slow_plus - slow_minus)^2 whenever the
+        // deflation by the two fast roots is valid, so for an admissible state
+        // -- four real roots inside the light cone -- it lies in [0, 4]. A
+        // value outside that band is a CERTIFICATE that one of two hypotheses
+        // failed: either the state handed in was not admissible, or the +/-1
+        // Newton seeds did not land on the extremal pair. It is not a property
+        // of the quantity itself (the quantity this line computes is
+        // unbounded, which is why it came out at -7.87), and it is not an
+        // accuracy problem: the double-precision floor over admissible states
+        // is -6.2e-7 (adversarial Nelder-Mead over Gram-consistent states with
+        // W up to 1.3e6; a 300,000-state random sweep restricted to cs^2 = 0.2
+        // gives the narrower -3.6e-8, which is the number NOT to quote), so
+        // the default 1e-3 tolerance is 1600 floors away, not 28,000.
+        // The state is printed because the
+        // usual cause is upstream -- a caller handing over an interface state
+        // that is not a state (see the sound-speed guard above) -- and one
+        // production run is expensive enough that the numbers have to come out
+        // with the abort.
+        ASSERT(
+            discriminant_i >= -discriminant_tolerance,
+            "Failed to compute slow magnetosonic speeds: reduced quadratic "
+            "has negative discriminant below tolerance. discriminant = "
+                << discriminant_i << ", tolerance = " << discriminant_tolerance
+                << ", point = " << point << ". State at this point: cs^2 = "
+                << get(sound_speed_squared)[point] << ", v_n = " << vn_i
+                << ", W = " << get(lorentz_factor)[point]
+                << ", B_n/sqrt(rho h) = " << get(normal_magnetic_field)[point]
+                << ", (B.v)/sqrt(rho h) = "
+                << get(magnetic_field_dot_spatial_velocity)[point]
+                << ", b^2/(rho h) = "
+                << get(comoving_magnetic_field_squared)[point]
+                << ". Quartic x^4 + c3 x^3 + c2 x^2 + c1 x + c0 with c0 = "
+                << c0[point] << ", c1 = " << c1[point] << ", c2 = " << c2[point]
+                << ", c3 = " << c3[point]
+                << ". Fast roots returned by Newton: fast_minus = "
+                << fast_minus[point] << ", fast_plus = " << fast_plus[point]
+                << " (quartic there: "
+                << evaluate_quartic(fast_minus[point], point) << ", "
+                << evaluate_quartic(fast_plus[point], point)
+                << "); Alfven speeds " << alfven_minus_i << ", "
+                << alfven_plus_i << ".");
+        // The SAME certificate on the other tail, which until now was not
+        // checked at all.
+        //
+        // The check above is one-sided, and an invalid deflation does not
+        // preferentially produce a NEGATIVE discriminant: measured over 40,000
+        // random Gram-consistent states per row, a superluminal interface state
+        // gives `disc > 4` in 21.7% of draws at cs^2 = 1.001, 8.6% at 1.0597
+        // (the jet's own overshoot) and 7.5% at the Gamma = 5/3 ceiling
+        // 1.1111, against 13.2/67.5/71.5% for `disc < -1e-3`. On that branch
+        // the old code took a sqrt of a large positive number and returned
+        // "slow magnetosonic speeds" of up to |lambda| ~ 2e4 -- twenty thousand
+        // times the speed of light -- with no message in any build.
+        //
+        // `PlutoHlld` never reads the slow pair, which is why the jet aborted
+        // rather than silently corrupting: it happened to land on the tail that
+        // is checked. `Hllem` (its speed gaps and eigenvector build) and
+        // `Marquina` DO read it, so for those two this was a live silent path.
+        // The bound is the same one as below: disc = (slow_plus - slow_minus)^2
+        // and both slow roots are inside the light cone for an admissible
+        // state, so disc <= 4, with equality only in the limit slow_minus =
+        // -slow_plus = -1.
+        ASSERT(
+            discriminant_i <= 4.0 + discriminant_tolerance,
+            "Failed to compute slow magnetosonic speeds: reduced quadratic "
+            "has a discriminant above 4, which no valid deflation can "
+            "produce. discriminant = "
+                << discriminant_i << ", tolerance = " << discriminant_tolerance
+                << ", point = " << point << ". State at this point: cs^2 = "
+                << get(sound_speed_squared)[point] << ", v_n = " << vn_i
+                << ", W = " << get(lorentz_factor)[point]
+                << ", B_n/sqrt(rho h) = " << get(normal_magnetic_field)[point]
+                << ", (B.v)/sqrt(rho h) = "
+                << get(magnetic_field_dot_spatial_velocity)[point]
+                << ", b^2/(rho h) = "
+                << get(comoving_magnetic_field_squared)[point]
+                << ". Quartic x^4 + c3 x^3 + c2 x^2 + c1 x + c0 with c0 = "
+                << c0[point] << ", c1 = " << c1[point] << ", c2 = " << c2[point]
+                << ", c3 = " << c3[point]
+                << ". Fast roots returned by Newton: fast_minus = "
+                << fast_minus[point] << ", fast_plus = " << fast_plus[point]
+                << " (quartic there: "
+                << evaluate_quartic(fast_minus[point], point) << ", "
+                << evaluate_quartic(fast_plus[point], point)
+                << "); Alfven speeds " << alfven_minus_i << ", "
+                << alfven_plus_i << ".");
+        // Round-off can leave a valid near-degenerate deflation slightly
+        // negative (the measured floor over admissible states is -6.2e-7), so
+        // floor it at zero before the square root. A value outside the band
+        // itself is not repaired: the ASSERTs above report it.
         discriminant_i = std::max(discriminant_i, 0.0);
 
         // The cancellation-safe root of y^2 + b y + c = 0.
@@ -847,38 +1204,6 @@ void characteristic_speeds_mhd(
       }
     }
 
-    // ---- BB1 diagnostic -------------------------------------------------
-    // When the slow-root verification fails we want the state that produced
-    // it, not an inference from initial data: the failure appears mid-evolution
-    // on states we cannot guess. Set SPECTRE_QUARTIC_DIAG=1 to dump every
-    // failing point and CONTINUE (so one run yields many samples); unset, the
-    // ASSERT below behaves exactly as before.
-    const bool slow_roots_bad = not(
-        std::abs(evaluate_quartic(slow_minus[point], point)) <
-            10.0 * tolerance and
-        std::abs(evaluate_quartic(slow_plus[point], point)) < 10.0 * tolerance);
-    static const bool quartic_diag =
-        std::getenv("SPECTRE_QUARTIC_DIAG") != nullptr;
-    if (slow_roots_bad and quartic_diag) {
-      // One line per failing point. Everything needed to rebuild the quartic
-      // and rerun the reduced-quadratic reconstruction offline.
-      fprintf(stderr,
-              "QUARTIC_DIAG cs2=%.17g vn=%.17g W=%.17g Bn=%.17g Bdv=%.17g "
-              "B2=%.17g b2=%.17g c0=%.17g c1=%.17g c2=%.17g c3=%.17g "
-              "fastm=%.17g fastp=%.17g alfm=%.17g alfp=%.17g "
-              "slowm=%.17g slowp=%.17g Qm=%.17g Qp=%.17g\n",
-              get(sound_speed_squared)[point], vn[point],
-              get(lorentz_factor)[point], get(normal_magnetic_field)[point],
-              get(magnetic_field_dot_spatial_velocity)[point],
-              get(magnetic_field_squared)[point],
-              get(comoving_magnetic_field_squared)[point], c0[point], c1[point],
-              c2[point], c3[point], fast_minus[point], fast_plus[point],
-              alfven_minus[point], alfven_plus[point], slow_minus[point],
-              slow_plus[point], evaluate_quartic(slow_minus[point], point),
-              evaluate_quartic(slow_plus[point], point));
-      continue;  // keep going so a single run samples the whole failure set
-    }
-    // ---- end BB1 diagnostic ---------------------------------------------
     ASSERT(std::abs(evaluate_quartic(slow_minus[point], point)) <
                    10.0 * tolerance and
                std::abs(evaluate_quartic(slow_plus[point], point)) <
@@ -889,6 +1214,71 @@ void characteristic_speeds_mhd(
                << evaluate_quartic(slow_minus[point], point)
                << ", quartic(slow_plus) = "
                << evaluate_quartic(slow_plus[point], point));
+    // ---- interlacing / root identity ----------------------------------
+    // The ASSERT above verifies that the returned slow pair SOLVES the
+    // quartic. It cannot verify that they are the SLOW pair: the quartic has
+    // four roots and the residual is ~0 at every one of them, so a deflation
+    // that returns the fast roots -- or one fast and one slow -- in the slow
+    // slots satisfies it exactly. Nothing else in this function checks which
+    // root is which.
+    //
+    // The ordering does. For an admissible state the seven physical speeds
+    // interlace as lambda_f^- <= lambda_a^- <= lambda_s^- <= lambda_e <=
+    // lambda_s^+ <= lambda_a^+ <= lambda_f^+ (Anton et al. 2010, Eq. (42),
+    // papers/2010-anton-et-al-eigenvectors; the same chain the `MhdSpeed`
+    // enum is documented with in Characteristics.hpp). A fast root in a slow
+    // slot breaks it by the fast/slow gap, which is many orders of magnitude
+    // above the slack.
+    //
+    // Placed BEFORE the clamps, like its siblings, so a debug build reports
+    // the raw values a broken deflation produced rather than repaired ones.
+    ASSERT(
+        interlacing_violation(fast_minus[point], alfven_minus[point],
+                              slow_minus[point], vn_i, slow_plus[point],
+                              alfven_plus[point], fast_plus[point]) <=
+            interlacing_tolerance(c0[point], c1[point], c2[point], c3[point],
+                                  slow_minus[point], slow_plus[point]),
+        "Slow magnetosonic speeds solve the quartic but are not the SLOW "
+        "roots: the characteristic speeds do not interlace. Required "
+        "(Anton et al. 2010, Eq. 42): fast- <= alfven- <= slow- <= "
+        "entropy <= slow+ <= alfven+ <= fast+, slack "
+            << interlacing_tolerance(c0[point], c1[point], c2[point], c3[point],
+                                     slow_minus[point], slow_plus[point])
+            << " (four times the quartic's own root-location noise floor, "
+               "which is what a cluster of nearly coincident speeds "
+               "allows). Got fast- = "
+            << fast_minus[point] << ", alfven- = " << alfven_minus[point]
+            << ", slow- = " << slow_minus[point] << ", entropy = " << vn_i
+            << ", slow+ = " << slow_plus[point]
+            << ", alfven+ = " << alfven_plus[point]
+            << ", fast+ = " << fast_plus[point] << "; worst inversion = "
+            << interlacing_violation(fast_minus[point], alfven_minus[point],
+                                     slow_minus[point], vn_i, slow_plus[point],
+                                     alfven_plus[point], fast_plus[point])
+            << ", point = " << point << ". State at this point: cs^2 = "
+            << get(sound_speed_squared)[point] << ", v_n = " << vn_i
+            << ", W = " << get(lorentz_factor)[point] << ", B_n/sqrt(rho h) = "
+            << get(normal_magnetic_field)[point] << ", (B.v)/sqrt(rho h) = "
+            << get(magnetic_field_dot_spatial_velocity)[point]
+            << ", b^2/(rho h) = " << get(comoving_magnetic_field_squared)[point]
+            << ". Quartic x^4 + c3 x^3 + c2 x^2 + c1 x + c0 with c0 = "
+            << c0[point] << ", c1 = " << c1[point] << ", c2 = " << c2[point]
+            << ", c3 = " << c3[point]
+            << ". Quartic at the returned slow roots: "
+            << evaluate_quartic(slow_minus[point], point) << ", "
+            << evaluate_quartic(slow_plus[point], point)
+            << " (both ~0 -- which is precisely why the residual check "
+               "above passed).");
+
+    // This function is the flat-space (special-relativistic) one -- it takes
+    // no lapse and no shift -- so every root of the quartic lies in [-1, 1]
+    // for an admissible state. A slow speed outside the light cone is not a
+    // speed.
+    ASSERT(std::abs(slow_minus[point]) <= 1.0 and
+               std::abs(slow_plus[point]) <= 1.0,
+           "Slow magnetosonic speeds outside the light cone: slow- = "
+               << slow_minus[point] << ", slow+ = " << slow_plus[point]
+               << ", point = " << point);
   }
 }
 
@@ -1310,7 +1700,7 @@ void characteristic_eigenvectors_mhd(
       //                          only visible for rho != 1).
       // Verified against the conserved characteristic matrix
       // (flux_jacobian_mhd): A.R = y R to machine precision (including rho !=
-      // 1); see runs-ai/mhd_eigenvectors/reports/claude_paper_corrections.md.
+      // 1).
       for (size_t i = 0; i < 3; ++i) {
         characteristic_modes->get(wave, i) =
             -((y * get(kappa_B) +
@@ -1607,10 +1997,6 @@ void characteristic_eigenvectors_hydro(
     get(zeta) = get(equation_of_state.zeta_from_density_and_temperature(
         rest_mass_density, temperature, electron_fraction));
   }
-
-  // Diagnostic override: force the composition coupling off. Placed after
-  // every branch that assigns zeta (lines ~1551, ~1584, ~1611) and before
-  // zeta_max_abs is taken, so the existing zeta == 0 code paths below pick
 
   // This is for the case for zeta = 0.
   const double zeta_max_abs = max(abs(get(zeta)));
@@ -2184,8 +2570,7 @@ void flux_jacobian_mhd(
     const EquationsOfState::EquationOfState<true, ThermodynamicDim>&
         equation_of_state) {
   // Conserved-variable GLM-Valencia characteristic matrix in the normal
-  // direction (lapse = 1, shift = 0), i.e. the matrix "As" of the advisor's
-  // notebook, generated from runs-ai/mhd_eigenvectors/mathematica/matrix.txt.
+  // direction (lapse = 1, shift = 0), generated symbolically.
   // Variable order: [S_x, S_y, S_z, B^x, B^y, B^z, D, tau, phi].  Mirrors
   // flux_jacobian_hydro (same intermediate-quantity conventions).
   const size_t num_points = get(rest_mass_density).size();
