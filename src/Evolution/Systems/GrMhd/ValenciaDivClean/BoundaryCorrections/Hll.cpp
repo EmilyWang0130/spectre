@@ -3,6 +3,7 @@
 
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Hll.hpp"
 
+#include <array>
 #include <cmath>
 #include <pup.h>
 
@@ -18,6 +19,7 @@
 #include "NumericalAlgorithms/DiscontinuousGalerkin/Formulation.hpp"
 #include "NumericalAlgorithms/DiscontinuousGalerkin/NormalDotFlux.hpp"
 #include "PointwiseFunctions/Hydro/SoundSpeedSquared.hpp"
+#include "PointwiseFunctions/Hydro/SpecificEnthalpy.hpp"
 #include "Utilities/ErrorHandling/CaptureForError.hpp"
 #include "Utilities/ErrorHandling/FloatingPointExceptions.hpp"
 #include "Utilities/GenerateInstantiations.hpp"
@@ -62,6 +64,11 @@ double Hll::dg_package_data(
         packaged_largest_outgoing_char_speed,
     const gsl::not_null<Scalar<DataVector>*>
         packaged_largest_ingoing_char_speed,
+    const gsl::not_null<Scalar<DataVector>*> packaged_fast_outgoing_char_speed,
+    const gsl::not_null<Scalar<DataVector>*> packaged_fast_ingoing_char_speed,
+    const gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
+        packaged_interface_unit_normal,
+    const gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
 
     const Scalar<DataVector>& tilde_d, const Scalar<DataVector>& tilde_ye,
     const Scalar<DataVector>& tilde_tau,
@@ -84,9 +91,9 @@ double Hll::dg_package_data(
     const Scalar<DataVector>& electron_fraction,
     const Scalar<DataVector>& temperature,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity,
-    const Scalar<DataVector>& /*specific_internal_energy*/,
-    const Scalar<DataVector>& /*pressure*/,
-    const Scalar<DataVector>& /*lorentz_factor*/,
+    const Scalar<DataVector>& specific_internal_energy,
+    const Scalar<DataVector>& pressure,
+    const Scalar<DataVector>& lorentz_factor,
 
     const tnsr::i<DataVector, 3, Frame::Inertial>& normal_covector,
     const tnsr::I<DataVector, 3, Frame::Inertial>& /*normal_vector*/,
@@ -130,14 +137,16 @@ double Hll::dg_package_data(
       auto& v_dot_normal_times_one_minus_cs2 =
           get<::Tags::TempScalar<6>>(temp_buffer);
 
-      // Only the sound speed enters the characteristic speeds below. Earlier
-      // revisions also evaluated the specific internal energy, the pressure
-      // and the specific enthalpy at this point, but nothing ever read them.
-      // On a tabulated 3D EOS that dead chain dominated the cost of this
-      // function: pressure_from_density_and_energy inverts eps -> T with a
-      // per-point TOMS748 root find whose every iteration is a full 3D table
-      // interpolation. Hllc never had it, which is the entire reason Hll was
-      // measurably slower than Hllc on Togashi.
+      const Scalar<DataVector> specific_internal_energy =
+          equation_of_state
+              .specific_internal_energy_from_density_and_temperature(
+                  rest_mass_density, temperature, electron_fraction);
+      const Scalar<DataVector> pressure =
+          equation_of_state.pressure_from_density_and_energy(
+              rest_mass_density, specific_internal_energy, electron_fraction);
+      const Scalar<DataVector> specific_enthalpy =
+          hydro::relativistic_specific_enthalpy(
+              rest_mass_density, specific_internal_energy, pressure);
       const Scalar<DataVector> sound_speed_squared{
           clamp(get(equation_of_state
                         .sound_speed_squared_from_density_and_temperature(
@@ -193,6 +202,84 @@ double Hll::dg_package_data(
     }
   }
 
+  // Package the interface unit normal (for the scalar/MHD field split) and the
+  // metric-flatness measure (the split only holds in flat space).
+  *packaged_interface_unit_normal = normal_covector;
+  get(*packaged_metric_flatness) = abs(get(lapse) - 1.0) + abs(get<0>(shift)) +
+                                   abs(get<1>(shift)) + abs(get<2>(shift));
+
+  // --- Fast-magnetosonic signal speeds for the MHD part, PER SIDE -----------
+  //
+  // In flat space the divergence-cleaning (Phi, B_n) subsystem decouples and
+  // travels at the light speed -- that is what the Largest speeds above are --
+  // while the MHD variables travel at the slower fast-magnetosonic speed. This
+  // side's fast speeds are packaged here; `dg_boundary_terms` combines THIS
+  // side's with the neighbour's by the standard two-sided min/max. Both
+  // reference codes do exactly that: PLUTO takes
+  // SL = MIN(sl_min, sr_min), SR = MAX(sl_max, sr_max) (`hll_speed.c:44-58`,
+  // "DAVIS estimate") and AthenaK lambda_l = fmin(lm_l, lm_r),
+  // lambda_r = fmax(lp_l, lp_r) (`hlle_srmhd.hpp:95-96`, Mignone & Bodo
+  // Eq. 55). Evaluating the eigensystem once at the arithmetic-averaged
+  // interface state instead is a construction neither reference uses: it is an
+  // interface-averaged state, not a bound on either side's signal speed, so
+  // nothing stops it falling INSIDE the true signal range, which is the one
+  // thing the HLL construction requires its bounds not to do. Which way that
+  // moves a measured L1 at a given interface is not established here; the
+  // Kelvin-Helmholtz and ST1 acceptance runs are what measure it.
+  //
+  // The speed itself is the direction-independent estimate
+  //   a^2 = c_s^2 + v_A^2 (1 - c_s^2)
+  // pushed through the relativistic dispersion relation. Dropping the B.n
+  // dependence makes it an UPPER bound on the true fast speed, so it is a safe
+  // (slightly dissipative) HLL bound rather than the exact quartic root PLUTO
+  // solves for; that bias is principled, is shared with AthenaK, and is far
+  // smaller than the averaged-state defect it replaces. It is exactly what
+  // `characteristic_speeds_approximate_mhd` computes -- in SpECTRE since 2018
+  // (9be5d3b7e) and until now called from nothing but a unit test -- so call
+  // it rather than hand-inlining the formula a second time.
+  *packaged_fast_outgoing_char_speed = *packaged_largest_outgoing_char_speed;
+  *packaged_fast_ingoing_char_speed = *packaged_largest_ingoing_char_speed;
+  // The flat-space decomposition (and the identity metric used below) only
+  // holds where the background is flat; elsewhere the fast bounds stay at the
+  // light speed and the scheme is the standard HLL flux, unchanged for BBH
+  // backgrounds. A face is either all-flat or all-curved for the uniform
+  // backgrounds this is used on, so test the whole face at once.
+  if (max(get(*packaged_metric_flatness)) <= 1.0e-12) {
+    const ScopedFpeState fpe(false);
+    const size_t num_points = get(rest_mass_density).size();
+    const Scalar<DataVector> specific_enthalpy =
+        hydro::relativistic_specific_enthalpy(
+            rest_mass_density, specific_internal_energy, pressure);
+    tnsr::ii<DataVector, 3, Frame::Inertial> flat_metric{num_points, 0.0};
+    for (size_t i = 0; i < 3; ++i) {
+      flat_metric.get(i, i) = 1.0;
+    }
+    // In flat space TildeB = sqrt(gamma) B^i = B^i.
+    std::array<DataVector, 9> fast_speeds{};
+    characteristic_speeds_approximate_mhd(
+        make_not_null(&fast_speeds), rest_mass_density, electron_fraction,
+        specific_internal_energy, specific_enthalpy, spatial_velocity,
+        lorentz_factor, tilde_b, lapse, shift, flat_metric, normal_covector,
+        equation_of_state);
+    // Indices 1 and 7 are the ingoing and outgoing fast-magnetosonic speeds.
+    get(*packaged_fast_outgoing_char_speed) = fast_speeds[7];
+    get(*packaged_fast_ingoing_char_speed) = fast_speeds[1];
+    if (normal_dot_mesh_velocity.has_value()) {
+      get(*packaged_fast_outgoing_char_speed) -= get(*normal_dot_mesh_velocity);
+      get(*packaged_fast_ingoing_char_speed) -= get(*normal_dot_mesh_velocity);
+    }
+    // In the atmosphere keep the light speed, exactly as the Largest speeds do
+    // (they already carry the mesh-velocity correction).
+    for (size_t pt = 0; pt < num_points; ++pt) {
+      if (get(rest_mass_density)[pt] <= light_speed_density_cutoff_) {
+        get(*packaged_fast_outgoing_char_speed)[pt] =
+            get(*packaged_largest_outgoing_char_speed)[pt];
+        get(*packaged_fast_ingoing_char_speed)[pt] =
+            get(*packaged_largest_ingoing_char_speed)[pt];
+      }
+    }
+  }
+
   *packaged_tilde_d = tilde_d;
   *packaged_tilde_ye = tilde_ye;
   *packaged_tilde_tau = tilde_tau;
@@ -241,6 +328,10 @@ void Hll::dg_boundary_terms(
     const Scalar<DataVector>& normal_dot_flux_tilde_phi_int,
     const Scalar<DataVector>& largest_outgoing_char_speed_int,
     const Scalar<DataVector>& largest_ingoing_char_speed_int,
+    const Scalar<DataVector>& fast_outgoing_char_speed_int,
+    const Scalar<DataVector>& fast_ingoing_char_speed_int,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
+    const Scalar<DataVector>& metric_flatness_int,
     const Scalar<DataVector>& tilde_d_ext,
     const Scalar<DataVector>& tilde_ye_ext,
     const Scalar<DataVector>& tilde_tau_ext,
@@ -255,8 +346,11 @@ void Hll::dg_boundary_terms(
     const Scalar<DataVector>& normal_dot_flux_tilde_phi_ext,
     const Scalar<DataVector>& largest_outgoing_char_speed_ext,
     const Scalar<DataVector>& largest_ingoing_char_speed_ext,
-    const dg::Formulation dg_formulation,
-    const EquationsOfState::EquationOfState<true, 3>& /*equation_of_state*/) {
+    const Scalar<DataVector>& fast_outgoing_char_speed_ext,
+    const Scalar<DataVector>& fast_ingoing_char_speed_ext,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& /*iface_normal_ext*/,
+    const Scalar<DataVector>& metric_flatness_ext,
+    const dg::Formulation dg_formulation) {
   const size_t num_points = get(tilde_d_int).size();
   const bool weak = dg_formulation == dg::Formulation::WeakInertial;
 
@@ -269,29 +363,22 @@ void Hll::dg_boundary_terms(
   // Fast-magnetosonic HLL bounds: used for the MHD variables (D, Ye, Tau, S and
   // the tangential magnetic field), which travel slower than light.
   //
-  // The bounds are computed from the fast-magnetosonic characteristic speeds
-  // evaluated at the ARITHMETIC-AVERAGE interface state (exactly like the HLLEM
-  // boundary correction). Evaluating a single interface eigensystem -- rather
-  // than the previous per-side, sign-of-v_n-dependent packaged fast speeds --
-  // makes the bounds identical on mirror-image faces (invariant under
-  // v_n -> -v_n) and removes a small top/bottom asymmetry that the per-side
-  // approach seeded in the Kelvin-Helmholtz test. In curved space the flat
-  // decomposition does not hold, so we fall back to the light bounds and the
-  // scheme reduces to the standard HLL flux there.
-  // Fluid-variable HLL bounds are the same per-side max/min combination as
-  // above (Recipe A: Davis 1988). This is the textbook HLL choice --
-  // sound-speed bounds computed per side in dg_package_data (which already
-  // takes electron_fraction, so non-equilibrium 3D EOSs like Togashi are
-  // handled correctly), then combined here.
+  // Built from the two sides' OWN fast speeds by the same min/max as the light
+  // bounds above -- the standard construction, and the one PLUTO and AthenaK
+  // both use (see the comment in dg_package_data). The minus signs on the
+  // exterior speeds are there for the same reason as in the light bounds: the
+  // neighbour packaged its speeds against its own outward normal, which is
+  // -n. Written this way the pair satisfies fast_max(ext, int) = -fast_min and
+  // fast_min(ext, int) = -fast_max, i.e. the flux is antisymmetric under the
+  // int<->ext swap, which is what conservation across the face requires.
   //
-  // Iago's 96d94d83e replaced these with an averaged-state closed-form
-  // (Recipe B) to fix a KH-instability mirror-y drift. That fix is preserved
-  // on iago/mhd_experiments; on this branch we revert to the develop
-  // convention because Recipe B under-bounds the fan at strongly-asymmetric
-  // interfaces (violating the Harten-Lax-van Leer theorem's premise).
-  // Pure-hydro projects here (TOV + Ye) do not require the symmetry fix.
-  const DataVector& fast_max = lambda_max;
-  const DataVector& fast_min = lambda_min;
+  // Where the background is curved, or in the atmosphere, dg_package_data left
+  // these equal to the light speeds, so the scheme is the standard HLL flux
+  // there.
+  const DataVector fast_max = max(0., get(fast_outgoing_char_speed_int),
+                                  -get(fast_ingoing_char_speed_ext));
+  const DataVector fast_min = min(0., get(fast_ingoing_char_speed_int),
+                                  -get(fast_outgoing_char_speed_ext));
 
   // HLL flux for one conserved component given the bounds l_max, l_min.
   const auto hll = [&weak, &num_points](
@@ -335,13 +422,50 @@ void Hll::dg_boundary_terms(
             normal_dot_flux_tilde_s_int.get(i), tilde_s_ext.get(i),
             normal_dot_flux_tilde_s_ext.get(i));
   }
-  // Magnetic field: plain HLL with light-speed bounds (matches develop's
-  // pre-f5b73d016 behaviour; the GLM / MHD split has been reverted).
-  for (size_t i = 0; i < 3; ++i) {
-    boundary_correction_tilde_b->get(i) =
-        hll(lambda_max, lambda_min, tilde_b_int.get(i),
-            normal_dot_flux_tilde_b_int.get(i), tilde_b_ext.get(i),
-            normal_dot_flux_tilde_b_ext.get(i));
+  // Magnetic field: the NORMAL component is part of the GLM subsystem (light
+  // speed), the TANGENTIAL component is MHD (fast bounds). Decompose along the
+  // interface normal, treat each part with its own bounds, and recombine
+  // G(B^i) = G(B_n) n^i + G(B_t^i). (In flat space n is a unit covector and the
+  // metric is the identity, so raising/lowering the normal is trivial.)
+  {
+    const auto& n = interface_unit_normal_int;
+    DataVector bn_int{num_points, 0.0};
+    DataVector bn_ext{num_points, 0.0};
+    DataVector nfbn_int{num_points, 0.0};
+    DataVector nfbn_ext{num_points, 0.0};
+    for (size_t i = 0; i < 3; ++i) {
+      bn_int += tilde_b_int.get(i) * n.get(i);
+      bn_ext += tilde_b_ext.get(i) * n.get(i);
+      nfbn_int += normal_dot_flux_tilde_b_int.get(i) * n.get(i);
+      nfbn_ext += normal_dot_flux_tilde_b_ext.get(i) * n.get(i);
+    }
+    const DataVector g_bn =
+        hll(lambda_max, lambda_min, bn_int, nfbn_int, bn_ext, nfbn_ext);
+    // The decomposition uses n as both covector and (raised) vector, which is
+    // only valid in flat space; where the background is curved fall back to the
+    // plain (light-speed) HLL flux for B, which keeps the scheme conservative.
+    for (size_t i = 0; i < 3; ++i) {
+      const DataVector bt_int = tilde_b_int.get(i) - bn_int * n.get(i);
+      const DataVector bt_ext = tilde_b_ext.get(i) - bn_ext * n.get(i);
+      const DataVector nfbt_int =
+          normal_dot_flux_tilde_b_int.get(i) - nfbn_int * n.get(i);
+      const DataVector nfbt_ext =
+          normal_dot_flux_tilde_b_ext.get(i) - nfbn_ext * n.get(i);
+      const DataVector g_bt =
+          hll(fast_max, fast_min, bt_int, nfbt_int, bt_ext, nfbt_ext);
+      const DataVector g_split = g_bn * n.get(i) + g_bt;
+      const DataVector g_plain =
+          hll(lambda_max, lambda_min, tilde_b_int.get(i),
+              normal_dot_flux_tilde_b_int.get(i), tilde_b_ext.get(i),
+              normal_dot_flux_tilde_b_ext.get(i));
+      for (size_t pt = 0; pt < num_points; ++pt) {
+        boundary_correction_tilde_b->get(i)[pt] =
+            (get(metric_flatness_int)[pt] > 1.0e-12 or
+             get(metric_flatness_ext)[pt] > 1.0e-12)
+                ? g_plain[pt]
+                : g_split[pt];
+      }
+    }
   }
 }
 
