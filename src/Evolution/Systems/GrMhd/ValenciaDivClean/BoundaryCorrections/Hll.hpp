@@ -95,6 +95,7 @@ class Hll final : public evolution::BoundaryCorrection {
   struct LargestIngoingCharSpeed : db::SimpleTag {
     using type = Scalar<DataVector>;
   };
+
   struct MagneticFieldMagnitudeForHydro {
     static constexpr Options::String help = {
         "When the magnetic field is below this value we use the hydro "
@@ -154,10 +155,7 @@ class Hll final : public evolution::BoundaryCorrection {
                  hydro::Tags::LorentzFactor<DataVector>>;
   using dg_package_data_volume_tags =
       tmpl::list<hydro::Tags::GrmhdEquationOfState>;
-  // The equation of state is needed in dg_boundary_terms to compute the
-  // fast-magnetosonic HLL bounds at the averaged interface state.
-  using dg_boundary_terms_volume_tags =
-      tmpl::list<hydro::Tags::GrmhdEquationOfState>;
+  using dg_boundary_terms_volume_tags = tmpl::list<>;
 
   double dg_package_data(
       gsl::not_null<Scalar<DataVector>*> packaged_tilde_d,
@@ -198,9 +196,9 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& electron_fraction,
       const Scalar<DataVector>& temperature,
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity,
-      const Scalar<DataVector>& specific_internal_energy,
-      const Scalar<DataVector>& pressure,
-      const Scalar<DataVector>& lorentz_factor,
+      const Scalar<DataVector>& /*specific_internal_energy*/,
+      const Scalar<DataVector>& /*pressure*/,
+      const Scalar<DataVector>& /*lorentz_factor*/,
 
       const tnsr::i<DataVector, 3, Frame::Inertial>& normal_covector,
       const tnsr::I<DataVector, 3, Frame::Inertial>& normal_vector,
@@ -251,8 +249,7 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& normal_dot_flux_tilde_phi_ext,
       const Scalar<DataVector>& largest_outgoing_char_speed_ext,
       const Scalar<DataVector>& largest_ingoing_char_speed_ext,
-      dg::Formulation dg_formulation,
-      const EquationsOfState::EquationOfState<true, 3>& equation_of_state);
+      dg::Formulation dg_formulation);
 
  private:
   friend bool operator==(const Hll& lhs, const Hll& rhs);
