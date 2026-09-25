@@ -75,6 +75,17 @@ namespace grmhd::ValenciaDivClean::BoundaryCorrections {
  *
  * which correspond to the divergence cleaning field.
  *
+ * In flat space the divergence cleaning pair \f$(\Phi, n_i \tilde{B}^i)\f$
+ * decouples from the rest of the system and propagates at the speed of light,
+ * so only it uses the light-speed bounds above. All other variables use the
+ * fast-magnetosonic speeds of the two sides, combined by the same min/max. On
+ * a curved background the light-speed bounds are used for all variables. The
+ * MHD fluxes of the two sides are used as packaged, each with its own
+ * \f$n_i \tilde{B}^i\f$: a jump in the normal field is a stationary mode of
+ * the MHD subsystem, and the bounds always include zero, so it lies inside the
+ * fan. The face value of the divergence cleaning pair is therefore not
+ * substituted into the fluxes as in \cite Dedner2002.
+ *
  * \note
  * - In the strong form the `dg_boundary_terms` function returns
  *   \f$G - F_\text{int}\f$
@@ -83,9 +94,6 @@ namespace grmhd::ValenciaDivClean::BoundaryCorrections {
  *   correction reduces to pure upwinding.
  * - Some references use \f$S\f$ instead of \f$\lambda\f$ for the
  *   signal/characteristic speeds
- * - It may be possible to use the slower speeds for the magnetic field and
- *   fluid part of the system in order to make the flux less dissipative for
- *   those variables.
  */
 class Hll final : public evolution::BoundaryCorrection {
  public:
@@ -93,6 +101,27 @@ class Hll final : public evolution::BoundaryCorrection {
     using type = Scalar<DataVector>;
   };
   struct LargestIngoingCharSpeed : db::SimpleTag {
+    using type = Scalar<DataVector>;
+  };
+  /// @{
+  /// The fast-magnetosonic speeds of this side, used for all variables but
+  /// the divergence cleaning pair.
+  struct FastOutgoingCharSpeed : db::SimpleTag {
+    using type = Scalar<DataVector>;
+  };
+  struct FastIngoingCharSpeed : db::SimpleTag {
+    using type = Scalar<DataVector>;
+  };
+  /// @}
+  /// The unit normal covector; `dg_boundary_terms` splits the magnetic field
+  /// along the average of the two sides' normals.
+  struct InterfaceUnitNormal : db::SimpleTag {
+    using type = tnsr::i<DataVector, 3, Frame::Inertial>;
+  };
+  /// |lapse - 1| + |shift|, a measure of how far the background is from flat.
+  /// The scalar/MHD split only holds in flat space; where this is nonzero the
+  /// boundary correction falls back to the standard (light-speed) HLL flux.
+  struct MetricFlatness : db::SimpleTag {
     using type = Scalar<DataVector>;
   };
 
@@ -141,7 +170,9 @@ class Hll final : public evolution::BoundaryCorrection {
                  ::Tags::NormalDotFlux<Tags::TildeS<Frame::Inertial>>,
                  ::Tags::NormalDotFlux<Tags::TildeB<Frame::Inertial>>,
                  ::Tags::NormalDotFlux<Tags::TildePhi>,
-                 LargestOutgoingCharSpeed, LargestIngoingCharSpeed>;
+                 LargestOutgoingCharSpeed, LargestIngoingCharSpeed,
+                 FastOutgoingCharSpeed, FastIngoingCharSpeed,
+                 InterfaceUnitNormal, MetricFlatness>;
   using dg_package_data_temporary_tags = tmpl::list<
       gr::Tags::Lapse<DataVector>, gr::Tags::Shift<DataVector, 3>,
       hydro::Tags::SpatialVelocityOneForm<DataVector, 3, Frame::Inertial>,
@@ -175,6 +206,11 @@ class Hll final : public evolution::BoundaryCorrection {
       gsl::not_null<Scalar<DataVector>*> packaged_normal_dot_flux_tilde_phi,
       gsl::not_null<Scalar<DataVector>*> packaged_largest_outgoing_char_speed,
       gsl::not_null<Scalar<DataVector>*> packaged_largest_ingoing_char_speed,
+      gsl::not_null<Scalar<DataVector>*> packaged_fast_outgoing_char_speed,
+      gsl::not_null<Scalar<DataVector>*> packaged_fast_ingoing_char_speed,
+      gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
+          packaged_interface_unit_normal,
+      gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
 
       const Scalar<DataVector>& tilde_d, const Scalar<DataVector>& tilde_ye,
       const Scalar<DataVector>& tilde_tau,
@@ -198,9 +234,9 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& electron_fraction,
       const Scalar<DataVector>& temperature,
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity,
-      const Scalar<DataVector>& /*specific_internal_energy*/,
-      const Scalar<DataVector>& /*pressure*/,
-      const Scalar<DataVector>& /*lorentz_factor*/,
+      const Scalar<DataVector>& specific_internal_energy,
+      const Scalar<DataVector>& pressure,
+      const Scalar<DataVector>& lorentz_factor,
 
       const tnsr::i<DataVector, 3, Frame::Inertial>& normal_covector,
       const tnsr::I<DataVector, 3, Frame::Inertial>& normal_vector,
@@ -235,6 +271,10 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& normal_dot_flux_tilde_phi_int,
       const Scalar<DataVector>& largest_outgoing_char_speed_int,
       const Scalar<DataVector>& largest_ingoing_char_speed_int,
+      const Scalar<DataVector>& fast_outgoing_char_speed_int,
+      const Scalar<DataVector>& fast_ingoing_char_speed_int,
+      const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
+      const Scalar<DataVector>& metric_flatness_int,
       const Scalar<DataVector>& tilde_d_ext,
       const Scalar<DataVector>& tilde_ye_ext,
       const Scalar<DataVector>& tilde_tau_ext,
@@ -251,6 +291,10 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& normal_dot_flux_tilde_phi_ext,
       const Scalar<DataVector>& largest_outgoing_char_speed_ext,
       const Scalar<DataVector>& largest_ingoing_char_speed_ext,
+      const Scalar<DataVector>& fast_outgoing_char_speed_ext,
+      const Scalar<DataVector>& fast_ingoing_char_speed_ext,
+      const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_ext,
+      const Scalar<DataVector>& metric_flatness_ext,
       dg::Formulation dg_formulation);
 
  private:
