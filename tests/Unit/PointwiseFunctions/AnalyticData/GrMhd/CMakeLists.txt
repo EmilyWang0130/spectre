@@ -6,6 +6,7 @@ set(LIBRARY "Test_GrMhdAnalyticData")
 set(LIBRARY_SOURCES
   InitialMagneticFields/Test_Poloidal.cpp
   InitialMagneticFields/Test_Toroidal.cpp
+  Test_AxisymmetricJet.cpp
   Test_BeckwithStoneKhInstability.cpp
   Test_BlastWave.cpp
   Test_BondiHoyleAccretion.cpp
@@ -35,6 +36,11 @@ target_link_libraries(
   ${LIBRARY}
   PRIVATE
   DataStructures
+  Domain
+  DomainBoundaryConditions
+  DomainBoundaryConditionsHelpers
+  DomainCreators
+  DomainStructure
   ErrorHandling
   GrMhdAnalyticData
   Hydro

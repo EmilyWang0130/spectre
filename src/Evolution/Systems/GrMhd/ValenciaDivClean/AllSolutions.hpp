@@ -4,6 +4,7 @@
 #pragma once
 
 #include "PointwiseFunctions/AnalyticData/GrMhd/AnalyticData.hpp"
+#include "PointwiseFunctions/AnalyticData/GrMhd/AxisymmetricJet.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/BeckwithStoneKhInstability.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/BlastWave.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/BondiHoyleAccretion.hpp"
@@ -31,16 +32,17 @@
 
 namespace grmhd::ValenciaDivClean::InitialData {
 using initial_data_list = tmpl::list<
-    AnalyticData::BeckwithStoneKhInstability, AnalyticData::BlastWave,
-    AnalyticData::BondiHoyleAccretion, AnalyticData::CcsnCollapse,
-    AnalyticData::KhInstability, AnalyticData::MagneticFieldLoop,
-    AnalyticData::MagneticRotor, AnalyticData::MagnetizedFmDisk,
-    AnalyticData::MagnetizedTovStar, AnalyticData::OrszagTangVortex,
-    AnalyticData::PerturbedTovStar, AnalyticData::PolarMagnetizedFmDisk,
-    AnalyticData::RiemannProblem, AnalyticData::SlabJet,
-    AnalyticData::Tabulated3DShockTube, Solutions::AlfvenWave,
-    grmhd::Solutions::BondiMichel, Solutions::KomissarovShock,
-    Solutions::SmoothFlow, RelativisticEuler::Solutions::FishboneMoncriefDisk,
+    AnalyticData::AxisymmetricJet, AnalyticData::BeckwithStoneKhInstability,
+    AnalyticData::BlastWave, AnalyticData::BondiHoyleAccretion,
+    AnalyticData::CcsnCollapse, AnalyticData::KhInstability,
+    AnalyticData::MagneticFieldLoop, AnalyticData::MagneticRotor,
+    AnalyticData::MagnetizedFmDisk, AnalyticData::MagnetizedTovStar,
+    AnalyticData::OrszagTangVortex, AnalyticData::PerturbedTovStar,
+    AnalyticData::PolarMagnetizedFmDisk, AnalyticData::RiemannProblem,
+    AnalyticData::SlabJet, AnalyticData::Tabulated3DShockTube,
+    Solutions::AlfvenWave, grmhd::Solutions::BondiMichel,
+    Solutions::KomissarovShock, Solutions::SmoothFlow,
+    RelativisticEuler::Solutions::FishboneMoncriefDisk,
     RelativisticEuler::Solutions::RotatingStar,
     RelativisticEuler::Solutions::TovStar>;
 }  // namespace grmhd::ValenciaDivClean::InitialData
