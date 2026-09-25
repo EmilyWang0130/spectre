@@ -594,6 +594,8 @@ double test(const size_t num_dg_pts, std::optional<double> expansion_velocity,
             prims_to_reconstruct),
         get<tmpl::at_c<dg_package_data_temporary_tags, 4>>(
             prims_to_reconstruct),
+        get<tmpl::at_c<dg_package_data_temporary_tags, 5>>(
+            prims_to_reconstruct),
 
         // prims
         get<tmpl::at_c<dg_package_data_primitive_tags, 0>>(
@@ -603,6 +605,12 @@ double test(const size_t num_dg_pts, std::optional<double> expansion_velocity,
         get<tmpl::at_c<dg_package_data_primitive_tags, 2>>(
             prims_to_reconstruct),
         get<tmpl::at_c<dg_package_data_primitive_tags, 3>>(
+            prims_to_reconstruct),
+        get<tmpl::at_c<dg_package_data_primitive_tags, 4>>(
+            prims_to_reconstruct),
+        get<tmpl::at_c<dg_package_data_primitive_tags, 5>>(
+            prims_to_reconstruct),
+        get<tmpl::at_c<dg_package_data_primitive_tags, 6>>(
             prims_to_reconstruct),
 
         normal_covector, normal_vector, face_mesh_velocity,

@@ -106,11 +106,16 @@ std::optional<std::string> DirichletAnalytic::dg_ghost(
     const gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*> shift,
     const gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
         spatial_velocity_one_form,
+    const gsl::not_null<tnsr::ii<DataVector, 3, Frame::Inertial>*>
+        spatial_metric,
     const gsl::not_null<Scalar<DataVector>*> rest_mass_density,
     const gsl::not_null<Scalar<DataVector>*> electron_fraction,
     const gsl::not_null<Scalar<DataVector>*> temperature,
     const gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
         spatial_velocity,
+    const gsl::not_null<Scalar<DataVector>*> specific_internal_energy,
+    const gsl::not_null<Scalar<DataVector>*> pressure,
+    const gsl::not_null<Scalar<DataVector>*> lorentz_factor,
     const gsl::not_null<tnsr::II<DataVector, 3, Frame::Inertial>*>
         inv_spatial_metric,
 
@@ -180,6 +185,8 @@ std::optional<std::string> DirichletAnalytic::dg_ghost(
   // Recover values from analytic solution/ analytic data calls
   *lapse = get<gr::Tags::Lapse<DataVector>>(boundary_values);
   *shift = get<gr::Tags::Shift<DataVector, 3>>(boundary_values);
+  *spatial_metric =
+      get<gr::Tags::SpatialMetric<DataVector, 3>>(boundary_values);
   *inv_spatial_metric =
       get<gr::Tags::InverseSpatialMetric<DataVector, 3>>(boundary_values);
   *rest_mass_density =
@@ -187,12 +194,18 @@ std::optional<std::string> DirichletAnalytic::dg_ghost(
   *electron_fraction =
       get<hydro::Tags::ElectronFraction<DataVector>>(boundary_values);
   *temperature = get<hydro::Tags::Temperature<DataVector>>(boundary_values);
+  *specific_internal_energy =
+      get<hydro::Tags::SpecificInternalEnergy<DataVector>>(boundary_values);
+  *pressure = get<hydro::Tags::Pressure<DataVector>>(boundary_values);
+  *lorentz_factor =
+      get<hydro::Tags::LorentzFactor<DataVector>>(boundary_values);
   *spatial_velocity =
       get<hydro::Tags::SpatialVelocity<DataVector, 3>>(boundary_values);
+  const auto& boundary_spatial_metric =
+      get<gr::Tags::SpatialMetric<DataVector, 3>>(boundary_values);
   tenex::evaluate<ti::i>(
       spatial_velocity_one_form,
-      (*spatial_velocity)(ti::J) * (get<gr::Tags::SpatialMetric<DataVector, 3>>(
-                                       boundary_values)(ti::i, ti::j)));
+      (*spatial_velocity)(ti::J) * (boundary_spatial_metric(ti::i, ti::j)));
   // Recover the conservative variables from the primitives
   ConservativeFromPrimitive::apply(
       tilde_d, tilde_ye, tilde_tau, tilde_s, tilde_b, tilde_phi,

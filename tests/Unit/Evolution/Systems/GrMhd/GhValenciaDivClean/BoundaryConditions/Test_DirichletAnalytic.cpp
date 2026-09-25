@@ -203,10 +203,12 @@ void test_dg(const gsl::not_null<std::mt19937*> generator,
       make_not_null(&tilde_b_flux), make_not_null(&tilde_phi_flux),
       make_not_null(&gamma1), make_not_null(&gamma2), make_not_null(&lapse),
       make_not_null(&shift), make_not_null(&spatial_velocity_one_form),
-      make_not_null(&rest_mass_density), make_not_null(&electron_fraction),
-      make_not_null(&temperature), make_not_null(&spatial_velocity),
-      make_not_null(&inverse_spatial_metric), {}, {}, {}, coords,
-      interior_gamma1, interior_gamma2, time);
+      make_not_null(&spatial_metric), make_not_null(&rest_mass_density),
+      make_not_null(&electron_fraction), make_not_null(&temperature),
+      make_not_null(&spatial_velocity),
+      make_not_null(&specific_internal_energy), make_not_null(&pressure),
+      make_not_null(&lorentz_factor), make_not_null(&inverse_spatial_metric),
+      {}, {}, {}, coords, interior_gamma1, interior_gamma2, time);
   CHECK(not result.has_value());
 
   tmpl::for_each<typename Vars::tags_list>([&expected_vars, &vars](auto tag_v) {
@@ -251,8 +253,7 @@ void test_fd(const U& boundary_condition, const T& analytic_solution_or_data) {
           .get_clone()};
   const auto direction = Direction<3>::lower_xi();
 
-  grmhd::GhValenciaDivClean::fd::MonotonisedCentralPrim<System>
-      reconstructor{};
+  grmhd::GhValenciaDivClean::fd::MonotonisedCentralPrim<System> reconstructor{};
 
   using Vars = Variables<grmhd::GhValenciaDivClean::Tags::
                              primitive_grmhd_and_spacetime_reconstruction_tags>;
@@ -373,11 +374,10 @@ SPECTRE_TEST_CASE(
 
     test_dg(make_not_null(&gen), serialized_and_deserialized_condition,
             analytic_solution_or_data);
-    test_fd<System,
-            gh::Solutions::WrappedGr<grmhd::Solutions::BondiMichel>,
+    test_fd<System, gh::Solutions::WrappedGr<grmhd::Solutions::BondiMichel>,
             grmhd::GhValenciaDivClean::BoundaryConditions::DirichletAnalytic<
-            System>>(serialized_and_deserialized_condition,
-                                          analytic_solution_or_data);
+                System>>(serialized_and_deserialized_condition,
+                         analytic_solution_or_data);
   }
   {
     INFO("Test with analytic data");
@@ -427,8 +427,8 @@ SPECTRE_TEST_CASE(
     test_fd<System,
             gh::Solutions::WrappedGr<grmhd::AnalyticData::MagnetizedTovStar>,
             grmhd::GhValenciaDivClean::BoundaryConditions::DirichletAnalytic<
-            System>>(serialized_and_deserialized_condition,
-                                          analytic_solution_or_data);
+                System>>(serialized_and_deserialized_condition,
+                         analytic_solution_or_data);
   }
 }
 }  // namespace

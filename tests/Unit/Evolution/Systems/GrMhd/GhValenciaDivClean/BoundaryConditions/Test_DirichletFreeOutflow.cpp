@@ -176,6 +176,7 @@ void test_dg(const gsl::not_null<std::mt19937*> generator,
     phi = get<::gh::Tags::Phi<DataVector, 3>>(analytic_vars);
     lapse = get<gr::Tags::Lapse<DataVector>>(analytic_vars);
     shift = get<gr::Tags::Shift<DataVector, 3>>(analytic_vars);
+    spatial_metric = get<gr::Tags::SpatialMetric<DataVector, 3>>(analytic_vars);
     inverse_spatial_metric =
         get<gr::Tags::InverseSpatialMetric<DataVector, 3>>(analytic_vars);
 
@@ -252,10 +253,12 @@ void test_dg(const gsl::not_null<std::mt19937*> generator,
       make_not_null(&tilde_b_flux), make_not_null(&tilde_phi_flux),
       make_not_null(&gamma1), make_not_null(&gamma2), make_not_null(&lapse),
       make_not_null(&shift), make_not_null(&spatial_velocity_one_form),
-      make_not_null(&rest_mass_density), make_not_null(&electron_fraction),
-      make_not_null(&temperature), make_not_null(&spatial_velocity),
-      make_not_null(&inverse_spatial_metric), {}, normal_covector,
-      normal_vector,
+      make_not_null(&spatial_metric), make_not_null(&rest_mass_density),
+      make_not_null(&electron_fraction), make_not_null(&temperature),
+      make_not_null(&spatial_velocity),
+      make_not_null(&specific_internal_energy), make_not_null(&pressure),
+      make_not_null(&lorentz_factor), make_not_null(&inverse_spatial_metric),
+      {}, normal_covector, normal_vector,
 
       get<hydro::Tags::RestMassDensity<DataVector>>(prim_vars),
       get<hydro::Tags::ElectronFraction<DataVector>>(prim_vars),
@@ -302,10 +305,14 @@ void test_dg(const gsl::not_null<std::mt19937*> generator,
       make_not_null(&tilde_phi_flux_expected), make_not_null(&lapse_expected),
       make_not_null(&shift_expected),
       make_not_null(&spatial_velocity_one_form_expected),
+      make_not_null(&spatial_metric_expected),
       make_not_null(&rest_mass_density_expected),
       make_not_null(&electron_fraction_expected),
       make_not_null(&temperature_expected),
       make_not_null(&spatial_velocity_expected),
+      make_not_null(&specific_internal_energy_expected),
+      make_not_null(&pressure_expected),
+      make_not_null(&lorentz_factor_expected),
       make_not_null(&inverse_spatial_metric_expected), {}, normal_covector,
       normal_vector,
 
@@ -362,8 +369,7 @@ void test_fd(const U& boundary_condition, const T& analytic_solution_or_data) {
           .get_clone()};
   const auto direction = Direction<3>::lower_xi();
 
-  grmhd::GhValenciaDivClean::fd::MonotonisedCentralPrim<System>
-      reconstructor{};
+  grmhd::GhValenciaDivClean::fd::MonotonisedCentralPrim<System> reconstructor{};
 
   using Vars = Variables<grmhd::GhValenciaDivClean::Tags::
                              primitive_grmhd_and_spacetime_reconstruction_tags>;
@@ -588,7 +594,7 @@ SPECTRE_TEST_CASE(
     test_dg(make_not_null(&gen), serialized_and_deserialized_condition,
             analytic_solution_or_data);
     test_fd<System>(serialized_and_deserialized_condition,
-                                     analytic_solution_or_data);
+                    analytic_solution_or_data);
   }
   {
     INFO("Test with analytic data");
@@ -635,6 +641,6 @@ SPECTRE_TEST_CASE(
     test_dg(make_not_null(&gen), serialized_and_deserialized_condition,
             analytic_solution_or_data);
     test_fd<System>(serialized_and_deserialized_condition,
-                                     analytic_solution_or_data);
+                    analytic_solution_or_data);
   }
 }
