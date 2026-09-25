@@ -12,6 +12,7 @@ spectre_target_sources(
   Hllem.cpp
   HllemHydroYe.cpp
   Marquina.cpp
+  PlutoHlld.cpp
   Rusanov.cpp
   )
 
@@ -29,6 +30,7 @@ spectre_target_headers(
   Hllem.hpp
   HllemHydroYe.hpp
   Marquina.hpp
+  PlutoHlld.hpp
   NamespaceDocs.hpp
   Rusanov.hpp
   )
