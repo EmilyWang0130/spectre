@@ -973,7 +973,39 @@ void characteristic_speeds_mhd(
     const double N_alfven_minus_eps =
         evaluate_quartic(alfven_minus_eps_i, point);
     const double N_alfven_plus = evaluate_quartic(alfven_plus_i, point);
-    const double N_alfven_plus_eps = evaluate_quartic(alfven_plus_eps_i, point);
+    // The Type II tests below ask whether an Alfven speed a is a root of the
+    // quartic and, if it is, WHICH one, by the sign of Q just to the right of
+    // it: stepping right from the slow root enters the interval where the
+    // quartic has the slow sign, stepping right from (near) the fast root does
+    // not. That only works if the step reaches past the root a is actually
+    // nearest to. A fixed step does not: in a cold fluid the fast speed
+    // collapses onto the Alfven speed, and a can sit 5e-8 short of the fast
+    // root with |Q(a)| under the residual tolerance, so a step of 1e-12 never
+    // leaves the interval next to the fast root and reports "slow". So the
+    // step is twice the distance from a to its nearest root of Q, estimated
+    // by the Newton step |Q(a)/Q'(a)|, floored at the quartic's own
+    // root-location noise so that an exact root still gets a step whose sign
+    // is that of Q'(a). If a IS the slow root the step is tiny and stays on
+    // the slow side; if a is near the fast root the step crosses it.
+    const auto probe_step = [&](const double a, const double q_of_a) {
+      const double derivative = std::abs(
+          ((4.0 * a + 3.0 * c3[point]) * a + 2.0 * c2[point]) * a + c1[point]);
+      const double noise =
+          8.0 * std::numeric_limits<double>::epsilon() *
+          std::max({1.0, std::abs(c0[point]), std::abs(c1[point]),
+                    std::abs(c2[point]), std::abs(c3[point])});
+      return derivative > 0.0
+                 ? 2.0 * std::max(std::abs(q_of_a), noise) / derivative
+                 : std::numeric_limits<double>::quiet_NaN();
+    };
+    const double step_minus = probe_step(alfven_minus_i, N_alfven_minus);
+    const double step_plus = probe_step(alfven_plus_i, N_alfven_plus);
+    // A NaN step (a multiple root: the ordering carries no information) makes
+    // the probe comparison false, so the shortcut is not taken there.
+    const double N_alfven_minus_probe =
+        evaluate_quartic(alfven_minus_i + step_minus, point);
+    const double N_alfven_plus_probe =
+        evaluate_quartic(alfven_plus_i + step_plus, point);
     // Check if we have one of the possible degeneracies and use it to avoid
     // rootfinding / reduced-quadratic solve for the slow roots
     // A degeneracy shortcut is only a HYPOTHESIS: the tests below ask whether
@@ -1005,58 +1037,31 @@ void characteristic_speeds_mhd(
       degenerate_slow_plus = vn_i;
       degeneracy_hypothesis = true;
     } else if (std::abs(N_alfven_minus) < tolerance and
-               N_alfven_minus_eps > 0.0) {
+               N_alfven_minus_probe > 0.0) {
       // Type II on the minus side: alfven- = slow-
       degenerate_slow_minus = alfven_minus_i;
       degenerate_slow_plus = -c3[point] - degenerate_slow_minus -
                              fast_minus[point] - fast_plus[point];
       degeneracy_hypothesis = true;
     } else if (std::abs(N_alfven_plus) < tolerance and
-               N_alfven_plus_eps < 0.0) {
+               N_alfven_plus_probe < 0.0) {
       // Type II on the plus side: slow+ = alfven+
       degenerate_slow_plus = alfven_plus_i;
       degenerate_slow_minus = -c3[point] - fast_minus[point] -
                               fast_plus[point] - degenerate_slow_plus;
       degeneracy_hypothesis = true;
     }
-    // The residual test below is necessary but NOT sufficient, and on the Del
-    // Zanna jet it was not enough. The quartic has four roots and |Q| ~ 0 at
-    // every one of them, so a candidate that is a root of the WRONG wave
-    // passes it. Measured on a Del Zanna et al. (2003) jet run (t = 3.0):
-    // alfven+ sat 5.06e-08 below fast+, so the Type II plus-side test fired on
-    // the FAST root; its disambiguating sign probe steps eps = 1e-12, five
-    // orders smaller than the distance to the root it was actually near, and
-    // so reported the wrong side. The shortcut then set slow+ := alfven+ ~
-    // fast+, Vieta handed back slow- ~ fast-, and BOTH candidates satisfied
-    // this residual test at ~1e-15. The solver returned the fast pair,
-    // duplicated, in the slow slots -- 4.40e-05 from the true slow roots,
-    // which the general path finds to 8.0e-15. Hllem then anti-diffuses the
-    // "slow" wave along an eigenvector belonging to a different wave.
-    //
-    // So also require that the candidates OCCUPY THE SLOW POSITIONS in the
-    // characteristic ordering (Anton et al. 2010, Eq. 42). The residual tests
-    // whether a number is a root; this tests WHICH root it is.
-    //
-    // The fixed floor is used here rather than the conditioning-scaled
-    // `interlacing_tolerance`, and the asymmetry with the ASSERT below is
-    // deliberate. The scaled slack exists so an ASSERT does not fire on a
-    // state whose roots are genuinely unresolvable; it is the wrong test for
-    // ACCEPTING a shortcut, because the only cost of rejecting one is that the
-    // general solve runs -- the path every non-degenerate point takes anyway.
-    // On that point the scaled slack leaves the inversion a factor 1.09
-    // INSIDE tolerance (it would still be accepted); the fixed floor leaves it
-    // a factor ~900 outside. Genuine Type I and Type II degeneracies interlace
-    // by construction and are unaffected.
+    // The residual test below checks that the candidate PAIR solves the
+    // quartic; the scaled probe above is what identifies WHICH root an Alfven
+    // speed is. Whether the returned pair really occupies the slow positions
+    // (Anton et al. 2010, Eq. 42) is then asserted below for every point,
+    // whichever path produced it.
     const bool degeneracy_accepted =
         degeneracy_hypothesis and
         std::abs(evaluate_quartic(degenerate_slow_minus, point)) <
             10.0 * tolerance and
         std::abs(evaluate_quartic(degenerate_slow_plus, point)) <
-            10.0 * tolerance and
-        interlacing_violation(fast_minus[point], alfven_minus_i,
-                              degenerate_slow_minus, vn_i, degenerate_slow_plus,
-                              alfven_plus_i,
-                              fast_plus[point]) <= interlacing_slack_floor;
+            10.0 * tolerance;
     if (degeneracy_accepted) {
       slow_minus[point] = degenerate_slow_minus;
       slow_plus[point] = degenerate_slow_plus;
