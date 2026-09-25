@@ -46,6 +46,12 @@ std::ostream& operator<<(std::ostream& os, const HllemWaves waves) {
       return os << "ContactAlfvenFast";
     case HllemWaves::AllWithFast:
       return os << "AllWithFast";
+    case HllemWaves::None:
+      return os << "None";
+    case HllemWaves::Slow:
+      return os << "Slow";
+    case HllemWaves::Alfven:
+      return os << "Alfven";
     default:
       ERROR("Unknown HllemWaves");
   }
@@ -71,6 +77,22 @@ std::vector<size_t> restored_wave_indices(const HllemWaves waves) {
     case HllemWaves::AllWithFast:
       // every interior wave; only the GLM scalars stay as the outer HLL bounds
       return {1, 2, 3, 4, 5, 6, 7};
+    case HllemWaves::None:
+      // No anti-diffusion at all: HLLEM with every delta_k = 0, which IS the
+      // HLL flux. The one consumer of this list is the per-wave loop in
+      // `dg_boundary_terms`, so an empty list makes that whole block a no-op.
+      return {};
+    case HllemWaves::Slow:
+      // ONLY the slow pair. `ContactSlow` is contact + slow, so it cannot
+      // separate the two; this is the minimal set that reproduces the Del
+      // Zanna jet failure.
+      return {3, 5};
+    case HllemWaves::Alfven:
+      // ONLY the Alfven pair. On a purely axial field B_n = 0 on the radial
+      // faces, the Alfven speeds coincide with the entropy speed, and the
+      // speed-gap guard below drops both waves -- which is what this value
+      // exists to measure rather than assume.
+      return {2, 6};
     default:
       ERROR("Unknown HllemWaves");
   }
@@ -124,6 +146,8 @@ double Hllem::dg_package_data(
         packaged_largest_outgoing_char_speed,
     const gsl::not_null<Scalar<DataVector>*>
         packaged_largest_ingoing_char_speed,
+    const gsl::not_null<Scalar<DataVector>*> packaged_fast_outgoing_char_speed,
+    const gsl::not_null<Scalar<DataVector>*> packaged_fast_ingoing_char_speed,
     const gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
         packaged_interface_unit_normal,
     const gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
@@ -152,7 +176,7 @@ double Hllem::dg_package_data(
     const tnsr::i<DataVector, 3, Frame::Inertial>& spatial_velocity_one_form,
 
     const Scalar<DataVector>& rest_mass_density,
-    const Scalar<DataVector>& /*electron_fraction*/,
+    const Scalar<DataVector>& electron_fraction,
     const Scalar<DataVector>& temperature,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity,
     const Scalar<DataVector>& specific_internal_energy,
@@ -238,6 +262,72 @@ double Hllem::dg_package_data(
   *packaged_interface_unit_normal = normal_covector;
   get(*packaged_metric_flatness) = abs(get(lapse) - 1.0) + abs(get<0>(shift)) +
                                    abs(get<1>(shift)) + abs(get<2>(shift));
+
+  // --- Fast-magnetosonic signal speeds for the MHD part, PER SIDE -----------
+  //
+  // The MHD variables travel at the fast-magnetosonic speed, not at the light
+  // speed of the divergence-cleaning subsystem, so `dg_boundary_terms` needs a
+  // fast bound for them. Until now this class packaged NO per-side fast speed
+  // at all, and that bound was built from `characteristic_speeds_mhd`
+  // evaluated once on the arithmetic-averaged interface state -- the only
+  // state available at the interface. An average is an interior point of the
+  // two states, so nothing stops it falling INSIDE the true signal range,
+  // which is the one thing the HLL construction requires its bounds not to do.
+  // That has been measured: lambda_R > lambda_exact > lambda*_R.
+  //
+  // `Hll` and `PlutoHlld` in this directory already package these two speeds;
+  // this is the same computation, called the same way, so that the tags mean
+  // the same thing in all three solvers. The speed is the direction-
+  // independent estimate a^2 = c_s^2 + v_A^2 (1 - c_s^2) pushed through the
+  // relativistic dispersion relation: dropping the B.n dependence makes it an
+  // UPPER bound on the true fast speed, i.e. a safe (slightly dissipative) HLL
+  // bound, which is what AthenaK (Mignone & Bodo Eq. 55) and PLUTO's DAVIS
+  // estimate (`hll_speed.c:44-58`) also use.
+  *packaged_fast_outgoing_char_speed = *packaged_largest_outgoing_char_speed;
+  *packaged_fast_ingoing_char_speed = *packaged_largest_ingoing_char_speed;
+  // The flat-space decomposition (and the identity metric used below) only
+  // holds where the background is flat; elsewhere the fast bounds stay at the
+  // light speed, and `dg_boundary_terms` returns the plain HLL flux there
+  // anyway. A face is either all-flat or all-curved for the uniform
+  // backgrounds this is used on, so test the whole face at once.
+  if (max(get(*packaged_metric_flatness)) <= 1.0e-12) {
+    const ScopedFpeState fpe(false);
+    const size_t num_points = get(rest_mass_density).size();
+    const Scalar<DataVector> specific_enthalpy =
+        hydro::relativistic_specific_enthalpy(
+            rest_mass_density, specific_internal_energy, pressure);
+    tnsr::ii<DataVector, 3, Frame::Inertial> flat_metric{num_points, 0.0};
+    for (size_t i = 0; i < 3; ++i) {
+      flat_metric.get(i, i) = 1.0;
+    }
+    // In flat space TildeB = sqrt(gamma) B^i = B^i.
+    std::array<DataVector, 9> fast_speeds{};
+    characteristic_speeds_approximate_mhd(
+        make_not_null(&fast_speeds), rest_mass_density, electron_fraction,
+        specific_internal_energy, specific_enthalpy, spatial_velocity,
+        lorentz_factor, tilde_b, lapse, shift, flat_metric, normal_covector,
+        equation_of_state);
+    // Indices 1 and 7 are the ingoing and outgoing fast-magnetosonic speeds.
+    get(*packaged_fast_outgoing_char_speed) = fast_speeds[7];
+    get(*packaged_fast_ingoing_char_speed) = fast_speeds[1];
+    if (normal_dot_mesh_velocity.has_value()) {
+      get(*packaged_fast_outgoing_char_speed) -= get(*normal_dot_mesh_velocity);
+      get(*packaged_fast_ingoing_char_speed) -= get(*normal_dot_mesh_velocity);
+    }
+    // In the atmosphere keep the light speed, exactly as the Largest speeds do
+    // (they already carry the mesh-velocity correction) and exactly as `Hll`
+    // does. This is not merely a convention: as rho -> 0 at fixed B the
+    // Alfven speed -> c, so the fast speed there really is ~c.
+    for (size_t pt = 0; pt < num_points; ++pt) {
+      if (get(rest_mass_density)[pt] <= light_speed_density_cutoff_) {
+        get(*packaged_fast_outgoing_char_speed)[pt] =
+            get(*packaged_largest_outgoing_char_speed)[pt];
+        get(*packaged_fast_ingoing_char_speed)[pt] =
+            get(*packaged_largest_ingoing_char_speed)[pt];
+      }
+    }
+  }
+
   *packaged_rest_mass_density = rest_mass_density;
   *packaged_spatial_velocity = spatial_velocity;
   *packaged_pressure = pressure;
@@ -285,12 +375,14 @@ void Hllem::dg_boundary_terms(
     const Scalar<DataVector>& normal_dot_flux_tilde_phi_int,
     const Scalar<DataVector>& largest_outgoing_char_speed_int,
     const Scalar<DataVector>& largest_ingoing_char_speed_int,
+    const Scalar<DataVector>& fast_outgoing_char_speed_int,
+    const Scalar<DataVector>& fast_ingoing_char_speed_int,
     const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
     const Scalar<DataVector>& metric_flatness_int,
     const Scalar<DataVector>& rest_mass_density_int,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
     const Scalar<DataVector>& pressure_int,
-    const Scalar<DataVector>& lorentz_factor_int,
+    const Scalar<DataVector>& /*lorentz_factor_int*/,
     const Scalar<DataVector>& specific_internal_energy_int,
     const Scalar<DataVector>& tilde_d_ext,
     const Scalar<DataVector>& tilde_ye_ext,
@@ -306,12 +398,14 @@ void Hllem::dg_boundary_terms(
     const Scalar<DataVector>& normal_dot_flux_tilde_phi_ext,
     const Scalar<DataVector>& largest_outgoing_char_speed_ext,
     const Scalar<DataVector>& largest_ingoing_char_speed_ext,
+    const Scalar<DataVector>& fast_outgoing_char_speed_ext,
+    const Scalar<DataVector>& fast_ingoing_char_speed_ext,
     const tnsr::i<DataVector, 3, Frame::Inertial>& /*iface_normal_ext*/,
     const Scalar<DataVector>& metric_flatness_ext,
     const Scalar<DataVector>& rest_mass_density_ext,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
     const Scalar<DataVector>& pressure_ext,
-    const Scalar<DataVector>& lorentz_factor_ext,
+    const Scalar<DataVector>& /*lorentz_factor_ext*/,
     const Scalar<DataVector>& specific_internal_energy_ext,
     const dg::Formulation dg_formulation,
     const EquationsOfState::EquationOfState<true, 3>& equation_of_state) const {
@@ -486,8 +580,53 @@ void Hllem::dg_boundary_terms(
   }
   v_sq_avg = clamp(v_sq_avg, 0.0, 1.0 - 1.0e-10);
   Scalar<DataVector> w_avg{1.0 / sqrt(1.0 - v_sq_avg)};
+  // The enthalpy handed to the eigensystem is built from the equation of
+  // state's OWN pressure at (rho_avg, eps_avg), not from p_avg.
+  //
+  // Whenever the secant above converged, p(rho_avg, eps_avg) IS p_avg -- for
+  // an ideal fluid exactly, since the first secant step is exact -- so this
+  // changes nothing on the path the block was written for. It matters on the
+  // fallback path just above, where a non-finite or negative inversion result
+  // sends eps back to the raw arithmetic average: rho, eps and p are then
+  // averaged INDEPENDENTLY and the triple satisfies no equation of state. That
+  // is precisely the construction that made c_s^2 superluminal in PlutoHlld
+  // and aborted a Del Zanna et al. (2003) jet run, because
+  // `characteristic_speeds_mhd` forms
+  //     c_s^2 = (chi + kappa p/rho^2) / h
+  // with chi and kappa at (rho, eps) but h from p, and for an ideal fluid that
+  // ratio tends to Gamma (Gamma - 1) as p/rho -> 0 -- above 1 for every Gamma
+  // past the golden ratio 1.618. Evaluating all three of chi, kappa and h at
+  // ONE state removes the mismatch identically, so c_s^2 is bounded by the
+  // equation of state's own sound speed whatever eps_avg turns out to be, and
+  // the fallback can no longer produce a non-hyperbolic quartic.
+  //
+  // Unlike PlutoHlld, HLLEM cannot simply take its bounds two-sidedly: the
+  // anti-diffusive correction needs a single set of interface eigenVECTORS, so
+  // it needs an interface state. The requirement is therefore that the
+  // interface state be thermodynamically consistent, which is what this makes
+  // it unconditionally.
+  //
+  // Scope, measured, so that this is not over-claimed. On the Del Zanna jet
+  // the Hllem arm's OWN interface sound speed maxes at 0.5594 (r-faces) and
+  // 0.6609 (z-faces) at the failing step -- never above Gamma - 1 = 0.6667,
+  // exactly as the structural bound requires -- so the fallback above was very
+  // probably never taken there and nothing in this block is implicated in that
+  // run's abort, which is in the Lorentz-factor toms748 of FixConservatives
+  // with D-tilde at its 1e-15 floor and has no wave speed on its path. (The
+  // 0.6342 that appears in the record for that run is the PlutoHlld formula
+  // applied to an Hllem solution, a counterfactual, and is a factor 6.3 off
+  // Hllem's actual value on the worst face.) What this change buys is that the
+  // fallback can no longer produce a non-state on ANY problem, and with it the
+  // sound-speed clamp in characteristic_speeds_mhd can no longer fire from
+  // here -- which matters more for Hllem than for PlutoHlld, because at
+  // c_s^2 = 1 the slow pair collapses exactly onto the Alfven pair and the
+  // speed-gap test downstream then drops every restored wave, i.e. Hllem
+  // silently stops being HLLEM wherever that clamp fires.
+  const Scalar<DataVector> p_at_avg_state =
+      equation_of_state.pressure_from_density_and_energy(rho_avg, eps_avg,
+                                                         ye_avg);
   const Scalar<DataVector> enthalpy_avg =
-      hydro::relativistic_specific_enthalpy(rho_avg, eps_avg, p_avg);
+      hydro::relativistic_specific_enthalpy(rho_avg, eps_avg, p_at_avg_state);
 
   // flat-space geometry
   tnsr::ii<DataVector, 3, Frame::Inertial> flat_metric{num_points, 0.0};
@@ -514,13 +653,34 @@ void Hllem::dg_boundary_terms(
   // HLL bounds from the characteristic speeds. This makes the flux far less
   // dissipative and -- crucially -- puts the fast waves AT the fan edge, so the
   // anti-diffusion restores them as a no-op (delta_fast -> 0) instead of the
-  // over-restoration that blew up with the +/-c bounds. (Elias & Saul,
-  // 2026-07-30; cf. PLUTO Src/MHD/GLM/glm.c GLM_Solve.) Everything here stays
+  // over-restoration that blew up with the +/-c bounds. (Cf. PLUTO
+  // Src/MHD/GLM/glm.c GLM_Solve.) Everything here stays
   // inside the boundary correction; the evolution system is unchanged.
+  //
+  // The outer MHD bounds are TWO-SIDED: the envelope of each side's own fast
+  // speed and the averaged state's, which is the three-sided envelope
+  //   S_min = MIN(0, MINVAL(Lambda(Q_bar)), MINVAL(Lambda(Q_L)), ...)
+  // of Dumbser & Balsara's own HLLEM reference implementation (Appendix C).
+  // Taking the averaged state ALONE bounds
+  // nothing: an average is an interior point of the two states, so it can sit
+  // inside the true signal range (measured:
+  // lambda_R > lambda_exact > lambda*_R), and a symbolic derivation
+  // shows no state function admits an unmargined average-state estimate at all
+  // (297 of 300 random RMHD pairs violate it, largest deficit 0.5028).
+  //
+  // Keeping Lambda(Q_bar) IN the envelope is not decoration: the anti-diffusion
+  // below reads its wave speeds from the averaged eigensystem and drops any
+  // wave that leaves the fan, so dropping Q_bar from the bound would push the
+  // averaged fast waves outside their own fan. The envelope only ever widens
+  // the fan relative to the old bound, so the scheme is more dissipative, never
+  // less -- and the per-side speeds are the same quantity `Hll` and
+  // `PlutoHlld` already package.
   const DataVector fast_lambda_max =
-      max(0.0, mhd_speeds.get(7));  // v_n + c_fast
+      max(0.0, mhd_speeds.get(7), get(fast_outgoing_char_speed_int),
+          -get(fast_ingoing_char_speed_ext));  // v_n + c_fast
   const DataVector fast_lambda_min =
-      min(0.0, mhd_speeds.get(1));  // v_n - c_fast
+      min(0.0, mhd_speeds.get(1), get(fast_ingoing_char_speed_int),
+          -get(fast_outgoing_char_speed_ext));  // v_n - c_fast
   DataVector fast_dl = fast_lambda_max - fast_lambda_min;
   for (size_t pt = 0; pt < num_points; ++pt) {
     if (fast_dl[pt] < 1.0e-30) {
@@ -612,6 +772,35 @@ void Hllem::dg_boundary_terms(
     }
   }
 
+  // WavesToRestore: None -- HLLEM with every Einfeldt coefficient delta_k set
+  // to zero, which is identically the HLL flux (a nine-component algebraic
+  // identity, independent of the state, the eigensystem and the equation of
+  // state). Everything above this point IS the HLL baseline, so the flux is
+  // already finished and nothing below can do anything but add zero: the
+  // per-wave loop iterates over an empty list, and the complementary
+  // projection -- which composes with WavesToRestore everywhere else -- only
+  // fires at points where a RESTORED wave was dropped, so with no restored
+  // waves it never flags a point either. None is plain HLL with the projection
+  // on or off, which is why returning here rather than falling through is
+  // exact, not an approximation; it also skips building an eigensystem that
+  // would only be multiplied by zero.
+  //
+  // The reduction is to `Hll` CLOSELY BUT NOT BITWISE. `Hll` takes its outer
+  // MHD bounds two-sidedly, from the two sides' own fast speeds; the envelope
+  // above additionally carries the averaged state's fast speed, which can only
+  // widen the fan. HLLEM-None is therefore slightly MORE dissipative than
+  // `Hll` and never less, and that bound construction is the ONLY difference
+  // between the two (the scalar/MHD split and the flux formula are shared).
+  // A deviation of the opposite sign, or one bigger than the envelope
+  // difference accounts for, is an implementation bug in the anti-diffusion,
+  // not a tolerance to be relaxed. Pinned down by
+  // Test_Hllem.cpp:test_no_restored_waves_reduces_to_hll.
+  const std::vector<size_t> restored_waves =
+      restored_wave_indices(waves_to_restore_);
+  if (restored_waves.empty()) {
+    return;
+  }
+
   tnsr::ij<DataVector, 9> modes{num_points, 0.0};
   tnsr::IJ<DataVector, 9> projectors{num_points, 0.0};
   // Always build the full analytic eigensystem. The per-wave anti-diffusion
@@ -649,7 +838,7 @@ void Hllem::dg_boundary_terms(
   // speed collapses onto a neighbour and its individual analytic eigenvector is
   // ill-conditioned; those points are recorded for the complement fallback.
   DataVector restored_wave_dropped{num_points, 0.0};
-  for (const size_t wave : restored_wave_indices(waves_to_restore_)) {
+  for (const size_t wave : restored_waves) {
     const DataVector& lam = mhd_speeds.get(wave);
     const DataVector lambdap = max(lam, 0.0);
     const DataVector lambdam = min(lam, 0.0);
@@ -819,10 +1008,17 @@ grmhd::ValenciaDivClean::BoundaryCorrections::HllemWaves Options::
     return bc::HllemWaves::ContactAlfvenFast;
   } else if (type_read == "AllWithFast") {
     return bc::HllemWaves::AllWithFast;
+  } else if (type_read == "None") {
+    return bc::HllemWaves::None;
+  } else if (type_read == "Slow") {
+    return bc::HllemWaves::Slow;
+  } else if (type_read == "Alfven") {
+    return bc::HllemWaves::Alfven;
   }
   PARSE_ERROR(options.context(),
               "Failed to convert \""
                   << type_read
                   << "\" to HllemWaves. Must be one of Contact, ContactAlfven, "
-                     "ContactSlow, All, ContactAlfvenFast, or AllWithFast.");
+                     "ContactSlow, All, ContactAlfvenFast, AllWithFast, None, "
+                     "Slow, or Alfven.");
 }

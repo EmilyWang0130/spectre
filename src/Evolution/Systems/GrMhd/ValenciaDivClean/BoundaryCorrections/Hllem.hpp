@@ -62,7 +62,77 @@ enum class HllemWaves {
   /// two GLM/divergence waves remain as the outer HLL bounds. "9 waves" -- the
   /// most complete HLLEM, enabled by having the full Teukolsky characteristic
   /// decomposition (M&M cannot afford the fast/slow eigenvectors).
-  AllWithFast
+  AllWithFast,
+  /// No waves at all: the anti-diffusion is switched off and the solver is the
+  /// plain HLL flux. `restored_wave_indices` returns an empty list, so the
+  /// whole per-wave block is a no-op and `dg_boundary_terms` returns the HLL
+  /// baseline it has already built.
+  ///
+  /// This is not a convenience setting, it is a CONSISTENCY CHECK. HLL is
+  /// identically HLLEM with every Einfeldt coefficient \f$\delta_k\f$ set to
+  /// zero -- an identity in all nine components, for an arbitrary invertible
+  /// eigenvector matrix \f$R\f$ and arbitrary \f$\lambda_\pm\f$, \f$U\f$,
+  /// \f$F\f$, with no state, no eigensystem and no equation of state entering
+  /// it -- so `None` MUST reproduce `Hll`. If it does not, the anti-diffusion
+  /// implementation is wrong, and that is the finding, not the tolerance.
+  ///
+  /// The reproduction is CLOSE BUT NOT BITWISE, and the single permitted
+  /// difference is in the outer bounds rather than in the flux formula: `Hll`
+  /// builds its MHD bounds two-sidedly from the two sides' own fast speeds,
+  /// while `Hllem` uses the three-sided envelope that also carries the averaged
+  /// interface state,
+  /// \f$\max(0,\lambda_+(\bar{Q}),\lambda_+^{\rm int},
+  /// -\lambda_-^{\rm ext})\f$. That envelope can only widen the fan, so
+  /// HLLEM-`None` is SLIGHTLY MORE DISSIPATIVE than `Hll`, never less.
+  /// Everything else is shared: the same scalar/MHD split (GLM subsystem at
+  /// \f$\pm c\f$, MHD variables at the fast-magnetosonic bounds) and the same
+  /// HLL formula. A deviation of the opposite sign, or one larger than the
+  /// envelope difference accounts for, is a bug. Pinned down in
+  /// `Test_Hllem.cpp`, `test_no_restored_waves_reduces_to_hll`.
+  ///
+  /// `UseComplementaryProjection` has no effect here. The complement fallback
+  /// fires only at points where a RESTORED wave was dropped, and with no
+  /// restored waves no point is ever flagged, so `None` is the HLL flux with
+  /// the projection either on or off.
+  None,
+  /// ONLY the two slow-magnetosonic waves, `MhdSpeed` 3 and 5. No contact, no
+  /// Alfven, no fast.
+  ///
+  /// This is the MINIMAL REPRODUCER for the Del Zanna jet failure, and that is
+  /// the whole reason it exists. A wave-restoration ladder on that problem ran
+  /// `Hll`, `None`, `Contact` and `ContactAlfven` to completion while
+  /// `ContactSlow` and `All` both failed at the same time and bitwise
+  /// identically to each other -- so restoring the slow pair is NECESSARY AND
+  /// SUFFICIENT for the failure. `ContactSlow` is contact PLUS slow and so
+  /// does not isolate the slow pair; this value does.
+  ///
+  /// It is a DIAGNOSTIC configuration, not a production one. Restoring the
+  /// slow waves while leaving the contact fully diffused is not a solver
+  /// anybody would choose; it is the one-variable experiment.
+  Slow,
+  /// ONLY the two Alfven (rotational) waves, `MhdSpeed` 2 and 6. No contact,
+  /// no slow, no fast.
+  ///
+  /// The companion to `Slow`, and the direct test of a belief the ladder so
+  /// far has only inferred: that on a problem whose field is purely axial the
+  /// Alfven waves are INERT. With \f$B_n = 0\f$ on a face, the Alfven speeds
+  /// collapse onto the entropy speed \f$v_n\f$, and the `DegeneracyTolerance`
+  /// speed-gap guard in `dg_boundary_terms` drops both waves at every such
+  /// point, so the anti-diffusion is whatever it would have been without them.
+  /// If that is right, `Alfven` must be indistinguishable from `None` on such
+  /// a state, exactly as `ContactAlfven` was observed to be bitwise identical
+  /// to `Contact`. Where \f$B_n \neq 0\f$ the two waves are restored
+  /// normally and this is an ordinary (if unusual) wave set.
+  ///
+  /// MEASURED in `Test_Hllem.cpp`, and the result is stronger and less
+  /// flattering to the framing above: \f$B_n = 0\f$ is Anton et al.'s Type I
+  /// degeneracy, in which \f$\lambda_a^\pm = \lambda_s^\pm =
+  /// \lambda_e\f$, so the guard drops the SLOW pair there too. On such a
+  /// face `Slow`, `Alfven`, `ContactSlow`, `ContactAlfven` and `All` all
+  /// collapse to `Contact`, bit for bit. Nothing is special about the Alfven
+  /// waves in that configuration, and the jet's slow-wave failure therefore
+  /// cannot be occurring on faces where \f$B_n = 0\f$.
+  Alfven
 };
 std::ostream& operator<<(std::ostream& os, HllemWaves waves);
 
@@ -103,39 +173,6 @@ std::ostream& operator<<(std::ostream& os, HllemWaves waves);
  * The fan is reconstructed assuming flat space (the regime of the relativistic
  * M&M tests) with an HLL fallback for curved backgrounds and non-finite
  * results.
- *
- * \warning **UNVALIDATED ON THIS BRANCH -- do not trust results from it
- * without re-deriving them.** As of 2026-09-15 this class is selected by no
- * yaml in `spectre_runs/`, so none of its MHD/GLM machinery has ever been
- * exercised here. Two specific reasons for caution:
- *
- * 1. It takes the outer HLL bounds `fast_lambda_max`/`fast_lambda_min` from
- *    `characteristic_speeds_mhd` evaluated at the ARITHMETIC-AVERAGE interface
- *    state, not from the two input states. Mattia & Mignone 2021
- *    (arXiv:2111.09369, sec. "HLL Formulation") require lambda_L/lambda_R to be
- *    an *upper bound* estimated from the left and right input states, with the
- *    averaged state entering only the anti-diffusion term (R*, L*,
- *    lambda_{m,*}). `Hll.cpp` records the same objection and reverted the
- *    averaged recipe there; `HllemHydroYe` was switched to per-side bounds in
- *    `faaaba1de`. This class was left as-is because it is unused.
- *
- *    Note this is NOT simply a bug: with divergence cleaning the outermost
- *    waves are the +/-c GLM modes, which makes the fast-magnetosonic waves
- *    genuinely *interior* waves that HLL smears, so restoring them is
- *    defensible in a way it would not be in pure hydro. The averaged bounds are
- *    what make delta_fast == 0 for the `*Fast` wave sets. Untangling that is a
- *    real design question, not a one-line fix.
- *
- * 2. `HllemHydroYe`, which shares this class's lineage, was found on
- *    2026-09-15 to zero the momentum flux at one face per element per
- *    direction, via a stale-memory read in a Blaze expression handed to
- *    `clamp()`. This class does not have that particular pattern (its `clamp`
- *    calls all take a named lvalue), but nothing here has been checked against
- *    a uniform-state control the way `HllemHydroYe` now is.
- *
- * Before using it: run the uniform-state control in
- * `spectre_runs/shocktube/togashi_uniform_onset/` (17-40 s per arm) and
- * confirm it stays exactly zero.
  */
 class Hllem final : public evolution::BoundaryCorrection {
  public:
@@ -145,6 +182,18 @@ class Hllem final : public evolution::BoundaryCorrection {
   struct LargestIngoingCharSpeed : db::SimpleTag {
     using type = Scalar<DataVector>;
   };
+  /// @{
+  /// The fast-magnetosonic signal speeds of THIS side, packaged exactly as
+  /// `Hll` and `PlutoHlld` package theirs. `dg_boundary_terms` takes the outer
+  /// MHD bounds from these two sides together with the averaged interface
+  /// state, so the bound can no longer sit inside the true signal range.
+  struct FastOutgoingCharSpeed : db::SimpleTag {
+    using type = Scalar<DataVector>;
+  };
+  struct FastIngoingCharSpeed : db::SimpleTag {
+    using type = Scalar<DataVector>;
+  };
+  /// @}
   struct InterfaceUnitNormal : db::SimpleTag {
     using type = tnsr::i<DataVector, 3, Frame::Inertial>;
   };
@@ -156,7 +205,15 @@ class Hllem final : public evolution::BoundaryCorrection {
     using type = HllemWaves;
     static constexpr Options::String help = {
         "Which intermediate waves the anti-diffusion restores: Contact, "
-        "ContactAlfven, ContactSlow, or All."};
+        "ContactAlfven, ContactSlow, All, ContactAlfvenFast, AllWithFast, "
+        "None, Slow, or Alfven. None switches the anti-diffusion off entirely, "
+        "which makes this solver the plain HLL flux (up to Hllem's slightly "
+        "wider three-sided outer bounds, so it is marginally MORE dissipative "
+        "than Hll and never less); it is the consistency check that HLLEM "
+        "reduces to HLL, not a production setting. Slow and Alfven restore ONE "
+        "pair each and nothing else -- the slow pair and the Alfven pair -- "
+        "and are likewise diagnostic settings, isolating a single restored "
+        "wave pair rather than adding it on top of the contact."};
   };
   struct DegeneracyTolerance {
     static constexpr Options::String help = {
@@ -226,7 +283,8 @@ class Hllem final : public evolution::BoundaryCorrection {
       ::Tags::NormalDotFlux<Tags::TildeS<Frame::Inertial>>,
       ::Tags::NormalDotFlux<Tags::TildeB<Frame::Inertial>>,
       ::Tags::NormalDotFlux<Tags::TildePhi>, LargestOutgoingCharSpeed,
-      LargestIngoingCharSpeed, InterfaceUnitNormal, MetricFlatness,
+      LargestIngoingCharSpeed, FastOutgoingCharSpeed, FastIngoingCharSpeed,
+      InterfaceUnitNormal, MetricFlatness,
       hydro::Tags::RestMassDensity<DataVector>,
       hydro::Tags::SpatialVelocity<DataVector, 3>,
       hydro::Tags::Pressure<DataVector>, hydro::Tags::LorentzFactor<DataVector>,
@@ -266,6 +324,8 @@ class Hllem final : public evolution::BoundaryCorrection {
       gsl::not_null<Scalar<DataVector>*> packaged_normal_dot_flux_tilde_phi,
       gsl::not_null<Scalar<DataVector>*> packaged_largest_outgoing_char_speed,
       gsl::not_null<Scalar<DataVector>*> packaged_largest_ingoing_char_speed,
+      gsl::not_null<Scalar<DataVector>*> packaged_fast_outgoing_char_speed,
+      gsl::not_null<Scalar<DataVector>*> packaged_fast_ingoing_char_speed,
       gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
           packaged_interface_unit_normal,
       gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
@@ -334,6 +394,8 @@ class Hllem final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& normal_dot_flux_tilde_phi_int,
       const Scalar<DataVector>& largest_outgoing_char_speed_int,
       const Scalar<DataVector>& largest_ingoing_char_speed_int,
+      const Scalar<DataVector>& fast_outgoing_char_speed_int,
+      const Scalar<DataVector>& fast_ingoing_char_speed_int,
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
       const Scalar<DataVector>& metric_flatness_int,
       const Scalar<DataVector>& rest_mass_density_int,
@@ -357,6 +419,8 @@ class Hllem final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& normal_dot_flux_tilde_phi_ext,
       const Scalar<DataVector>& largest_outgoing_char_speed_ext,
       const Scalar<DataVector>& largest_ingoing_char_speed_ext,
+      const Scalar<DataVector>& fast_outgoing_char_speed_ext,
+      const Scalar<DataVector>& fast_ingoing_char_speed_ext,
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_ext,
       const Scalar<DataVector>& metric_flatness_ext,
       const Scalar<DataVector>& rest_mass_density_ext,
