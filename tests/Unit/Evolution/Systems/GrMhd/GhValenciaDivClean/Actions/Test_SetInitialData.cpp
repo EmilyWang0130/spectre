@@ -412,7 +412,8 @@ SPECTRE_TEST_CASE("Unit.Evolution.Systems.GhValenciaDivClean.SetInitialData",
         "    PolytropicFluid:\n"
         "      PolytropicConstant: 100.\n"
         "      PolytropicExponent: 2.\n"
-        "  Coordinates: Schwarzschild\n",
+        "  Coordinates: Schwarzschild\n"
+        "  Yeq: None\n",
         false, active_grid);
   }
 }
