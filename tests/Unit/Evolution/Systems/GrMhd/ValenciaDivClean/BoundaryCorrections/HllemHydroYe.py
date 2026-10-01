@@ -209,6 +209,9 @@ def dg_boundary_terms(
     exterior_lorentz_factor,
     exterior_specific_internal_energy,
     use_strong_form,
+    # The C++ class's dg_boundary_terms_volume_tags (the equation of state),
+    # forwarded by the test helper since develop 1751b51f5. Unused here.
+    equation_of_state=None,
 ):
     # Light-speed (divergence-cleaning) bounds: for Phi and the normal B.
     lambda_max = np.maximum(

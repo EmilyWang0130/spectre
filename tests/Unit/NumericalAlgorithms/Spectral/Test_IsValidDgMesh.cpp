@@ -134,7 +134,7 @@ void test_2d(const gsl::not_null<std::mt19937*> generator) {
   REQUIRE(bases.size() == 100);
 
   std::vector<std::array<Quadrature, 2>> quadratures;
-  quadratures.reserve(81);
+  quadratures.reserve(100);
   for (const auto xi_quadrature : all_quadratures()) {
     if (xi_quadrature == Quadrature::Uninitialized) {
       continue;
@@ -146,7 +146,8 @@ void test_2d(const gsl::not_null<std::mt19937*> generator) {
       quadratures.emplace_back(std::array{xi_quadrature, eta_quadrature});
     }
   }
-  REQUIRE(quadratures.size() == 81);
+  // Ten quadratures: develop's nine plus hydroYe-mhd-tov's TranslationalSymmetry
+  REQUIRE(quadratures.size() == 100);
 
   for (const auto basis : bases) {
     CAPTURE(basis);
@@ -193,7 +194,7 @@ void test_2d(const gsl::not_null<std::mt19937*> generator) {
 void test_3d(const gsl::not_null<std::mt19937*> generator) {
   std::vector<std::pair<std::array<Basis, 3>, std::array<Quadrature, 3>>>
       valid_basis_and_quadratures;
-  valid_basis_and_quadratures.reserve(164);
+  valid_basis_and_quadratures.reserve(180);
   valid_basis_and_quadratures.emplace_back(bases::hypertorus<3>,
                                            quadratures::hypertorus<3>);
   valid_basis_and_quadratures.emplace_back(bases::full_sphere,
@@ -224,6 +225,12 @@ void test_3d(const gsl::not_null<std::mt19937*> generator) {
               std::array{i1_basis, another_i1_basis, Basis::Cartoon},
               std::array{i1_quadrature, another_i1_quadrature,
                          Quadrature::AxialSymmetry});
+          // hydroYe-mhd-tov: translational-z cartoon (an x-y plane with a
+          // collapsed, translationally symmetric z direction)
+          valid_basis_and_quadratures.emplace_back(
+              std::array{i1_basis, another_i1_basis, Basis::Cartoon},
+              std::array{i1_quadrature, another_i1_quadrature,
+                         Quadrature::TranslationalSymmetry});
           valid_basis_and_quadratures.emplace_back(
               std::array{i1_basis, Basis::Fourier, another_i1_basis},
               std::array{i1_quadrature, Quadrature::Equiangular,
@@ -270,7 +277,7 @@ void test_3d(const gsl::not_null<std::mt19937*> generator) {
     }
   }
 
-  REQUIRE(valid_basis_and_quadratures.size() == 164);
+  REQUIRE(valid_basis_and_quadratures.size() == 180);
 
   std::vector<std::array<Basis, 3>> bases;
   bases.reserve(729);
@@ -293,7 +300,7 @@ void test_3d(const gsl::not_null<std::mt19937*> generator) {
   REQUIRE(bases.size() == 1000);
 
   std::vector<std::array<Quadrature, 3>> quadratures;
-  quadratures.reserve(729);
+  quadratures.reserve(1000);
   for (const auto xi_quadrature : all_quadratures()) {
     if (xi_quadrature == Quadrature::Uninitialized) {
       continue;
@@ -311,7 +318,7 @@ void test_3d(const gsl::not_null<std::mt19937*> generator) {
       }
     }
   }
-  REQUIRE(quadratures.size() == 729);
+  REQUIRE(quadratures.size() == 1000);
 
   for (const auto basis : bases) {
     CAPTURE(basis);
