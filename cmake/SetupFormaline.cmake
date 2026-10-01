@@ -9,7 +9,6 @@ set(SPECTRE_FORMALINE_LOCATIONS
   .claude
   .clang-format
   .clang-tidy
-  .claude
   .codecov.yaml
   .codex
   .devcontainer
@@ -22,6 +21,7 @@ set(SPECTRE_FORMALINE_LOCATIONS
   CLAUDE.md
   cmake
   CMakeLists.txt
+  CMakePresets.json
   containers
   docs
   external

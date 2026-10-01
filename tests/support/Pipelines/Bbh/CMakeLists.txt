@@ -1,6 +1,8 @@
 # Distributed under the MIT License.
 # See LICENSE.txt for details.
 
+add_dependencies(test-executables bbh)
+
 spectre_add_python_bindings_test(
   "support.Pipelines.Bbh.Cce"
   Test_Cce.py
@@ -8,14 +10,12 @@ spectre_add_python_bindings_test(
   None
   TIMEOUT 60)
 
-if (SpEC_FOUND)
-  spectre_add_python_bindings_test(
-    "support.Pipelines.Bbh.EccentricityControl"
-    Test_EccentricityControl.py
-    "Python"
-    None
-    TIMEOUT 20)
-endif()
+spectre_add_python_bindings_test(
+  "support.Pipelines.Bbh.EccentricityControl"
+  Test_EccentricityControl.py
+  "Python"
+  None
+  TIMEOUT 20)
 
 spectre_add_python_bindings_test(
   "support.Pipelines.Bbh.FindHorizon"

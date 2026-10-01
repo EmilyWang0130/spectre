@@ -118,7 +118,6 @@
 #include "Time/Tags/TimeStepId.hpp"
 #include "Time/TimeSequence.hpp"
 #include "Time/TimeSteppers/Factory.hpp"
-#include "Time/TimeSteppers/LtsTimeStepper.hpp"
 #include "Time/TimeSteppers/TimeStepper.hpp"
 #include "Time/Triggers/TimeTriggers.hpp"
 #include "Time/UpdateU.hpp"
@@ -146,10 +145,7 @@ struct EvolutionMetavars {
   using system = NewtonianEuler::System<Dim>;
 
   using temporal_id = Tags::TimeStepId;
-  using TimeStepperBase = TimeStepper;
 
-  static constexpr bool local_time_stepping =
-      TimeStepperBase::local_time_stepping;
   static constexpr bool use_dg_element_collection = false;
 
   using initial_data_tag = evolution::initial_data::Tags::InitialData;
@@ -226,7 +222,6 @@ struct EvolutionMetavars {
         tmpl::pair<evolution::BoundaryCorrection,
                    NewtonianEuler::BoundaryCorrections::
                        standard_boundary_corrections<volume_dim>>,
-        tmpl::pair<LtsTimeStepper, TimeSteppers::lts_time_steppers>,
         tmpl::pair<
             NewtonianEuler::BoundaryConditions::BoundaryCondition<volume_dim>,
             NewtonianEuler::BoundaryConditions::standard_boundary_conditions<
@@ -269,9 +264,10 @@ struct EvolutionMetavars {
       Initialization::Actions::InitializeItems<
           Initialization::TimeStepping<EvolutionMetavars, TimeStepper, false,
                                        true>,
-          evolution::dg::Initialization::Domain<EvolutionMetavars>,
-          Initialization::TimeStepperHistory<EvolutionMetavars>>,
+          evolution::dg::Initialization::Domain<EvolutionMetavars>>,
       Initialization::Actions::ConservativeSystem<system>,
+      Initialization::Actions::InitializeItems<
+          Initialization::TimeStepperHistory<system>>,
 
       tmpl::conditional_t<
           use_dg_subcell,
@@ -336,7 +332,8 @@ struct EvolutionMetavars {
                   typename system::primitive_from_conservative>>>,
       Actions::MutateApply<CleanHistory<system>>,
       Actions::MutateApply<evolution::dg::CleanMortarHistory<volume_dim>>,
-      dg::Actions::SpectralFilter>>;
+      dg::Actions::SpectralFilter<volume_dim,
+                                  typename system::variables_tag::tags_list>>>;
 
   struct SubcellOptions {
     static constexpr bool subcell_enabled = use_dg_subcell;

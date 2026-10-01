@@ -8,6 +8,8 @@ set(LIBRARY_SOURCES
   Actions/Test_BoundaryConditions.cpp
   Actions/Test_ComputeTimeDerivative.cpp
   Actions/Test_NormalCovectorAndMagnitude.cpp
+  Actions/Test_SendAuxiliaryData.cpp
+  Initialization/Test_BoundaryEvolvedVariables.cpp
   Initialization/Test_Mortars.cpp
   Initialization/Test_ProjectSpectralFilters.cpp
   Initialization/Test_QuadratureTag.cpp
@@ -15,8 +17,10 @@ set(LIBRARY_SOURCES
   Initialization/Test_SpectralFilters.cpp
   Test_AtomicInboxBoundaryData.cpp
   Test_BackgroundGrVars.cpp
+  Test_BlockSupportsSubcell.cpp
   Test_BoundaryCorrectionsHelper.cpp
   Test_BoundaryData.cpp
+  Test_BoundaryEvolvedVariables.cpp
   Test_CleanMortarHistory.cpp
   Test_InboxTags.cpp
   Test_InterfaceDataPolicy.cpp
@@ -26,6 +30,8 @@ set(LIBRARY_SOURCES
   Test_MortarInfo.cpp
   Test_MortarTags.cpp
   Test_NormalVectorTags.cpp
+  Test_OnlyDgBlockIds.cpp
+  Test_SubcellElementDistribution.cpp
   Test_TimeSteppingPolicy.cpp
   Test_UsingSubcell.cpp
   )

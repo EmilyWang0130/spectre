@@ -45,6 +45,7 @@
 #include "NumericalAlgorithms/DiscontinuousGalerkin/Formulation.hpp"
 #include "NumericalAlgorithms/DiscontinuousGalerkin/Tags.hpp"
 #include "NumericalAlgorithms/LinearOperators/Filters/Factory.hpp"
+#include "NumericalAlgorithms/LinearOperators/Filters/FilledSphere.hpp"
 #include "NumericalAlgorithms/LinearOperators/Filters/SphericalShell.hpp"
 #include "NumericalAlgorithms/LinearOperators/Filters/Tag.hpp"
 #include "Options/Protocols/FactoryCreation.hpp"
@@ -106,7 +107,6 @@
 #include "Time/ChangeTimeStepperOrder.hpp"
 #include "Time/CleanHistory.hpp"
 #include "Time/RecordTimeStepperData.hpp"
-#include "Time/StepChoosers/ByBlock.hpp"
 #include "Time/StepChoosers/Factory.hpp"
 #include "Time/StepChoosers/StepChooser.hpp"
 #include "Time/Tags/StepperErrors.hpp"
@@ -114,7 +114,6 @@
 #include "Time/Tags/TimeStepId.hpp"
 #include "Time/TimeSequence.hpp"
 #include "Time/TimeSteppers/Factory.hpp"
-#include "Time/TimeSteppers/LtsTimeStepper.hpp"
 #include "Time/TimeSteppers/TimeStepper.hpp"
 #include "Time/Triggers/TimeTriggers.hpp"
 #include "Time/UpdateU.hpp"
@@ -145,10 +144,7 @@ struct EvolutionMetavars {
 
   using system = ScalarWave::System<Dim>;
   using temporal_id = Tags::TimeStepId;
-  using TimeStepperBase = TimeStepper;
 
-  static constexpr bool local_time_stepping =
-      TimeStepperBase::local_time_stepping;
   static constexpr bool use_dg_element_collection = false;
 
   using analytic_solution_fields = typename system::variables_tag::tags_list;
@@ -206,7 +202,6 @@ struct EvolutionMetavars {
         tmpl::pair<evolution::initial_data::InitialData,
                    tmpl::push_back<initial_data_list,
                                    evolution::initial_data::NumericData>>,
-        tmpl::pair<LtsTimeStepper, TimeSteppers::lts_time_steppers>,
         tmpl::pair<MathFunction<1, Frame::Inertial>,
                    MathFunctions::all_math_functions<1, Frame::Inertial>>,
         tmpl::pair<PhaseChange, PhaseControl::factory_creatable_classes>,
@@ -215,13 +210,11 @@ struct EvolutionMetavars {
             ScalarWave::BoundaryConditions::standard_boundary_conditions<
                 volume_dim>>,
         tmpl::pair<StepChooser<StepChooserUse::LtsStep>,
-                   tmpl::push_back<StepChoosers::standard_step_choosers<system>,
-                                   StepChoosers::ByBlock<volume_dim>>>,
+                   StepChoosers::standard_step_choosers<system>>,
         tmpl::pair<StepChooser<StepChooserUse::Slab>,
                    tmpl::push_back<
                        StepChoosers::standard_slab_choosers<system>,
-                       evolution::dg::StepChoosers::FixedLtsRatio<volume_dim>,
-                       StepChoosers::ByBlock<volume_dim>>>,
+                       evolution::dg::StepChoosers::FixedLtsRatio<volume_dim>>>,
         tmpl::pair<TimeSequence<double>,
                    TimeSequences::all_time_sequences<double>>,
         tmpl::pair<TimeSequence<std::uint64_t>,
@@ -238,7 +231,9 @@ struct EvolutionMetavars {
                 tmpl::conditional_t<
                     volume_dim == 3,
                     tmpl::list<Filters::SphericalShell<
-                        typename system::variables_tag::tags_list>>,
+                                   typename system::variables_tag::tags_list>,
+                               Filters::FilledSphere<
+                                   typename system::variables_tag::tags_list>>,
                     tmpl::list<>>>>>;
   };
 
@@ -260,7 +255,8 @@ struct EvolutionMetavars {
       Actions::MutateApply<ChangeTimeStepperOrder<system>>,
       Actions::MutateApply<CleanHistory<system>>,
       Actions::MutateApply<evolution::dg::CleanMortarHistory<volume_dim>>,
-      dg::Actions::SpectralFilter>>;
+      dg::Actions::SpectralFilter<volume_dim,
+                                  typename system::variables_tag::tags_list>>>;
 
   using const_global_cache_tags =
       tmpl::list<evolution::initial_data::Tags::InitialData>;
@@ -276,9 +272,10 @@ struct EvolutionMetavars {
           Initialization::TimeStepping<EvolutionMetavars, TimeStepper, false,
                                        true>,
           evolution::dg::Initialization::Domain<EvolutionMetavars>,
-          ::amr::Initialization::Initialize<volume_dim, EvolutionMetavars>,
-          Initialization::TimeStepperHistory<EvolutionMetavars>>,
+          ::amr::Initialization::Initialize<volume_dim, EvolutionMetavars>>,
       Initialization::Actions::NonconservativeSystem<system>,
+      Initialization::Actions::InitializeItems<
+          Initialization::TimeStepperHistory<system>>,
       evolution::Initialization::Actions::SetVariables<
           domain::Tags::Coordinates<Dim, Frame::ElementLogical>>,
       ScalarWave::Actions::InitializeConstraints<volume_dim>,

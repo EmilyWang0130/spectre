@@ -305,10 +305,10 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.EquationsOfState.Tabulated3D",
 
   eos.initialize(compose_eos);
 
-  // This value is the minimum of 1 + eps + p / rho over the physical values
-  // in dd2_unit_test.h5. The table stores log(p) and log(eps - energy_shift)
-  // internally, so using the stored values directly would produce a large
-  // negative and unphysical enthalpy lower bound.
+  // The table stores pressure and shifted energy logarithmically, but the
+  // enthalpy lower bound must be computed from physical values without the log.
+  // h_min < 1 is physical when bound matter has less energy per baryon than
+  // the neutron mass used for normalization.
   CHECK(eos.specific_enthalpy_lower_bound() == approx(0.9923212708074246));
 
   test_against_reference_values(eos);

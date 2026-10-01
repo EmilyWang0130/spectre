@@ -27,10 +27,12 @@ void bind_spectral(py::module& m) {
       .value("Legendre", Spectral::Basis::Legendre)
       .value("Chebyshev", Spectral::Basis::Chebyshev)
       .value("FiniteDifference", Spectral::Basis::FiniteDifference)
-      .value("SphericalHarmonic", Spectral::Basis::SphericalHarmonic);
+      .value("SphericalHarmonic", Spectral::Basis::SphericalHarmonic)
+      .value("ZernikeB3", Spectral::Basis::ZernikeB3);
   py::enum_<Spectral::Quadrature>(m, "Quadrature")
       .value("Gauss", Spectral::Quadrature::Gauss)
       .value("GaussLobatto", Spectral::Quadrature::GaussLobatto)
+      .value("GaussRadauUpper", Spectral::Quadrature::GaussRadauUpper)
       .value("CellCentered", Spectral::Quadrature::CellCentered)
       .value("FaceCentered", Spectral::Quadrature::FaceCentered)
       .value("Equiangular", Spectral::Quadrature::Equiangular);

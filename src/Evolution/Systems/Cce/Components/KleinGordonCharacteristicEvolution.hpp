@@ -10,7 +10,6 @@
 #include "Evolution/Systems/Cce/Actions/PrecomputeKleinGordonSourceVariables.hpp"
 #include "Evolution/Systems/Cce/Components/CharacteristicEvolution.hpp"
 #include "Evolution/Systems/Cce/KleinGordonSource.hpp"
-#include "Evolution/Systems/Cce/KleinGordonSystem.hpp"
 #include "Parallel/GlobalCache.hpp"
 #include "Parallel/Local.hpp"
 #include "Parallel/Phase.hpp"
@@ -39,10 +38,10 @@ namespace Cce {
  *  - `Initialization`
  *  - `Evolve`
  * - Modified type aliases in comparison to CharacteristicEvolution:
- *  - `evolved_swsh_tags`: The spin-weighted quantities to be evolved (
- * `KleinGordonPsi` and `BondiJ`).
+ *  - `system::evolved_swsh_tag`: The spin-weighted quantities to be evolved
+ * (`KleinGordonPsi` and `BondiJ`).
  *  - `evolved_swsh_dt_tags`: The spin-weighed quantities associated that are to
- * act as the time derivative to evolve `evolved_swsh_tags` (`KleinGordonPi` and
+ * act as the time derivative to evolve `evolved_swsh_tag` (`KleinGordonPi` and
  * `BondiH`).
  * - Additional type aliases related to the scalar field:
  *  - `klein_gordon_boundary_communication_tags`:  A typelist of tags that will
@@ -57,7 +56,7 @@ struct KleinGordonCharacteristicEvolution
     : CharacteristicEvolution<Metavariables> {
   using metavariables = Metavariables;
   static constexpr bool evolve_ccm = Metavariables::evolve_ccm;
-  using cce_system = Cce::KleinGordonSystem<evolve_ccm>;
+  using cce_system = typename Metavariables::system;
 
   using cce_base = CharacteristicEvolution<Metavariables>;
   using initialize_action_list = tmpl::append<

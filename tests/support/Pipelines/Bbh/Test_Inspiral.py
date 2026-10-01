@@ -46,7 +46,7 @@ class TestInspiral(unittest.TestCase):
             submit=False,
             executable=str(self.bin_dir / "SolveXcts"),
         )
-        self.id_dir = self.test_dir / "ID"
+        self.id_run_dir = self.test_dir / "ID"
         # Purposefully not in the ID directory
         self.horizons_filename = self.test_dir / "Horizons.h5"
         with spectre_h5.H5File(
@@ -62,64 +62,94 @@ class TestInspiral(unittest.TestCase):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
     def test_inspiral_parameters(self):
-        with open(self.id_dir / "InitialData.yaml") as open_input_file:
-            id_metadata, id_input_file = yaml.safe_load_all(open_input_file)
-        params = inspiral_parameters(
-            id_input_file=id_input_file,
-            id_metadata=id_metadata,
-            id_run_dir=self.id_dir,
-            id_subfile_name="VolumeData",
-            id_horizons_path=self.horizons_filename,
+        for cylindrical_domain in [False, True]:
+            with self.subTest(cylindrical_domain=cylindrical_domain):
+                with open(
+                    self.id_run_dir / "InitialData.yaml"
+                ) as open_input_file:
+                    id_metadata, id_input_file = yaml.safe_load_all(
+                        open_input_file
+                    )
+                params = inspiral_parameters(
+                    id_input_file=id_input_file,
+                    id_metadata=id_metadata,
+                    cylindrical_domain=cylindrical_domain,
+                    id_run_dir=self.id_run_dir,
+                    id_subfile_name="VolumeData",
+                    id_horizons_path=self.horizons_filename,
+                )
+                self.assertEqual(
+                    params["IdFileGlob"],
+                    str((self.id_run_dir).resolve() / "BbhVolume*.h5"),
+                )
+                self.assertEqual(params["IdSubfile"], "VolumeData")
+                self.assertEqual(
+                    params["UseCylindricalDomain"], cylindrical_domain
+                )
+                self.assertAlmostEqual(
+                    params["ExcisionRadiusA"], 1.116 * 1.0385 * 0.82
+                )
+                self.assertAlmostEqual(
+                    params["ExcisionRadiusB"], 0.744 * 1.0385 * 0.82
+                )
+                self.assertEqual(params["XCoordA"], 8.0)
+                self.assertEqual(params["XCoordB"], -12.0)
+                self.assertEqual(params["InitialAngularVelocity"], 0.01)
+                self.assertEqual(params["RadialExpansionVelocity"], -1.0e-5)
+                self.assertEqual(
+                    params["HorizonsFile"],
+                    str(self.horizons_filename.resolve()),
+                )
+                self.assertEqual(params["AhASubfileName"], "AhA/Coefficients")
+                self.assertEqual(params["AhBSubfileName"], "AhB/Coefficients")
+                self.assertEqual(params["ExcisionAShapeMass"], 0.6 * 0.82)
+                self.assertEqual(params["ExcisionAShapeSpin_x"], 0.0)
+                self.assertEqual(params["ExcisionAShapeSpin_y"], 0.0)
+                self.assertEqual(params["ExcisionAShapeSpin_z"], 0.0)
+                self.assertEqual(params["ExcisionBShapeMass"], 0.4 * 0.82)
+                self.assertEqual(params["ExcisionBShapeSpin_x"], 0.0)
+                self.assertEqual(params["ExcisionBShapeSpin_y"], 0.0)
+                self.assertEqual(params["ExcisionBShapeSpin_z"], 0.0)
+                # Control system
+                self.assertEqual(params["MaxDampingTimescale"], 20.0)
+                self.assertEqual(params["KinematicTimescale"], 0.2)
+                self.assertAlmostEqual(params["SizeATimescale"], 0.024)
+                self.assertAlmostEqual(params["SizeBTimescale"], 0.016)
+                self.assertAlmostEqual(params["ShapeATimescale"], 1.0)
+                self.assertAlmostEqual(params["ShapeBTimescale"], 1.0)
+                self.assertEqual(params["SizeIncreaseThreshold"], 1e-3)
+                self.assertEqual(params["DecreaseThreshold"], 6 / 130 * 2e-3)
+                self.assertEqual(params["IncreaseThreshold"], 1.5 / 130 * 2e-3)
+                self.assertEqual(params["SizeAMaxTimescale"], 20)
+                self.assertEqual(params["SizeBMaxTimescale"], 20)
+                # Constraint damping
+                self.assertEqual(params["Gamma0Constant"], 0.01)
+                self.assertEqual(params["Gamma0LeftAmplitude"], 4.0 / 0.4)
+                self.assertEqual(params["Gamma0LeftWidth"], 7.0 * 0.4)
+                self.assertEqual(params["Gamma0RightAmplitude"], 4.0 / 0.6)
+                self.assertEqual(params["Gamma0RightWidth"], 7.0 * 0.6)
+                self.assertEqual(params["Gamma0OriginAmplitude"], 0.75)
+                self.assertEqual(params["Gamma0OriginWidth"], 50.0)
+                self.assertEqual(params["Gamma1Width"], 200.0)
+
+        # AhA/B apparent horizon adaptivity
+        ah_ab_max_tolerance = 0.000216536 * 4 ** (-2)
+        self.assertAlmostEqual(params["AhABMaxResidual"], ah_ab_max_tolerance)
+        self.assertAlmostEqual(
+            params["AhABMinResidual"], ah_ab_max_tolerance / 10.0
         )
-        self.assertEqual(
-            params["IdFileGlob"],
-            str((self.id_dir).resolve() / "BbhVolume*.h5"),
+        self.assertAlmostEqual(
+            params["AhABMaxTruncationError"], ah_ab_max_tolerance
         )
-        self.assertEqual(params["IdSubfile"], "VolumeData")
-        self.assertAlmostEqual(params["ExcisionRadiusA"], 1.116 * 1.0385 * 0.82)
-        self.assertAlmostEqual(params["ExcisionRadiusB"], 0.744 * 1.0385 * 0.82)
-        self.assertEqual(params["XCoordA"], 8.0)
-        self.assertEqual(params["XCoordB"], -12.0)
-        self.assertEqual(params["InitialAngularVelocity"], 0.01)
-        self.assertEqual(params["RadialExpansionVelocity"], -1.0e-5)
-        self.assertEqual(
-            params["HorizonsFile"], str(self.horizons_filename.resolve())
+        self.assertAlmostEqual(
+            params["AhABMinTruncationError"], ah_ab_max_tolerance / 100.0
         )
-        self.assertEqual(params["AhASubfileName"], "AhA/Coefficients")
-        self.assertEqual(params["AhBSubfileName"], "AhB/Coefficients")
-        self.assertEqual(params["ExcisionAShapeMass"], 0.6 * 0.82)
-        self.assertEqual(params["ExcisionAShapeSpin_x"], 0.0)
-        self.assertEqual(params["ExcisionAShapeSpin_y"], 0.0)
-        self.assertEqual(params["ExcisionAShapeSpin_z"], 0.0)
-        self.assertEqual(params["ExcisionBShapeMass"], 0.4 * 0.82)
-        self.assertEqual(params["ExcisionBShapeSpin_x"], 0.0)
-        self.assertEqual(params["ExcisionBShapeSpin_y"], 0.0)
-        self.assertEqual(params["ExcisionBShapeSpin_z"], 0.0)
-        # Control system
-        self.assertEqual(params["MaxDampingTimescale"], 20.0)
-        self.assertEqual(params["KinematicTimescale"], 0.2)
-        self.assertAlmostEqual(params["SizeATimescale"], 0.024)
-        self.assertAlmostEqual(params["SizeBTimescale"], 0.016)
-        self.assertAlmostEqual(params["ShapeATimescale"], 1.0)
-        self.assertAlmostEqual(params["ShapeBTimescale"], 1.0)
-        self.assertEqual(params["SizeIncreaseThreshold"], 1e-3)
-        self.assertEqual(params["DecreaseThreshold"], 6 / 130 * 2e-3)
-        self.assertEqual(params["IncreaseThreshold"], 1.5 / 130 * 2e-3)
-        self.assertEqual(params["SizeAMaxTimescale"], 20)
-        self.assertEqual(params["SizeBMaxTimescale"], 20)
-        # Constraint damping
-        self.assertEqual(params["Gamma0Constant"], 0.01)
-        self.assertEqual(params["Gamma0LeftAmplitude"], 4.0 / 0.4)
-        self.assertEqual(params["Gamma0LeftWidth"], 7.0 * 0.4)
-        self.assertEqual(params["Gamma0RightAmplitude"], 4.0 / 0.6)
-        self.assertEqual(params["Gamma0RightWidth"], 7.0 * 0.6)
-        self.assertEqual(params["Gamma0OriginAmplitude"], 0.75)
-        self.assertEqual(params["Gamma0OriginWidth"], 50.0)
-        self.assertEqual(params["Gamma1Width"], 200.0)
+        self.assertEqual(params["AhABMinResolutionL"], 6)
+        self.assertEqual(params["AhABMaxPileUpModes"], 4)
 
     def test_cli(self):
         common_args = [
-            str(self.id_dir / "InitialData.yaml"),
+            str(self.id_run_dir / "InitialData.yaml"),
             "--id-subfile-name",
             "VolumeData",
             "--id-horizons-path",
@@ -148,8 +178,42 @@ class TestInspiral(unittest.TestCase):
         except SystemExit as e:
             self.assertEqual(e.code, 0)
         self.assertTrue(
-            (self.test_dir / "Inspiral/Segment_0000/Inspiral.yaml").exists()
+            (self.test_dir / "Inspiral/0000_Inspiral/Inspiral.yaml").exists()
         )
+
+        with open(
+            self.test_dir / "Inspiral/0000_Inspiral/Inspiral.yaml", "r"
+        ) as open_input_file:
+            _, input_file = yaml.safe_load_all(open_input_file)
+        ah_ab_max_tolerance = 0.000216536 * 4 ** (-2)
+        ah_ab_min_residual = ah_ab_max_tolerance / 10.0
+        ah_ab_min_truncation_error = ah_ab_max_tolerance / 100.0
+        expected_ah_ab_criteria = [
+            {
+                "Residual": {
+                    "MinResidual": ah_ab_min_residual,
+                    "MaxResidual": ah_ab_max_tolerance,
+                    "MinResolutionL": 6,
+                }
+            },
+            {
+                "Shape": {
+                    "MinTruncationError": ah_ab_min_truncation_error,
+                    "MaxTruncationError": ah_ab_max_tolerance,
+                    "MaxPileUpModes": 4,
+                    "MinResolutionL": 6,
+                }
+            },
+        ]
+        self.assertEqual(
+            input_file["ApparentHorizons"]["ObservationAhA"]["Criteria"],
+            expected_ah_ab_criteria,
+        )
+        self.assertEqual(
+            input_file["ApparentHorizons"]["ObservationAhB"]["Criteria"],
+            expected_ah_ab_criteria,
+        )
+
         # Test with pipeline directory and lev specified
         try:
             start_inspiral_command(
@@ -166,7 +230,7 @@ class TestInspiral(unittest.TestCase):
         except SystemExit as e:
             self.assertEqual(e.code, 0)
         with open(
-            self.test_dir / "Pipeline/000_Inspiral/Segment_0000/Inspiral.yaml",
+            self.test_dir / "Pipeline/Ecc0/Lev-2/0000_Inspiral/Inspiral.yaml",
             "r",
         ) as open_input_file:
             metadata = next(yaml.safe_load_all(open_input_file))
@@ -202,7 +266,7 @@ class TestInspiral(unittest.TestCase):
         except SystemExit as e:
             self.assertEqual(e.code, 0)
         with open(
-            self.test_dir / "Pipeline/001_Inspiral/Segment_0000/Inspiral.yaml",
+            self.test_dir / "Pipeline/Ecc0/Lev-2/0001_Inspiral/Inspiral.yaml",
             "r",
         ) as open_input_file:
             metadata = next(yaml.safe_load_all(open_input_file))
@@ -213,9 +277,9 @@ class TestInspiral(unittest.TestCase):
             {
                 "Run": modulename + ":eccentricity_control",
                 "With": {
-                    "h5_files": "../Segment_*/BbhReductions.h5",
+                    "h5_files": "../*_Inspiral/BbhReductions.h5",
                     "id_input_file_path": str(
-                        self.id_dir.resolve() / "InitialData.yaml"
+                        self.id_run_dir.resolve() / "InitialData.yaml"
                     ),
                     "plot_output_dir": "./",
                     "ecc_params_output_file": "../EccentricityParams.yaml",
@@ -232,6 +296,27 @@ class TestInspiral(unittest.TestCase):
                     "submit": True,
                 },
             },
+        )
+        # Test with cylindrical BBH domain
+        try:
+            start_inspiral_command(
+                common_args
+                + [
+                    "--lev",
+                    "-2",
+                    "-O",
+                    str(self.test_dir / "CylindricalInspiral"),
+                    "--cylindrical-domain",
+                    "--no-submit",
+                ]
+            )
+        except SystemExit as e:
+            self.assertEqual(e.code, 0)
+        self.assertTrue(
+            (
+                self.test_dir
+                / "CylindricalInspiral/0000_Inspiral/Inspiral.yaml"
+            ).exists()
         )
 
 

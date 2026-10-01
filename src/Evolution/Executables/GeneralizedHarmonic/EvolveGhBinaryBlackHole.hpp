@@ -174,6 +174,7 @@
 #include "PointwiseFunctions/GeneralRelativity/GeneralizedHarmonic/ExtrinsicCurvature.hpp"
 #include "PointwiseFunctions/GeneralRelativity/GeneralizedHarmonic/SpatialDerivOfLapse.hpp"
 #include "PointwiseFunctions/GeneralRelativity/GeneralizedHarmonic/SpatialDerivOfShift.hpp"
+#include "PointwiseFunctions/GeneralRelativity/Psi4Imag.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Psi4Real.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Ricci.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Surfaces/Tags.hpp"
@@ -197,7 +198,6 @@
 #include "Time/Tags/TimeStepId.hpp"
 #include "Time/TimeSequence.hpp"
 #include "Time/TimeSteppers/Factory.hpp"
-#include "Time/TimeSteppers/LtsTimeStepper.hpp"
 #include "Time/TimeSteppers/TimeStepper.hpp"
 #include "Time/Triggers/TimeTriggers.hpp"
 #include "Time/UpdateU.hpp"
@@ -243,10 +243,7 @@ struct EvolutionMetavars {
   static constexpr bool use_damped_harmonic_rollon = false;
   using system = gh::System<volume_dim>;
   using temporal_id = Tags::TimeStepId;
-  using TimeStepperBase = LtsTimeStepper;
 
-  static constexpr bool local_time_stepping =
-      TimeStepperBase::local_time_stepping;
   static constexpr bool use_dg_element_collection = false;
 
   using initialize_initial_data_dependent_quantities_actions =
@@ -450,7 +447,8 @@ struct EvolutionMetavars {
                                                   Frame::Inertial>,
               gr::Tags::WeylTypeD1Compute<DataVector, 3, Frame::Inertial>,
               gr::Tags::WeylTypeD1ScalarCompute<DataVector, 3, Frame::Inertial>,
-              gr::Tags::Psi4RealCompute<Frame::Inertial>>,
+              gr::Tags::Psi4RealCompute<Frame::Inertial>,
+              gr::Tags::Psi4ImagCompute<Frame::Inertial>>,
           tmpl::list<>>>;
   using non_tensor_compute_tags = tmpl::list<
       ::Events::Tags::ObserverMeshCompute<volume_dim>,
@@ -541,9 +539,6 @@ struct EvolutionMetavars {
             tmpl::list<gh::gauges::DampedHarmonic, gh::gauges::Harmonic>>,
         tmpl::pair<MathFunction<1, Frame::Inertial>,
                    MathFunctions::all_math_functions<1, Frame::Inertial>>,
-        // Restrict to monotonic time steppers in LTS to avoid control
-        // systems deadlocking.
-        tmpl::pair<LtsTimeStepper, TimeSteppers::monotonic_lts_time_steppers>,
         tmpl::pair<PhaseChange,
                    tmpl::push_back<
                        PhaseControl::factory_creatable_classes,
@@ -611,7 +606,8 @@ struct EvolutionMetavars {
       Actions::MutateApply<ChangeTimeStepperOrder<system>>,
       Actions::MutateApply<CleanHistory<system>>,
       Actions::MutateApply<evolution::dg::CleanMortarHistory<volume_dim>>,
-      dg::Actions::SpectralFilter>;
+      dg::Actions::SpectralFilter<volume_dim,
+                                  typename system::variables_tag::tags_list>>;
 
   using initialization_actions = tmpl::list<
       Initialization::Actions::InitializeItems<
@@ -619,9 +615,10 @@ struct EvolutionMetavars {
                                        use_control_systems, true>,
           evolution::dg::Initialization::Domain<EvolutionMetavars,
                                                 use_control_systems>,
-          ::amr::Initialization::Initialize<volume_dim, EvolutionMetavars>,
-          Initialization::TimeStepperHistory<EvolutionMetavars>>,
+          ::amr::Initialization::Initialize<volume_dim, EvolutionMetavars>>,
       Initialization::Actions::NonconservativeSystem<system>,
+      Initialization::Actions::InitializeItems<
+          Initialization::TimeStepperHistory<system>>,
       Initialization::Actions::AddComputeTags<tmpl::list<::Tags::DerivCompute<
           typename system::variables_tag, ::domain::Tags::Mesh<volume_dim>,
           ::domain::Tags::InverseJacobian<volume_dim, Frame::ElementLogical,

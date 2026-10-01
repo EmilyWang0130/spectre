@@ -7,6 +7,7 @@
 
 #include "DataStructures/VariablesTag.hpp"
 #include "Evolution/Actions/RunEventsAndTriggers.hpp"
+#include "Evolution/Initialization/Evolution.hpp"
 #include "Evolution/Systems/Cce/Actions/BoundaryComputeAndSendToEvolution.hpp"
 #include "Evolution/Systems/Cce/Actions/CalculateScriInputs.hpp"
 #include "Evolution/Systems/Cce/Actions/CharacteristicEvolutionBondiCalculations.hpp"
@@ -26,12 +27,12 @@
 #include "Evolution/Systems/Cce/PrecomputeCceDependencies.hpp"
 #include "Evolution/Systems/Cce/ScriPlusValues.hpp"
 #include "Evolution/Systems/Cce/SwshDerivatives.hpp"
-#include "Evolution/Systems/Cce/System.hpp"
 #include "IO/Observer/ObserverComponent.hpp"
 #include "Parallel/GlobalCache.hpp"
 #include "Parallel/Local.hpp"
 #include "Parallel/Phase.hpp"
 #include "ParallelAlgorithms/Actions/Goto.hpp"
+#include "ParallelAlgorithms/Actions/InitializeItems.hpp"
 #include "ParallelAlgorithms/Actions/MutateApply.hpp"
 #include "ParallelAlgorithms/Actions/TerminatePhase.hpp"
 #include "Time/Actions/SelfStartActions.hpp"
@@ -60,12 +61,12 @@ struct CceEvolutionLabelTag {};
  *  - `Initialization`
  *  - `Evolve`
  * - Type aliases:
- *  - `evolved_coordinates_variables_tag`: A `Tags::Variables` with real-valued
- * tensors associated with coordinates that must be evolved.
- *  - `evolved_swsh_tags`: The spin-weighted quantities to be evolved (typically
- * `BondiJ`).
+ *  - `system::evolved_coordinates_variables_tag`: A `Tags::Variables` with
+ * real-valued tensors associated with coordinates that must be evolved.
+ *  - `system::evolved_swsh_tag`: The spin-weighted quantities to be evolved
+ * (typically `BondiJ`).
  *  - `evolved_swsh_dt_tags`: The spin-weighed quantities associated that are to
- * act as the time derivative to evolve `evolved_swsh_tags` (typically
+ * act as the time derivative to evolve `evolved_swsh_tag` (typically
  * `BondiH`).
  *  - `cce_boundary_communication_tags`: A typelist of tags that will be
  * communicated between the worldtube boundary component and the extraction
@@ -105,16 +106,17 @@ struct CharacteristicEvolution {
   static constexpr bool checkpoint_data = true;
   using metavariables = Metavariables;
   static constexpr bool evolve_ccm = Metavariables::evolve_ccm;
-  using cce_system = Cce::System<evolve_ccm>;
+  using cce_system = typename Metavariables::system;
 
   using initialize_action_list = tmpl::list<
       Actions::InitializeCharacteristicEvolutionVariables<Metavariables>,
-      Actions::InitializeCharacteristicEvolutionTime<
-          typename Metavariables::evolved_coordinates_variables_tag,
-          typename Metavariables::evolved_swsh_tags>,
+      Actions::InitializeCharacteristicEvolutionTime,
       Actions::InitializeCharacteristicEvolutionScri<
           typename Metavariables::scri_values_to_observe,
           typename Metavariables::cce_boundary_component>,
+      Initialization::Actions::InitializeItems<
+          Initialization::TimeStepperHistory<cce_system,
+                                             Tags::CceEvolutionPrefix>>,
       Parallel::Actions::TerminatePhase>;
 
   using simple_tags_from_options =

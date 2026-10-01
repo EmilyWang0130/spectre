@@ -47,7 +47,7 @@
 #include "Evolution/DgSubcell/PerssonTci.hpp"
 #include "Evolution/DgSubcell/PrepareNeighborData.hpp"
 #include "Evolution/DgSubcell/SetInterpolators.hpp"
-#include "Evolution/DgSubcell/SubcellEqualRateRegion.hpp"
+#include "Evolution/DgSubcell/SubcellAndNonconformingEqualRateRegions.hpp"
 #include "Evolution/DgSubcell/Tags/ObserverCoordinates.hpp"
 #include "Evolution/DgSubcell/Tags/ObserverMesh.hpp"
 #include "Evolution/DgSubcell/Tags/ObserverMeshVelocity.hpp"
@@ -204,6 +204,7 @@
 #include "PointwiseFunctions/GeneralRelativity/GeneralizedHarmonic/ExtrinsicCurvature.hpp"
 #include "PointwiseFunctions/GeneralRelativity/GeneralizedHarmonic/SecondTimeDerivOfSpacetimeMetric.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Lapse.hpp"
+#include "PointwiseFunctions/GeneralRelativity/Psi4Imag.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Psi4Real.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Ricci.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Shift.hpp"
@@ -234,7 +235,6 @@
 #include "Time/Tags/TimeStepId.hpp"
 #include "Time/TimeSequence.hpp"
 #include "Time/TimeSteppers/Factory.hpp"
-#include "Time/TimeSteppers/LtsTimeStepper.hpp"
 #include "Time/TimeSteppers/TimeStepper.hpp"
 #include "Time/Triggers/TimeTriggers.hpp"
 #include "Time/UpdateU.hpp"
@@ -265,10 +265,7 @@ struct GhValenciaDivCleanDefaults {
   using domain_frame = Frame::Inertial;
   static constexpr bool use_damped_harmonic_rollon = true;
   using temporal_id = Tags::TimeStepId;
-  using TimeStepperBase = TimeStepper;
 
-  static constexpr bool local_time_stepping =
-      TimeStepperBase::local_time_stepping;
   static constexpr bool use_dg_element_collection = false;
 
   using neutrino_system = RadiationTransport::NoNeutrinos::System;
@@ -353,8 +350,6 @@ struct GhValenciaDivCleanTemplateBase<
   static constexpr bool use_damped_harmonic_rollon =
       defaults::use_damped_harmonic_rollon;
   using temporal_id = typename defaults::temporal_id;
-  using TimeStepperBase = typename defaults::TimeStepperBase;
-  static constexpr bool local_time_stepping = defaults::local_time_stepping;
   static constexpr bool use_dg_element_collection =
       defaults::use_dg_element_collection;
   using system = typename defaults::system;
@@ -454,7 +449,8 @@ struct GhValenciaDivCleanTemplateBase<
               gr::Tags::SpatialChristoffelSecondKind<DataVector, volume_dim>,
               ::Events::Tags::ObserverInverseJacobian<
                   volume_dim, Frame::ElementLogical, Frame::Inertial>,
-              ::Events::Tags::ObserverMesh<volume_dim>>,
+              ::Events::Tags::ObserverMesh<volume_dim>,
+              ::Events::Tags::ObserverCoordinates<volume_dim, Frame::Inertial>>,
           gr::Tags::SpatialRicciCompute<DataVector, volume_dim,
                                         ::Frame::Inertial>,
           gr::Tags::SpatialRicciScalarCompute<DataVector, volume_dim,
@@ -514,9 +510,11 @@ struct GhValenciaDivCleanTemplateBase<
               gr::Tags::ExtrinsicCurvature<DataVector, 3>,
               ::Events::Tags::ObserverInverseJacobian<
                   volume_dim, Frame::ElementLogical, Frame::Inertial>,
-              ::Events::Tags::ObserverMesh<volume_dim>>,
+              ::Events::Tags::ObserverMesh<volume_dim>,
+              ::Events::Tags::ObserverCoordinates<volume_dim, Frame::Inertial>>,
           gr::Tags::WeylElectricCompute<DataVector, 3, Frame::Inertial>,
           gr::Tags::Psi4RealCompute<Frame::Inertial>,
+          gr::Tags::Psi4ImagCompute<Frame::Inertial>,
           ::Events::Tags::ObserverMeshVelocity<3>>,
       tmpl::conditional_t<
           use_dg_subcell,
@@ -590,15 +588,17 @@ struct GhValenciaDivCleanTemplateBase<
                          Frame::ElementLogical, Frame::Inertial>,
                      ::Events::Tags::ObserverMeshVelocityCompute<3>>>,
       tmpl::list<analytic_compute, error_compute>,
-      tmpl::list<::Tags::DerivCompute<
-                     typename system::variables_tag,
-                     ::Events::Tags::ObserverMesh<volume_dim>,
-                     ::Events::Tags::ObserverInverseJacobian<
-                         volume_dim, Frame::ElementLogical, Frame::Inertial>,
-                     typename system::gradient_variables>,
-                 gh::gauges::Tags::GaugeAndDerivativeCompute<
-                     volume_dim, ghmhd::GhValenciaDivClean::InitialData::
-                                     analytic_solutions_and_data_list>>>;
+      tmpl::list<
+          ::Tags::DerivCompute<
+              typename system::variables_tag,
+              ::Events::Tags::ObserverMesh<volume_dim>,
+              ::Events::Tags::ObserverInverseJacobian<
+                  volume_dim, Frame::ElementLogical, Frame::Inertial>,
+              typename system::gradient_variables,
+              ::Events::Tags::ObserverCoordinates<volume_dim, Frame::Inertial>>,
+          gh::gauges::Tags::GaugeAndDerivativeCompute<
+              volume_dim, ghmhd::GhValenciaDivClean::InitialData::
+                              analytic_solutions_and_data_list>>>;
 
   struct factory_creation
       : tt::ConformsTo<Options::protocols::FactoryCreation> {
@@ -651,13 +651,6 @@ struct GhValenciaDivCleanTemplateBase<
         tmpl::pair<MathFunction<1, Frame::Inertial>,
                    MathFunctions::all_math_functions<1, Frame::Inertial>>,
         tmpl::pair<evolution::initial_data::InitialData, initial_data_list>,
-        // Restrict to monotonic time steppers in LTS to avoid control
-        // systems deadlocking.
-        tmpl::pair<
-            LtsTimeStepper,
-            tmpl::conditional_t<use_control_systems,
-                                TimeSteppers::monotonic_lts_time_steppers,
-                                TimeSteppers::lts_time_steppers>>,
         tmpl::pair<PhaseChange, PhaseControl::factory_creatable_classes>,
         tmpl::pair<StepChooser<StepChooserUse::LtsStep>,
                    StepChoosers::standard_step_choosers<system>>,
@@ -760,15 +753,15 @@ struct GhValenciaDivCleanTemplateBase<
           grmhd::GhValenciaDivClean::subcell::FixConservativesAndComputePrims<
               ordered_list_of_primitive_recovery_schemes, system>>>;
 
-  using equal_rate_regions = tmpl::flatten<
-      tmpl::list<evolution::dg::NonconformingEqualRateRegions<volume_dim>,
-                 tmpl::conditional_t<
-                     use_dg_subcell,
-                     evolution::dg::subcell::SubcellEqualRateRegion<volume_dim>,
-                     tmpl::list<>>>>;
+  using equal_rate_regions = tmpl::conditional_t<
+      use_dg_subcell,
+      tmpl::list<evolution::dg::subcell::
+                     SubcellAndNonconformingEqualRateRegions<volume_dim>>,
+      tmpl::list<evolution::dg::NonconformingEqualRateRegions<volume_dim>>>;
 
   using dg_step_actions = tmpl::flatten<tmpl::list<
-      dg::Actions::SpectralFilter,
+      dg::Actions::SpectralFilter<volume_dim,
+                                  typename system::variables_tag::tags_list>,
       evolution::dg::Actions::ComputeTimeDerivative<
           volume_dim, system, AllStepChoosers, use_dg_element_collection>,
       evolution::dg::Actions::ApplyBoundaryCorrectionsToTimeDerivative<
@@ -867,9 +860,10 @@ struct GhValenciaDivCleanTemplateBase<
           Initialization::TimeStepping<derived_metavars, TimeStepper,
                                        use_control_systems, true>,
           evolution::dg::Initialization::Domain<derived_metavars,
-                                                use_control_systems>,
-          Initialization::TimeStepperHistory<derived_metavars>>,
+                                                use_control_systems>>,
       Initialization::Actions::ConservativeSystem<system>,
+      Initialization::Actions::InitializeItems<
+          Initialization::TimeStepperHistory<system>>,
       // This conditional is untested and probably doesn't work if
       // `use_dg_subcell` is `false`
       tmpl::conditional_t<

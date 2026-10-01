@@ -26,6 +26,7 @@
 #include "Evolution/Systems/Cce/Initialize/InitializeJ.hpp"
 #include "Evolution/Systems/Cce/Initialize/InverseCubic.hpp"
 #include "Evolution/Systems/Cce/IntegrandInputSteps.hpp"
+#include "Evolution/Systems/Cce/System.hpp"
 #include "Evolution/Systems/Cce/Tags.hpp"
 #include "Framework/ActionTesting.hpp"
 #include "Framework/TestHelpers.hpp"
@@ -92,9 +93,7 @@ struct mock_characteristic_evolution {
 
   using initialize_action_list = tmpl::list<
       Actions::InitializeCharacteristicEvolutionVariables<Metavariables>,
-      Actions::InitializeCharacteristicEvolutionTime<
-          typename Metavariables::evolved_coordinates_variables_tag,
-          typename Metavariables::evolved_swsh_tags>,
+      Actions::InitializeCharacteristicEvolutionTime,
       // advance the time so that the current `TimeStepId` is valid without
       // having to perform self-start.
       ::Actions::MutateApply<AdvanceTime<Tags::CceEvolutionPrefix>>,
@@ -132,11 +131,9 @@ struct mock_characteristic_evolution {
 };
 
 struct metavariables {
-  using evolved_swsh_tags = tmpl::list<Tags::BondiJ>;
+  using system = System<false>;
   using evolved_swsh_dt_tags = tmpl::list<Tags::BondiH>;
   using cce_step_choosers = tmpl::list<>;
-  using evolved_coordinates_variables_tag = ::Tags::Variables<
-      tmpl::list<Tags::CauchyCartesianCoords, Tags::InertialRetardedTime>>;
   using cce_boundary_communication_tags =
       Tags::characteristic_worldtube_boundary_tags<Tags::BoundaryValue>;
   using cce_gauge_boundary_tags = tmpl::flatten<tmpl::list<
@@ -291,7 +288,7 @@ SPECTRE_TEST_CASE(
   auto boundary_box = db::create<db::AddSimpleTags<
       boundary_variables_tag, ::Tags::Variables<pre_swsh_derivative_tag_list>,
       ::Tags::Variables<typename metavariables::cce_gauge_boundary_tags>,
-      typename metavariables::evolved_coordinates_variables_tag,
+      typename metavariables::system::evolved_coordinates_variables_tag,
       ::Tags::Variables<typename metavariables::cce_angular_coordinate_tags>,
       ::Tags::Variables<
           typename metavariables::cce_integration_independent_tags>,
@@ -302,7 +299,7 @@ SPECTRE_TEST_CASE(
                                               number_of_angular_points},
       Variables<typename metavariables::cce_gauge_boundary_tags>{
           number_of_angular_points},
-      typename metavariables::evolved_coordinates_variables_tag::type{
+      typename metavariables::system::evolved_coordinates_variables_tag::type{
           number_of_angular_points},
       Variables<typename metavariables::cce_angular_coordinate_tags>{
           number_of_angular_points},

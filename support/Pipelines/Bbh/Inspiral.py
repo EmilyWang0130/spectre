@@ -13,8 +13,10 @@ from rich.pretty import pretty_repr
 
 import spectre.IO.H5 as spectre_h5
 from spectre.IO.H5 import available_subfiles, open_volfiles, select_observation
+from spectre.Pipelines.EccentricityControl.DirectoryStructure import (
+    EccIteration,
+)
 from spectre.support.CliExceptions import RequiredChoiceError
-from spectre.support.DirectoryStructure import PipelineStep, list_pipeline_steps
 from spectre.support.Schedule import schedule, scheduler_options
 
 logger = logging.getLogger(__name__)
@@ -72,8 +74,8 @@ def _control_system_params(
         "MaxDampingTimescale": max_damping_timescale,
         "KinematicTimescale": kinematic_timescale,
         "MinSkewTimescale": 5.0 * min_kinematic_timescale,
-        "SkewTimescale": 0.5 * (
-            5.0 * min_kinematic_timescale + max_damping_timescale
+        "SkewTimescale": (
+            0.5 * (5.0 * min_kinematic_timescale + max_damping_timescale)
         ),
         "SizeATimescale": size_a_timescale,
         "SizeBTimescale": size_b_timescale,
@@ -109,10 +111,33 @@ def _constraint_damping_params(
     }
 
 
+def _ah_ab_adaptivity_params() -> dict:
+    """Parameters for adaptive AhA/B resolution.
+
+    These values use the SpEC BBH DoMultipleRuns.input horizon-adaptivity
+    tolerances with the currently fixed representative medium level k = 2.
+    SpECTRE currently supports the Residual and Shape criteria, but not SpEC's
+    SurfaceAreaElement selector.
+    """
+
+    spec_medium_level = 2
+    truncation_error_max = 0.000216536 * 4 ** (-spec_medium_level)
+
+    return {
+        "AhABMaxResidual": truncation_error_max,
+        "AhABMinResidual": truncation_error_max / 10.0,
+        "AhABMaxTruncationError": truncation_error_max,
+        "AhABMinTruncationError": truncation_error_max / 100.0,
+        "AhABMinResolutionL": 6,
+        "AhABMaxPileUpModes": 4,
+    }
+
+
 def inspiral_parameters(
     id_input_file: dict,
     id_metadata: dict,
     id_run_dir: Union[str, Path],
+    cylindrical_domain: bool,
     id_subfile_name: Optional[str],
     id_horizons_path: Optional[Union[str, Path]],
 ) -> dict:
@@ -197,10 +222,8 @@ def inspiral_parameters(
             )
         else:
             raise RequiredChoiceError(
-                (
-                    "Specify '--id-subfile-name' to select a subfile containing"
-                    " volume data."
-                ),
+                "Specify '--id-subfile-name' to select a subfile containing"
+                " volume data.",
                 choices=id_subfiles,
             )
 
@@ -209,7 +232,9 @@ def inspiral_parameters(
         "IdFileGlob": id_file_glob,
         "IdSubfile": id_subfile_name,
         "IdFromEvolution": id_from_evolution,
-        # Domain geometry
+        # Whether to use cylindrical or rectangular BBH domain
+        "UseCylindricalDomain": cylindrical_domain,
+        # Domain geometry in common between cylindrical and rectangular domain
         "ExcisionRadiusA": (
             id_domain_creator["ObjectA"]["InnerRadius"]
             * excision_radius_factor_a
@@ -218,23 +243,38 @@ def inspiral_parameters(
             id_domain_creator["ObjectB"]["InnerRadius"]
             * excision_radius_factor_b
         ),
-        "ObjectOuterRadius": initial_separation / 2.5,
         "XCoordA": id_domain_creator["ObjectA"]["XCoord"],
         "XCoordB": id_domain_creator["ObjectB"]["XCoord"],
-        "CenterOfMassOffset_y": id_domain_creator["CenterOfMassOffset"][0],
-        "CenterOfMassOffset_z": id_domain_creator["CenterOfMassOffset"][1],
-        "EnvelopeRadius": 100.0 / 15.0 * initial_separation,
         # SpEC chooses the outer radius based on a Newtonian estimate of the
         # wave zone (See function AutoRmax in SpEC/Support/Perl/SpEC.pm). This
         # may need to be ported over eventually. The CCE extraction radii may
         # also need to be adjusted to account for different outer shell radii.
         "OuterShellRadius": 600.0 / 15.0 * initial_separation,
-        # Extra resolution for unequal masses (to be replaced with AMR)
-        # This extra refinement was found through trial and error and allowed
-        # mass ratio 6 to evolve through inspiral stably.
-        "ExtraRadRef": round(mass_ratio / 2.0) - 1 if (mass_ratio > 2.0) else 0,
-        "ExtraRadPoints": round(mass_ratio / 5.0) if (mass_ratio > 5.0) else 0,
     }
+
+    if not cylindrical_domain:
+        # Remaining rectangular BBH domain geometry
+        params.update(
+            {
+                "ObjectOuterRadius": initial_separation / 2.5,
+                "CenterOfMassOffset_y": id_domain_creator["CenterOfMassOffset"][
+                    0
+                ],
+                "CenterOfMassOffset_z": id_domain_creator["CenterOfMassOffset"][
+                    1
+                ],
+                "EnvelopeRadius": 100.0 / 15.0 * initial_separation,
+                # Extra resolution for unequal masses (to be replaced with AMR)
+                # This extra refinement was found through trial and error and
+                # allowed mass ratio 6 to evolve through inspiral stably.
+                "ExtraRadRef": (
+                    round(mass_ratio / 2.0) - 1 if (mass_ratio > 2.0) else 0
+                ),
+                "ExtraRadPoints": (
+                    round(mass_ratio / 5.0) if (mass_ratio > 5.0) else 0
+                ),
+            }
+        )
 
     # Initial functions of time (set from ID or load from evolution data)
     if id_from_evolution:
@@ -295,6 +335,9 @@ def inspiral_parameters(
         )
     )
 
+    # AhA/B apparent horizon adaptivity
+    params.update(_ah_ab_adaptivity_params())
+
     # Store target parameters in the input file
     params["TargetParams"] = yaml.safe_dump(
         {"TargetParams": target_params}
@@ -327,6 +370,7 @@ def _load_spec_id_params(id_params_file: Path) -> dict:
 def inspiral_parameters_spec(
     id_params: dict,
     id_run_dir: Union[str, Path],
+    cylindrical_domain: bool,
 ) -> dict:
     """Determine inspiral parameters from SpEC initial data.
 
@@ -406,6 +450,9 @@ def inspiral_parameters_spec(
         )
     )
 
+    # AhA/B apparent horizon adaptivity
+    params.update(_ah_ab_adaptivity_params())
+
     # Store target parameters in the input file
     params["TargetParams"] = yaml.safe_dump(
         {"TargetParams": target_params}
@@ -430,6 +477,7 @@ def start_inspiral(
     pipeline_dir: Optional[Union[str, Path]] = None,
     run_dir: Optional[Union[str, Path]] = None,
     segments_dir: Optional[Union[str, Path]] = None,
+    cylindrical_domain: bool = False,
     **scheduler_kwargs,
 ):
     """Schedule an inspiral simulation from initial data.
@@ -464,6 +512,7 @@ def start_inspiral(
         inspiral_params = inspiral_parameters_spec(
             _load_spec_id_params(Path(id_input_file_path)),
             id_run_dir,
+            cylindrical_domain,
         )
     else:
         # Load SpECTRE initial data
@@ -473,6 +522,7 @@ def start_inspiral(
             id_input_file,
             id_metadata,
             id_run_dir,
+            cylindrical_domain,
             id_subfile_name=id_subfile_name,
             id_horizons_path=id_horizons_path,
         )
@@ -480,8 +530,8 @@ def start_inspiral(
     # Determine resolution
     if lev is not None:
         assert (refinement_level is None) and (polynomial_order is None), (
-            "The option 'lev' is mutually exclusive with 'refinement_level' and"
-            " 'polynomial_order'."
+            "The option 'lev' is mutually exclusive with 'refinement_level'"
+            " and 'polynomial_order'."
         )
         selected_lev = INSPIRAL_LEVS[lev]
         refinement_level = selected_lev["refinement_level"]
@@ -492,6 +542,11 @@ def start_inspiral(
         ), (
             "Resolution not specified. Provide either 'lev' or both"
             " 'refinement_level' and 'polynomial_order'."
+        )
+        assert not cylindrical_domain, (
+            "'refinement_level' and 'polynomial_order' are not supported for"
+            " the cylindrical domain. Must instead specify 'lev' when"
+            " --cylindrical_domain=True."
         )
     inspiral_params.update(
         {
@@ -527,13 +582,15 @@ def start_inspiral(
             " 'pipeline_dir' automatically."
         )
     if pipeline_dir and not run_dir and not segments_dir:
-        pipeline_steps = list_pipeline_steps(pipeline_dir)
-        if pipeline_steps:  # Check if the list is not empty
-            segments_dir = pipeline_steps[-1].next(label="Inspiral").path
-        else:
-            segments_dir = PipelineStep.first(
-                directory=pipeline_dir, label="Inspiral"
-            ).path
+        assert lev is not None, (
+            "Specify a '--lev' when running in a '--pipeline-dir' / '-d',"
+            " because it determines the directory that the evolution runs in."
+            " Specify a '--run-dir' / '-o' or '--segments-dir' / '-O' to choose"
+            " the directory yourself."
+        )
+        # Continue the current eccentricity-control iteration at this
+        # resolution
+        segments_dir = EccIteration.current(pipeline_dir).lev_dir(lev)
 
     # Determine resource allocation
     if (
@@ -626,6 +683,13 @@ def start_inspiral(
     ),
 )
 @click.option(
+    "--cylindrical-domain",
+    is_flag=True,
+    help=(
+        "Use the cylindrical BBH domain instead of the rectangular BBH domain."
+    ),
+)
+@click.option(
     "--lev",
     type=int,
     help=(
@@ -669,7 +733,7 @@ def start_inspiral(
         writable=True,
         path_type=Path,
     ),
-    help="Directory where steps in the pipeline are created.",
+    help="Directory of the simulation, in which the pipeline creates its runs.",
 )
 @scheduler_options
 def start_inspiral_command(**kwargs):

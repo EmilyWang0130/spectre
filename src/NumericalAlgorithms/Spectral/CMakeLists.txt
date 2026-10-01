@@ -19,9 +19,11 @@ spectre_target_sources(
   DifferentiationMatrix.cpp
   Filtering.cpp
   FiniteDifference.cpp
+  Hash.cpp
   IntegrationMatrix.cpp
   InterpolationWeights.cpp
   InterpolationMatrix.cpp
+  IsValidDgMesh.cpp
   LinearFilteringMatrix.cpp
   LogicalCoordinates.cpp
   Mesh.cpp
@@ -32,6 +34,7 @@ spectre_target_sources(
   Quadrature.cpp
   QuadratureWeights.cpp
   SegmentSize.cpp
+  ZernikeB2.cpp
   )
 
 spectre_target_headers(
@@ -57,11 +60,14 @@ spectre_target_headers(
   FilteringB3.hpp
   FilteringB3.tpp
   GetSpectralQuantityForMesh.hpp
+  Hash.hpp
   IntegrationMatrix.hpp
   InterpolationWeights.hpp
   InterpolationMatrix.hpp
   InverseWeightFunctionValues.hpp
+  IsValidDgMesh.hpp
   Legendre.hpp
+  Limits.hpp
   LinearFilteringMatrix.hpp
   LogicalCoordinates.hpp
   MaximumNumberOfPoints.hpp
@@ -78,6 +84,7 @@ spectre_target_headers(
   QuadratureWeights.hpp
   SegmentSize.hpp
   SpectralQuantityForMesh.hpp
+  ZernikeB2.hpp
   )
 
 target_link_libraries(

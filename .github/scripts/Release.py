@@ -5,6 +5,7 @@
 
 import datetime
 import difflib
+import json
 import logging
 import operator
 import os
@@ -16,11 +17,11 @@ import urllib
 from typing import List
 
 import git
+import jsonschema
 import pybtex.database
 import requests
 import uplink
 import yaml
-from cffconvert.citation import Citation
 from pybtex.backends.plaintext import Backend as PlaintextBackend
 from pybtex.style.formatting.plain import Style as PlainStyle
 
@@ -30,26 +31,15 @@ VERSION_PATTERN = r"(\d{4})\.(\d{2})\.(\d{2})(\.\d+)?"
 PUBLICATION_DATE_PATTERN = r"\d{4}-\d{2}-\d{2}"
 DOI_PATTERN = r"10\.\d{4,9}/zenodo\.\d+"
 ZENODO_ID_PATTERN = r"\d+"
+# Schema for the Citation File Format (CFF), fetched for the 'cff-version'
+# declared in the CITATION.cff file
+CFF_SCHEMA_URL = (
+    "https://citation-file-format.github.io/{cff_version}/schema.json"
+)
 
 
 def report_check_only(msg: str):
     logger.info(f"CHECK ONLY: {msg}")
-
-
-def new_version_id_from_response(response):
-    """Retrieves the ID of the new version draft from the API response
-
-    The "New version" action of the Zenodo API returns the ID of the created
-    version draft in the 'links' section, as documented
-    [here](https://developers.zenodo.org/#new-version). This function parses the
-    ID out of the link.
-    """
-    new_version_url = response.json()["links"]["latest_draft"]
-    return int(
-        pathlib.PurePosixPath(
-            urllib.parse.urlparse(new_version_url).path
-        ).parts[-1]
-    )
 
 
 def raise_for_status(response):
@@ -90,13 +80,24 @@ class Zenodo(uplink.Consumer):
         """Checks whether the record is the latest version."""
         pass
 
-    @uplink.response_handler(new_version_id_from_response)
-    @uplink.post("deposit/depositions/{id}/actions/newversion")
+    @uplink.returns.json(key="id", type=int)
+    @uplink.post("records/{id}/versions")
     def new_version(self, latest_version_id: uplink.Path(name="id")):
-        """Invoke the "New version" action on a deposition.
+        """Creates a draft for a new version of a published record.
+
+        Zenodo returns the existing draft if one was created before, so this
+        can be called repeatedly, e.g. when an earlier release attempt failed
+        before publishing the draft.
+
+        Note that we deliberately don't use the "New version" action of the
+        legacy deposit API here, because it also imports the files of the
+        previous version into the draft. That import fails when it runs a
+        second time on the same draft, which makes the legacy action
+        impossible to re-run. We don't need those files anyway, since the
+        `publish` subprogram uploads the archive of the new release.
 
         Returns:
-          The ID of the new version.
+          The ID of the new version draft.
         """
         pass
 
@@ -377,6 +378,29 @@ def collect_citation_metadata(
     }
 
 
+def validate_citation_file(citation_file_content: str):
+    """Validates the CITATION.cff file against the Citation File Format schema
+
+    Downloads the schema for the 'cff-version' that the file declares from
+    https://citation-file-format.github.io and validates against it.
+
+    Args:
+      citation_file_content: Content of the CITATION.cff file
+
+    Raises:
+      jsonschema.ValidationError: If the file doesn't match the schema
+    """
+    citation_data = yaml.safe_load(citation_file_content)
+    schema_url = CFF_SCHEMA_URL.format(cff_version=citation_data["cff-version"])
+    logger.debug(f"Downloading CFF schema: {schema_url}")
+    schema_response = requests.get(schema_url)
+    schema_response.raise_for_status()
+    # The schema expects that YAML 'date' objects have been cast to strings, so
+    # round-trip the data through JSON to convert them
+    citation_data = json.loads(json.dumps(citation_data, default=str))
+    jsonschema.validate(citation_data, schema_response.json())
+
+
 def build_bibtex_entry(metadata: dict):
     """Builds a BibTeX entry that we suggest people cite in publications
 
@@ -576,7 +600,7 @@ def prepare(
             open_metadata_file.write(content_new)
             open_metadata_file.truncate()
     logger.info(f"Inserted new version info into '{metadata_file}'.")
-    # Also update the the metadata dict to make sure we don't accidentally use
+    # Also update the metadata dict to make sure we don't accidentally use
     # the old values somewhere
     metadata["Version"] = version_name
     metadata["PublicationDate"] = publication_date
@@ -618,7 +642,7 @@ def prepare(
     citation_file_content += yaml.safe_dump(citation_data, allow_unicode=True)
     write_file_or_check(citation_file, citation_file_content)
     # Validate the CFF file
-    Citation(citation_file_content, src=citation_file).validate()
+    validate_citation_file(citation_file_content)
 
     # Get the BibTeX entry and write to file
     bibtex_entry = build_bibtex_entry(metadata)

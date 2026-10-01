@@ -14,6 +14,7 @@ spectre_python_add_module(
   DomainCreator.cpp
   Rectilinear.cpp
   Sphere.cpp
+  SphericalShells.cpp
   PYTHON_FILES
   __init__.py
   )
@@ -27,6 +28,7 @@ spectre_python_headers(
   DomainCreator.hpp
   Rectilinear.hpp
   Sphere.hpp
+  SphericalShells.hpp
   )
 
 spectre_python_link_libraries(

@@ -11,6 +11,7 @@
 #include "NumericalAlgorithms/Spectral/BarycentricWeights.hpp"
 #include "NumericalAlgorithms/Spectral/Basis.hpp"
 #include "NumericalAlgorithms/Spectral/BasisFunctions/Fourier.hpp"
+#include "NumericalAlgorithms/Spectral/BasisFunctions/HalfFourier.hpp"
 #include "NumericalAlgorithms/Spectral/BasisFunctions/Zernike.hpp"
 #include "NumericalAlgorithms/Spectral/CollocationPoints.hpp"
 #include "NumericalAlgorithms/Spectral/GetSpectralQuantityForMesh.hpp"
@@ -42,7 +43,7 @@ Matrix interpolation_matrix(const size_t num_points, const T& target_points) {
     return Fourier::interpolation_matrix(num_points, target_points);
   }
   constexpr size_t max_num_points =
-      Spectral::maximum_number_of_points<BasisType>;
+      Spectral::maximum_number_of_points<BasisType, QuadratureType>;
   constexpr size_t min_num_points =
       Spectral::minimum_number_of_points<BasisType, QuadratureType>;
   ASSERT(num_points >= min_num_points,
@@ -101,15 +102,24 @@ Matrix interpolation_matrix(const Mesh<1>& mesh, const T& target_points) {
 template <Basis BasisType, Quadrature QuadratureType, typename T>
 Matrix interpolation_matrix(size_t num_points, const T& target_points,
                             const Spectral::Parity parity) {
-  static_assert(BasisType == Basis::ZernikeB1,
-                "Only Basis::ZernikeB1 is supported by this overload; for "
-                "ZernikeB2/ZernikeB3 use Irregular or Cardinal interpolants.");
   static_assert(
-      QuadratureType == Quadrature::GaussRadauUpper,
-      "Zernike bases are only instantiated with GaussRadauUpper quadrature.");
+      BasisType == Basis::ZernikeB1 or BasisType == Basis::HalfFourier,
+      "Only Basis::ZernikeB1 and Basis::HalfFourier are supported by "
+      "this overload; for ZernikeB2/ZernikeB3 use Irregular or "
+      "Cardinal interpolants.");
   ASSERT(parity != Parity::Uninitialized,
          "Parity must be set to either Even or Odd");
-  return Zernike<1>::interpolation_matrix(num_points, target_points, parity);
+  if constexpr (BasisType == Basis::HalfFourier) {
+    static_assert(
+        QuadratureType == Quadrature::Equiangular,
+        "HalfFourier bases are only instantiated with Equiangularquadrature.");
+    return HalfFourier::interpolation_matrix(num_points, target_points, parity);
+  } else {
+    static_assert(
+        QuadratureType == Quadrature::GaussRadauUpper,
+        "Zernike bases are only instantiated with GaussRadauUpper quadrature.");
+    return Zernike<1>::interpolation_matrix(num_points, target_points, parity);
+  }
 }
 
 template Matrix interpolation_matrix<Basis::Chebyshev, Quadrature::Gauss>(
@@ -141,6 +151,17 @@ template Matrix Spectral::interpolation_matrix(const Mesh<1>&,
                                                const std::vector<double>&);
 template Matrix Spectral::interpolation_matrix(const Mesh<1>&, const double&);
 
+template Matrix
+interpolation_matrix<Basis::HalfFourier, Quadrature::Equiangular>(
+    size_t, const std::vector<double>&, Spectral::Parity);
+template Matrix interpolation_matrix<Basis::HalfFourier,
+                                     Quadrature::Equiangular>(size_t,
+                                                              const DataVector&,
+                                                              Spectral::Parity);
+template Matrix interpolation_matrix<Basis::HalfFourier,
+                                     Quadrature::Equiangular>(size_t,
+                                                              const double&,
+                                                              Spectral::Parity);
 template Matrix
 interpolation_matrix<Basis::ZernikeB1, Quadrature::GaussRadauUpper>(
     size_t, const std::vector<double>&, Spectral::Parity);

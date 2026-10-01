@@ -194,11 +194,11 @@ use a container or follow the \ref quick_start_install.
 
 #### Required:
 
-* [GCC](https://gcc.gnu.org/) 10.0 or later,
-[Clang](https://clang.llvm.org/) 13.0 or later (see
+* [GCC](https://gcc.gnu.org/) 11.0 or later,
+[Clang](https://clang.llvm.org/) 17.0 or later (see
 [here](https://apt.llvm.org/) for how to get newer versions of clang through
 apt), or AppleClang 13.0.0 or later
-* [CMake](https://cmake.org/) 3.18.0 or later
+* [CMake](https://cmake.org/) 3.22.0 or later
 * [Git](https://git-scm.com/)
 * BLAS & LAPACK (e.g. [OpenBLAS](http://www.openblas.net))
 * [Boost](http://www.boost.org/) 1.60.0 or later
@@ -206,7 +206,7 @@ apt), or AppleClang 13.0.0 or later
 * [GNU make](https://www.gnu.org/software/make/)
 * [HDF5](https://support.hdfgroup.org/HDF5/) (non-mpi version on macOS)
   \cite Hdf5
-* [Python](https://www.python.org/) 3.8 or later.
+* [Python](https://www.python.org/) 3.10 or later.
 * [Charm++](http://charm.cs.illinois.edu/) 7.0.0, or later (8 preferred).
   See also \ref building-charm. \cite Charmpp1 \cite Charmpp2 \cite Charmpp3
 
@@ -356,8 +356,8 @@ To build with the Docker image:
    You will end up in a bash shell in the docker container,
    as root (you need to be root).
    Within the container, the files in `$SPECTRE_ROOT` are available and Charm++
-   is installed in `/work/charm_7_0_0`. For the following steps, stay inside the
-   docker container as root.
+   is installed in `/sxscollaboration/charm`. For the following steps, stay
+   inside the docker container as root.
 4. Proceed with [building SpECTRE](#building-spectre).
 
 **Notes:**
@@ -384,17 +384,15 @@ To build with the Docker image:
     To add a new shell, run `docker exec -it CONTAINER_NAME /bin/bash`
     (or `docker exec -it CONTAINER_ID /bin/bash`) from
     a terminal outside the container.
-  * In step 4 above, technically docker allows you to say
-    `-v $SPECTRE_ROOT/:/my/new/path` to map `$SPECTRE_ROOT` outside the
-    container to any path you want inside the container, but **do not do this**.
-    Compiling inside the container sets up git hooks in SPECTRE_ROOT that
-    contain hardcoded pathnames to SPECTRE_ROOT *as seen from inside the
-    container*. So if your source paths inside and outside the container are
-    different, commands like `git commit` run *from outside the container* will
-    die with `No such file or directory`.
+  * Compiling inside the container sets up git hooks that contain paths to
+    tools like Python *as seen from inside the container*, so `git commit` run
+    *from outside the container* may fail with `No such file or directory`.
+    Pass `-D USE_GIT_HOOKS=OFF` to CMake to avoid this.
   * If you want to use Docker within VSCode, take a look at our
     [quick start guide](../DevGuide/QuickStartDockerVSCode.md) for using Docker
     with VSCode.
+  * The `agents` image adds coding agents and the tools they use. You can use
+    it as a complete development environment.
 
 ## Using Singularity to obtain a SpECTRE environment
 
@@ -452,6 +450,13 @@ To build SpECTRE with Singularity you must:
 - Since the data you modify lives on the host OS there is no need to worry about
   losing any data, needing to clean up old containers, or sharing data between
   containers and the host.
+- To use the coding-agents image (see the Docker section above), build
+  `containers/CodingAgents.def`. It pulls the image and installs the latest
+  coding agents on top, so rebuild it whenever they release a new version:
+  ```
+  apptainer build --fakeroot SpectreAi.sif containers/CodingAgents.def
+  ```
+  See the definition file for how to bind a scratch directory to `/tmp`.
 
 ## Using Spack to set up a SpECTRE environment
 
@@ -519,6 +524,8 @@ Here are a few notes:
   instructions](https://github.com/UIUC-PPL/charm#building-dynamic-libraries)).
 - Passing the `--disable-tls` option to `build` or `-D DISABLE_TLS=ON` to
   cmake is required for SpECTRE's Python bindings to work.
+- On macOS, pass `-DCMK_NO_ISO_MALLOC=1` to `build` to disable Charm++'s
+  isomalloc. See issue https://github.com/charmplusplus/charm/issues/3995.
 - When compiling Charm++ you can specify the compiler using, for example,
   ```
   ./build LIBS ARCH clang
@@ -530,14 +537,14 @@ Once you have set up your development environment you can compile SpECTRE.
 Follow these steps:
 
 1. Create a build directory where you would like to compile SpECTRE. In the
-   Docker container you could create, e.g., `/work/spectre-build`. It can be
-   useful to add a descriptive label to the name of the build directory since
-   you may create more later, e.g., `build-clang-Debug`. Then, `cd` into the
-   build directory.
+   Docker container you could create, e.g.,
+   `/sxscollaboration/spectre-build`. It can be useful to add a descriptive
+   label to the name of the build directory since you may create more later,
+   e.g., `build-clang-Debug`. Then, `cd` into the build directory.
 2. Determine the location of your Charm++ installation. In the Docker container
-   it is `/work/charm_7_0_0/multicore-linux-x86_64-gcc` for GCC builds and
-   `/work/charm_7_0_0/mpi-linux-x86_64-smp-clang` for clang builds. For Spack
-   installations you can determine it with
+   it is `/sxscollaboration/charm/multicore-linux-x86_64-gcc` for GCC builds and
+   `/sxscollaboration/charm/mpi-linux-x86_64-smp-clang` for clang builds. For
+   Spack installations you can determine it with
    `spack location --install-dir charmpp`. We refer to the install directory as
    `CHARM_ROOT` below.
 3. In your new SpECTRE build directory, configure the build with CMake:

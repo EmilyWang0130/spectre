@@ -227,6 +227,47 @@ Mesh<Dim - 1> Mesh<Dim>::slice_away(const size_t d) const {
 }
 
 template <size_t Dim>
+// clang-tidy: incorrectly reported redundancy in template expression
+template <size_t N, Requires<(N > 0 and N == Dim)>>  // NOLINT
+Mesh<Dim - 1> Mesh<Dim>::on_interface(const size_t d) const {
+  auto face = slice_away(d);
+  // The outer boundary of a B3 ball (B2 disk) is an S2 (S1): convert the
+  // remaining ZernikeB3 (ZernikeB2) angular bases to SphericalHarmonic
+  // (Fourier) so that the face mesh has the correct basis for the boundary.
+  if (basis(d) == Spectral::Basis::ZernikeB3) {
+    ASSERT(Dim == 3, "ZernikeB3 should only be used on 3D meshes, got " << Dim);
+    ASSERT(quadrature(d) == Spectral::Quadrature::GaussRadauUpper,
+           "A B3 ball's outer boundary is at the upper end of the radial "
+           "dimension (GaussRadauUpper quadrature), but dimension "
+               << d << " has quadrature " << quadrature(d));
+    ASSERT(basis() == make_array<Dim>(Spectral::Basis::ZernikeB3),
+           "Mesh is using ZernikeB3 basis in a nonisotropic manner, got "
+               << basis());
+    return {face.extents().indices(),
+            make_array<Dim - 1>(Spectral::Basis::SphericalHarmonic),
+            face.quadrature()};
+  }
+  if (basis(d) == Spectral::Basis::ZernikeB2) {
+    ASSERT(Dim == 2 or Dim == 3,
+           "ZernikeB2 should only be used on 2D or 3D meshes, got " << Dim);
+    ASSERT(quadrature(d) == Spectral::Quadrature::GaussRadauUpper,
+           "A B2 disk's outer boundary is at the upper end of the radial "
+           "dimension (GaussRadauUpper quadrature), but dimension "
+               << d << " has quadrature " << quadrature(d));
+    auto bases = face.basis();
+    ASSERT(
+        std::count(bases.begin(), bases.end(), Spectral::Basis::ZernikeB2) == 1,
+        "Expected exactly one ZernikeB2 angular basis remaining in the "
+        "face after slicing a B2 mesh, got face bases "
+            << face.basis());
+    std::replace(bases.begin(), bases.end(), Spectral::Basis::ZernikeB2,
+                 Spectral::Basis::Fourier);
+    return {face.extents().indices(), bases, face.quadrature()};
+  }
+  return face;
+}
+
+template <size_t Dim>
 template <size_t SliceDim, Requires<(SliceDim <= Dim)>>
 Mesh<SliceDim> Mesh<Dim>::slice_through(
     const std::array<size_t, SliceDim>& dims) const {
@@ -306,8 +347,11 @@ std::ostream& operator<<(std::ostream& os, const Mesh<Dim>& mesh) {
                                     const Mesh<DIM(data)>& mesh); \
   template bool is_isotropic(const Mesh<DIM(data)>& mesh);
 
-#define INSTANTIATE_SLICE_AWAY(_, data) \
-  template Mesh<DIM(data) - 1> Mesh<DIM(data)>::slice_away(const size_t) const;
+#define INSTANTIATE_SLICE_AWAY(_, data)                                    \
+  template Mesh<DIM(data) - 1> Mesh<DIM(data)>::slice_away(const size_t)   \
+      const;                                                               \
+  template Mesh<DIM(data) - 1> Mesh<DIM(data)>::on_interface(const size_t) \
+      const;
 template Mesh<0> Mesh<0>::slice_through(const std::array<size_t, 0>&) const;
 template Mesh<0> Mesh<1>::slice_through(const std::array<size_t, 0>&) const;
 template Mesh<1> Mesh<1>::slice_through(const std::array<size_t, 1>&) const;

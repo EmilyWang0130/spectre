@@ -3,7 +3,7 @@
 
 import logging
 from itertools import cycle
-from typing import Iterable, Optional, Sequence, Tuple, Union
+from typing import Dict, Iterable, Optional, Sequence, Tuple, Union
 
 import click
 import matplotlib.pyplot as plt
@@ -13,9 +13,11 @@ from matplotlib.ticker import MaxNLocator
 
 import spectre.IO.H5 as spectre_h5
 from spectre.DataStructures import DataVector
+from spectre.DataStructures.Tensor import Frame, Scalar, tnsr
 from spectre.Domain import Domain, deserialize_domain
 from spectre.IO.H5 import open_volfiles, open_volfiles_command, parse_point
 from spectre.IO.H5.IterElements import iter_elements, stripped_element_name
+from spectre.IO.H5.TransformVolumeData import get_tensor_component_names
 from spectre.NumericalAlgorithms.LinearOperators import power_monitors
 from spectre.Spectral import Basis
 from spectre.support.CliExceptions import RequiredChoiceError
@@ -25,6 +27,312 @@ from spectre.Visualization.Plot import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+_GH_TENSOR_TYPES = (
+    tnsr.aa[DataVector, 3, Frame.Inertial],
+    tnsr.aa[DataVector, 3, Frame.Inertial],
+    tnsr.iaa[DataVector, 3, Frame.Inertial],
+)
+# CurvedScalarWave evolves the same variables as ScalarWave, so these are
+# shared between the 'sw' and 'csw' systems. The power monitors depend only on
+# the numerical data and the mesh, so there is no separate CurvedScalarWave
+# implementation.
+_SW_TENSOR_TYPES = (
+    Scalar[DataVector],
+    Scalar[DataVector],
+    tnsr.i[DataVector, 3, Frame.Inertial],
+)
+
+# Names of the monitors returned by the C++ bindings
+_GH_VARIABLES = ("SpacetimeMetric", "Pi", "Phi")
+_SW_VARIABLES = ("Psi", "Pi", "Phi")
+# Names under which ScalarTensor observes the CurvedScalarWave variables in
+# volume data (see `ScalarTensor::Tags::Csw`), keyed by the ScalarWave monitor
+# names. The prefix tells them apart from the GH `Pi` and `Phi`.
+_ST_CSW_NAMES = {name: f"Csw({name})" for name in _SW_VARIABLES}
+_ST_VARIABLES = _GH_VARIABLES + tuple(_ST_CSW_NAMES.values())
+
+
+def _tensor_component_names(names: Sequence[str], tensor_types):
+    return [
+        component
+        for name, tensor_type in zip(names, tensor_types)
+        for component in get_tensor_component_names(name, tensor_type)
+    ]
+
+
+def gh_sh_tensor_component_names(
+    spacetime_metric_name: str, pi_name: str, phi_name: str
+):
+    """Tensor components of the GH evolved variables."""
+    return _tensor_component_names(
+        (spacetime_metric_name, pi_name, phi_name), _GH_TENSOR_TYPES
+    )
+
+
+def sw_sh_tensor_component_names(psi_name: str, pi_name: str, phi_name: str):
+    """Tensor components of the (Curved)ScalarWave evolved variables."""
+    return _tensor_component_names(
+        (psi_name, pi_name, phi_name), _SW_TENSOR_TYPES
+    )
+
+
+def _sh_monitors(
+    names: Sequence[str], tensor_types, shell_monitors, b3_monitors
+):
+    """Tensor components and per-element monitor function for one system.
+
+    'names' are the volume-data names of the evolved variables and
+    'tensor_types' their tensor types, in the order the monitor functions
+    take them. The returned monitor function has the signature
+    `(tensor_data, mesh, element_id, domain, time, functions_of_time)` and
+    returns None for elements with no spherical-harmonic basis.
+    """
+    tensor_components = _tensor_component_names(names, tensor_types)
+    offsets = np.cumsum(
+        [0] + [tensor_type.size for tensor_type in tensor_types]
+    )
+
+    def get_monitors(tensor_data, mesh, *args):
+        if all(basis == Basis.ZernikeB3 for basis in mesh.basis()):
+            monitor_fn = b3_monitors
+        elif any(basis == Basis.SphericalHarmonic for basis in mesh.basis()):
+            monitor_fn = shell_monitors
+        else:
+            return None
+        tensors = [
+            tensor_type(tensor_data[begin:end])
+            for tensor_type, begin, end in zip(
+                tensor_types, offsets, offsets[1:]
+            )
+        ]
+        return monitor_fn(*tensors, mesh, *args)
+
+    return tensor_components, get_monitors
+
+
+def _gh_sh_monitors(names: Sequence[str]):
+    from spectre.Evolution.Systems.GeneralizedHarmonic import (
+        gh_b3_power_monitors,
+        gh_shell_power_monitors,
+    )
+
+    return _sh_monitors(
+        names, _GH_TENSOR_TYPES, gh_shell_power_monitors, gh_b3_power_monitors
+    )
+
+
+def _sw_sh_monitors(names: Sequence[str]):
+    from spectre.Evolution.Systems.ScalarWave import (
+        sw_b3_power_monitors,
+        sw_shell_power_monitors,
+    )
+
+    return _sh_monitors(
+        names, _SW_TENSOR_TYPES, sw_shell_power_monitors, sw_b3_power_monitors
+    )
+
+
+def _st_sh_monitors(names: Sequence[str]):
+    """ScalarTensor evolves the GH variables together with the
+    CurvedScalarWave variables, so compute the GH and SW monitors on each
+    element and label the latter with their `Csw(...)` names."""
+    num_gh_variables = len(_GH_VARIABLES)
+    gh_components, get_gh_monitors = _gh_sh_monitors(names[:num_gh_variables])
+    csw_components, get_csw_monitors = _sw_sh_monitors(names[num_gh_variables:])
+    num_gh_components = len(gh_components)
+
+    def get_monitors(tensor_data, mesh, *args):
+        gh_monitors = get_gh_monitors(
+            tensor_data[:num_gh_components], mesh, *args
+        )
+        csw_monitors = get_csw_monitors(
+            tensor_data[num_gh_components:], mesh, *args
+        )
+        if gh_monitors is None or csw_monitors is None:
+            return None
+        return {
+            **gh_monitors,
+            **{
+                _ST_CSW_NAMES[name]: monitor
+                for name, monitor in csw_monitors.items()
+            },
+        }
+
+    return gh_components + csw_components, get_monitors
+
+
+# The evolution systems supported by `plot_sh_power_monitors`. 'variables'
+# are the names of the monitors, in the order the 'monitors' function takes
+# the volume-data names of the variables.
+_SH_SYSTEMS = {
+    "gh": {
+        "variables": _GH_VARIABLES,
+        "monitors": _gh_sh_monitors,
+    },
+    "sw": {
+        "variables": _SW_VARIABLES,
+        "monitors": _sw_sh_monitors,
+    },
+    "csw": {
+        "variables": _SW_VARIABLES,
+        "monitors": _sw_sh_monitors,
+    },
+    "st": {
+        "variables": _ST_VARIABLES,
+        "monitors": _st_sh_monitors,
+    },
+}
+
+
+def plot_sh_power_monitors(
+    volfiles: Union[spectre_h5.H5Vol, Iterable[spectre_h5.H5Vol]],
+    obs_id: int,
+    block_or_group_names: Sequence[str],
+    domain: Domain[3],
+    system: str,
+    tensor_names: Optional[Dict[str, str]] = None,
+    variables_to_plot: Optional[Sequence[str]] = None,
+    element_patterns: Optional[Sequence[str]] = None,
+    fixed_y_limits: Optional[Tuple[float, float]] = None,
+    figsize: Optional[Tuple[float, float]] = None,
+):
+    """Plot spherical-harmonic power monitors of an evolution system.
+
+    Computes TensorYlm-basis power monitors of the evolved variables on each
+    shell (SphericalHarmonic) and filled-sphere (ZernikeB3) element, and plots
+    their radial and angular power in one column per variable.
+
+    Arguments:
+      system: One of the keys of `_SH_SYSTEMS`.
+      tensor_names: Volume-data names of the evolved variables, keyed by
+        variable name. Variables not listed are read under their own name.
+        Keys that are not variables of the 'system' are ignored.
+      variables_to_plot: Variables to plot. Defaults to all variables of the
+        'system'.
+    """
+    variables = _SH_SYSTEMS[system]["variables"]
+    if domain.dim != 3:
+        raise click.UsageError(
+            "Spherical-harmonic power monitors require 3D volume data."
+        )
+    tensor_names = tensor_names or {}
+    tensor_components, get_monitors = _SH_SYSTEMS[system]["monitors"](
+        [tensor_names.get(variable, variable) for variable in variables]
+    )
+    variables_to_plot = variables_to_plot or variables
+
+    num_cols = len(variables_to_plot)
+    fig, axes = plt.subplots(
+        nrows=2,
+        ncols=num_cols,
+        figsize=figsize or (num_cols * 4, 7),
+        sharey="row",
+        squeeze=False,
+    )
+    plotted_elements = 0
+    for element, tensor_data in iter_elements(
+        volfiles, obs_id, tensor_components, element_patterns=element_patterns
+    ):
+        if any(
+            basis == Basis.FiniteDifference for basis in element.mesh.basis()
+        ):
+            continue
+        if (
+            find_block_or_group(
+                element.id.block_id, block_or_group_names, domain
+            )
+            is None
+        ):
+            continue
+        if tensor_data.dtype != np.float64:
+            tensor_data = tensor_data.astype(np.float64)
+        monitors = get_monitors(
+            tensor_data,
+            element.mesh,
+            element.id,
+            domain,
+            element.time,
+            element.functions_of_time or {},
+        )
+        if monitors is None:
+            continue
+        label = stripped_element_name(element.id)
+        for col, variable_name in enumerate(variables_to_plot):
+            radial = np.asarray(monitors[variable_name]["radial"])
+            angular = np.asarray(monitors[variable_name]["angular"])
+            axes[0][col].semilogy(radial, label=label)
+            axes[1][col].semilogy(angular, label=label)
+        plotted_elements += 1
+
+    for col, variable_name in enumerate(variables_to_plot):
+        axes[0][col].set_title(variable_name)
+        axes[1][col].set_xlabel("Mode number")
+    axes[0][0].set_ylabel("Radial power")
+    axes[1][0].set_ylabel("Angular power")
+    for ax in axes.ravel():
+        ax.grid(which="both")
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        if fixed_y_limits is not None:
+            ax.set_ylim(*fixed_y_limits)
+    if 0 < plotted_elements <= 12:
+        axes[0][-1].legend(loc="best", fontsize="small")
+    fig.suptitle(f"Power monitors at observation {obs_id}")
+    fig.tight_layout()
+    return fig
+
+
+def _detect_sh_system(open_h5_file, volfile) -> str:
+    """Detect the evolution system from the H5 file.
+
+    Tries the 'Executable' field in the embedded input YAML first, then falls
+    back to inspecting the tensor component names in the volume data.
+
+    Note that ScalarWave and CurvedScalarWave volume data are
+    indistinguishable by tensor component names, so only the 'Executable' field
+    can tell them apart. The component fallback gives 'sw', which computes the
+    same monitors as 'csw'. ScalarTensor ('st') data is recognized by the GH
+    variables together with the `Csw(...)`-prefixed scalar variables.
+
+    Returns one of the keys of _SH_SYSTEMS.
+    """
+    import yaml
+
+    input_src = open_h5_file.input_source()
+    if input_src:
+        metadata = next(yaml.safe_load_all(input_src), None)
+        if isinstance(metadata, dict):
+            exe = metadata.get("Executable") or ""
+            if exe.startswith("EvolveScalarTensor"):
+                return "st"
+            if "CurvedScalarWave" in exe:
+                return "csw"
+            if exe.startswith("EvolveScalarWave"):
+                return "sw"
+            # This includes GhValenciaDivClean. Only its GH variables have
+            # spherical-harmonic power monitors, so the hydro variables are
+            # ignored.
+            if exe.startswith("EvolveGh"):
+                return "gh"
+
+    # Fall back to component inspection
+    obs_ids = volfile.list_observation_ids()
+    if obs_ids:
+        components = set(volfile.list_tensor_components(obs_ids[0]))
+        has_gh = any(c.startswith("SpacetimeMetric") for c in components)
+        # ScalarTensor data also has the GH variables, so check it first
+        if has_gh and _ST_CSW_NAMES["Psi"] in components:
+            return "st"
+        if "Psi" in components:
+            return "sw"
+        if has_gh:
+            return "gh"
+
+    raise click.UsageError(
+        "Cannot auto-detect the evolution system from the H5 file. "
+        f"Specify '--sh-system {{{','.join(_SH_SYSTEMS)}}}'."
+    )
 
 
 def find_block_or_group(
@@ -110,10 +418,6 @@ def plot_power_monitors(
             continue
 
         # Compute power monitors and take L2 norm over tensor components
-        all_modes = [
-            np.zeros(element.mesh.extents(d) - skip_filtered_modes)
-            for d in range(element.dim)
-        ]
         if tensor_data.dtype != np.float64:
             if not shown_dtype_warning_once:
                 logger.warning(
@@ -122,11 +426,19 @@ def plot_power_monitors(
                 )
                 shown_dtype_warning_once = True
             tensor_data = tensor_data.astype(np.float64)
+        all_modes = None
         for component in tensor_data:
             modes = power_monitors(DataVector(component), element.mesh)
+            if all_modes is None:
+                all_modes = [
+                    np.zeros(len(modes_dim) - skip_filtered_modes)
+                    for modes_dim in modes
+                ]
             for d, modes_dim in enumerate(modes):
                 num_modes = len(modes_dim) - skip_filtered_modes
                 all_modes[d] += np.array(modes_dim)[:num_modes] ** 2
+        if all_modes is None:
+            continue
         for d in range(element.dim):
             all_modes[d] = np.sqrt(all_modes[d])
 
@@ -281,7 +593,9 @@ def plot_power_monitors(
 
 
 @click.command(name="power-monitors")
-@open_volfiles_command(obs_id_required=False, multiple_vars=True)
+@open_volfiles_command(
+    obs_id_required=False, vars_required=False, multiple_vars=True
+)
 @click.option(
     "--list-blocks",
     is_flag=True,
@@ -322,6 +636,78 @@ def plot_power_monitors(
     "--over-time", "-T", is_flag=True, help="Plot power monitors over time."
 )
 @click.option(
+    "--sh",
+    is_flag=True,
+    help=(
+        "Compute TensorYlm-basis power monitors using the evolution system "
+        "detected from the H5 file (GH: SpacetimeMetric/Pi/Phi; SW and CSW: "
+        "Psi/Pi/Phi; ST: the GH variables plus Csw(Psi)/Csw(Pi)/Csw(Phi)). "
+        "Handles shell (SphericalHarmonic) and filled-sphere (ZernikeB3) "
+        "elements automatically. The evolved variables must be in the "
+        "observed volume data."
+    ),
+)
+@click.option(
+    "--sh-system",
+    type=click.Choice(list(_SH_SYSTEMS.keys())),
+    default=None,
+    help=(
+        "Override auto-detection of the evolution system for '--sh'. "
+        "Auto-detected from the 'Executable' field in the H5 input source "
+        "or from the tensor component names present in the data."
+    ),
+)
+@click.option(
+    "--sh-variable",
+    "sh_variables",
+    multiple=True,
+    type=click.Choice(
+        sorted({v for s in _SH_SYSTEMS.values() for v in s["variables"]})
+    ),
+    help=(
+        "Variable to plot in '--sh' mode. Can be specified multiple times. "
+        "Defaults to all variables for the detected system."
+    ),
+)
+@click.option(
+    "--sh-frame-prefix",
+    type=click.Path(file_okay=False, dir_okay=False, writable=True),
+    help=(
+        "When used with '--sh --over-time', write one PNG frame per "
+        "observation with this filename prefix."
+    ),
+)
+@click.option(
+    "--sh-spacetime-metric",
+    default="SpacetimeMetric",
+    show_default=True,
+    help="Volume-data tensor name for the GH SpacetimeMetric.",
+)
+@click.option(
+    "--sh-psi",
+    default="Psi",
+    show_default=True,
+    help="Volume-data tensor name for the SW/CSW Psi.",
+)
+@click.option(
+    "--sh-pi",
+    default="Pi",
+    show_default=True,
+    help="Volume-data tensor name for Pi (the GH Pi for ST).",
+)
+@click.option(
+    "--sh-phi",
+    default="Phi",
+    show_default=True,
+    help="Volume-data tensor name for Phi (the GH Phi for ST).",
+)
+@click.option(
+    "--fixed-y-limits",
+    nargs=2,
+    type=float,
+    help="Fixed y-axis limits for spherical harmonic movie frames.",
+)
+@click.option(
     "--skip-filtered-modes",
     type=int,
     default=0,
@@ -345,6 +731,15 @@ def plot_power_monitors_command(
     list_elements,
     element_patterns,
     over_time,
+    sh,
+    sh_system,
+    sh_variables,
+    sh_frame_prefix,
+    sh_spacetime_metric,
+    sh_psi,
+    sh_pi,
+    sh_phi,
+    fixed_y_limits,
     **kwargs,
 ):
     """Plot power monitors from volume data
@@ -369,6 +764,17 @@ def plot_power_monitors_command(
             "Specify an observation '--step' or '--time', or specify"
             " '--over-time' (but not both)."
         )
+    if not sh and not vars:
+        raise click.UsageError(
+            "Specify '--var' / '-y' to select a variable to plot, or use "
+            "'--sh'."
+        )
+    if sh and over_time and not sh_frame_prefix:
+        raise click.UsageError(
+            "Specify '--sh-frame-prefix' when using "
+            "'--sh --over-time' so one plot can be written for each "
+            "observation."
+        )
 
     # Print available blocks and groups
     open_h5_file = spectre_h5.H5File(h5_files[0], "r")
@@ -381,13 +787,12 @@ def plot_power_monitors_command(
         import rich.columns
 
         rich.print(rich.columns.Columns(all_block_groups + all_block_names))
+        open_h5_file.close()
         return
     elif not block_or_group_names:
         raise RequiredChoiceError(
-            (
-                "Specify '--block' / '-b' to select (possibly multiple) blocks"
-                " or block groups to analyze."
-            ),
+            "Specify '--block' / '-b' to select (possibly multiple) blocks"
+            " or block groups to analyze.",
             choices=all_block_groups + all_block_names,
         )
     # Validate block and group names
@@ -430,7 +835,86 @@ def plot_power_monitors_command(
                 f"[bold]{block_name}[/bold] ({len(element_ids)} elements)"
             )
             console.print(rich.columns.Columns(element_ids))
+        open_h5_file.close()
         return
+
+    if sh:
+        # This option applies only to the logical-dimension power monitors
+        kwargs.pop("skip_filtered_modes")
+        detected_system = sh_system or _detect_sh_system(open_h5_file, volfile)
+        system_vars = _SH_SYSTEMS[detected_system]["variables"]
+        # Validate user-requested variables against the detected system
+        for variable in sh_variables:
+            if variable not in system_vars:
+                raise click.UsageError(
+                    f"Variable '{variable}' is not available for the detected"
+                    f" system '{detected_system}'. Available:"
+                    f" {list(system_vars)}."
+                )
+        variables_to_plot = sh_variables or system_vars
+
+        plot_kwargs = dict(
+            system=detected_system,
+            # For ST, '--sh-pi' and '--sh-phi' select the GH variables. The
+            # CSW variables are read under their 'Csw(...)' names.
+            tensor_names={
+                "SpacetimeMetric": sh_spacetime_metric,
+                "Psi": sh_psi,
+                "Pi": sh_pi,
+                "Phi": sh_phi,
+            },
+            variables_to_plot=variables_to_plot,
+            element_patterns=element_patterns,
+            fixed_y_limits=fixed_y_limits,
+            **kwargs,
+        )
+
+        if over_time:
+            all_obs_ids = volfile.list_observation_ids()
+            all_obs_times = [
+                volfile.get_observation_value(obs_id_i)
+                for obs_id_i in all_obs_ids
+            ]
+            open_h5_file.close()
+            import rich.progress
+
+            progress = rich.progress.Progress(
+                rich.progress.TextColumn(
+                    "[progress.description]{task.description}"
+                ),
+                rich.progress.BarColumn(),
+                rich.progress.MofNCompleteColumn(),
+                rich.progress.TimeRemainingColumn(),
+            )
+            task = progress.add_task(
+                "Writing frames",
+                total=len(all_obs_ids),
+            )
+            with progress:
+                for obs_id_i, obs_time_i in zip(all_obs_ids, all_obs_times):
+                    fig = plot_sh_power_monitors(
+                        open_volfiles(h5_files, subfile_name, obs_id_i),
+                        obs_id=obs_id_i,
+                        block_or_group_names=block_or_group_names,
+                        domain=domain,
+                        **plot_kwargs,
+                    )
+                    fig.savefig(
+                        f"{sh_frame_prefix}_"
+                        f"{obs_id_i:012d}_t{obs_time_i:.12g}.png"
+                    )
+                    plt.close(fig)
+                    progress.update(task, advance=1)
+            return
+
+        open_h5_file.close()
+        return plot_sh_power_monitors(
+            open_volfiles(h5_files, subfile_name, obs_id),
+            obs_id=obs_id,
+            block_or_group_names=block_or_group_names,
+            domain=domain,
+            **plot_kwargs,
+        )
 
     # Close the H5 file because we're done with preprocessing
     open_h5_file.close()

@@ -111,6 +111,7 @@
 #include "PointwiseFunctions/GeneralRelativity/DetAndInverseSpatialMetric.hpp"
 #include "PointwiseFunctions/GeneralRelativity/GeneralizedHarmonic/ConstraintDampingTags.hpp"
 #include "PointwiseFunctions/GeneralRelativity/GeneralizedHarmonic/ConstraintGammas.hpp"
+#include "PointwiseFunctions/GeneralRelativity/Psi4Imag.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Psi4Real.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Ricci.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Surfaces/Tags.hpp"
@@ -135,7 +136,6 @@
 #include "Time/Tags/Time.hpp"
 #include "Time/TimeSequence.hpp"
 #include "Time/TimeSteppers/Factory.hpp"
-#include "Time/TimeSteppers/LtsTimeStepper.hpp"
 #include "Time/TimeSteppers/TimeStepper.hpp"
 #include "Time/Triggers/TimeTriggers.hpp"
 #include "Time/UpdateU.hpp"
@@ -283,7 +283,8 @@ struct ObserverTags {
           gr::Tags::WeylElectric<DataVector, volume_dim, Frame::Inertial>,
           gr::Tags::WeylElectricScalar<DataVector>,
           gr::Tags::WeylMagneticScalar<DataVector>,
-          gr::Tags::Psi4RealCompute<Frame::Inertial>>>;
+          gr::Tags::Psi4RealCompute<Frame::Inertial>,
+          gr::Tags::Psi4ImagCompute<Frame::Inertial>>>;
   using non_tensor_compute_tags = tmpl::list<
       ::Events::Tags::ObserverMeshCompute<volume_dim>,
       ::Events::Tags::ObserverCoordinatesCompute<volume_dim, Frame::Inertial>,
@@ -340,7 +341,6 @@ struct ObserverTags {
                                           ::Frame::Inertial>>;
 };
 
-template <bool LocalTimeStepping>
 struct FactoryCreation : tt::ConformsTo<Options::protocols::FactoryCreation> {
   static constexpr size_t volume_dim = 3_st;
 
@@ -368,7 +368,6 @@ struct FactoryCreation : tt::ConformsTo<Options::protocols::FactoryCreation> {
       tmpl::pair<
           evolution::initial_data::InitialData,
           tmpl::push_back<initial_data_list, ScalarTensor::NumericInitialData>>,
-      tmpl::pair<LtsTimeStepper, TimeSteppers::lts_time_steppers>,
       tmpl::pair<PhaseChange, PhaseControl::factory_creatable_classes>,
       tmpl::pair<StepChooser<StepChooserUse::LtsStep>,
                  StepChoosers::standard_step_choosers<system>>,
@@ -396,16 +395,13 @@ struct ScalarTensorTemplateBase {
 
   static constexpr size_t volume_dim = 3_st;
   using system = ScalarTensor::System;
-  using TimeStepperBase = LtsTimeStepper;
 
-  static constexpr bool local_time_stepping =
-      TimeStepperBase::local_time_stepping;
   static constexpr bool use_dg_element_collection = false;
 
   // NOLINTNEXTLINE(google-runtime-references)
   void pup(PUP::er& /*p*/) {}
 
-  using factory_creation = detail::FactoryCreation<local_time_stepping>;
+  using factory_creation = detail::FactoryCreation;
 
   using observed_reduction_data_tags =
       observers::collect_reduction_data_tags<tmpl::push_back<
@@ -457,7 +453,8 @@ struct ScalarTensorTemplateBase {
       Actions::MutateApply<ChangeTimeStepperOrder<system>>,
       Actions::MutateApply<CleanHistory<system>>,
       Actions::MutateApply<evolution::dg::CleanMortarHistory<volume_dim>>,
-      dg::Actions::SpectralFilter>;
+      dg::Actions::SpectralFilter<volume_dim,
+                                  typename system::variables_tag::tags_list>>;
 
   template <bool UseControlSystems>
   using initialization_actions = tmpl::list<
@@ -465,9 +462,10 @@ struct ScalarTensorTemplateBase {
           Initialization::TimeStepping<derived_metavars, TimeStepper,
                                        UseControlSystems, true>,
           evolution::dg::Initialization::Domain<derived_metavars,
-                                                UseControlSystems>,
-          Initialization::TimeStepperHistory<derived_metavars>>,
+                                                UseControlSystems>>,
       Initialization::Actions::NonconservativeSystem<system>,
+      Initialization::Actions::InitializeItems<
+          Initialization::TimeStepperHistory<system>>,
       Initialization::Actions::AddComputeTags<::Tags::DerivCompute<
           typename system::variables_tag, domain::Tags::Mesh<volume_dim>,
           domain::Tags::InverseJacobian<volume_dim, Frame::ElementLogical,

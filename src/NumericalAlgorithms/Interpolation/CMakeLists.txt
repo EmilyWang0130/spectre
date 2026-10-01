@@ -20,6 +20,7 @@ spectre_target_sources(
   PredictedZeroCrossing.cpp
   RegularGridInterpolant.cpp
   SpanInterpolator.cpp
+  UniformCardinalBSpline.cpp
   ZeroCrossingPredictor.cpp
   )
 
@@ -42,6 +43,7 @@ spectre_target_headers(
   PredictedZeroCrossing.hpp
   RegularGridInterpolant.hpp
   SpanInterpolator.hpp
+  UniformCardinalBSpline.hpp
   ZeroCrossingPredictor.hpp
   )
 
@@ -49,6 +51,7 @@ target_link_libraries(
   ${LIBRARY}
   PUBLIC
   BLAS::BLAS
+  Boost::boost
   DataStructures
   ErrorHandling
   Options
@@ -57,7 +60,6 @@ target_link_libraries(
   SphericalHarmonics
   Utilities
   PRIVATE
-  Boost::boost
   GSL::gsl
   )
 

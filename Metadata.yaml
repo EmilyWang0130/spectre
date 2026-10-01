@@ -9,13 +9,13 @@ Homepage: https://spectre-code.org
 
 GitHub: sxs-collaboration/spectre
 
-Version: 2026.06.30
+Version: 2026.09.05
 
-PublicationDate: 2026-06-30
+PublicationDate: 2026-09-05
 
-Doi: 10.5281/zenodo.21065180
+Doi: 10.5281/zenodo.22433001
 
-ZenodoId: 21065180
+ZenodoId: 22433001
 
 Description: |
   SpECTRE is an open-source code for multi-scale, multi-physics problems
@@ -326,6 +326,10 @@ Authors:
         Orcid: 0000-0003-2617-1011
         Affiliations: [*cornell]
         GitHub: hen-w
+      - Name: Hury, Eric
+        Orcid: 0009-0006-4835-9655
+        Affiliations: [*fullerton]
+        GitHub: "erichury"
       - Name: Iozzo, Dante A. B.
         Orcid: 0000-0002-7244-1900
         Affiliations: [*cornell]

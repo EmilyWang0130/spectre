@@ -33,7 +33,7 @@
 #include "Evolution/DgSubcell/PerssonTci.hpp"
 #include "Evolution/DgSubcell/PrepareNeighborData.hpp"
 #include "Evolution/DgSubcell/SetInterpolators.hpp"
-#include "Evolution/DgSubcell/SubcellEqualRateRegion.hpp"
+#include "Evolution/DgSubcell/SubcellAndNonconformingEqualRateRegions.hpp"
 #include "Evolution/DgSubcell/Tags/MethodOrder.hpp"
 #include "Evolution/DgSubcell/Tags/ObserverCoordinates.hpp"
 #include "Evolution/DgSubcell/Tags/ObserverMesh.hpp"
@@ -179,7 +179,6 @@
 #include "Time/Tags/TimeStepId.hpp"
 #include "Time/TimeSequence.hpp"
 #include "Time/TimeSteppers/Factory.hpp"
-#include "Time/TimeSteppers/LtsTimeStepper.hpp"
 #include "Time/TimeSteppers/TimeStepper.hpp"
 #include "Time/Triggers/TimeTriggers.hpp"
 #include "Time/UpdateU.hpp"
@@ -228,10 +227,7 @@ struct EvolutionMetavars<tmpl::list<InterpolationTargetTags...>,
   using initial_data_tag = evolution::initial_data::Tags::InitialData;
   using system = grmhd::ValenciaDivClean::System;
   using temporal_id = Tags::TimeStepId;
-  using TimeStepperBase = TimeStepper;
 
-  static constexpr bool local_time_stepping =
-      TimeStepperBase::local_time_stepping;
   static constexpr bool use_dg_element_collection = false;
 
   using analytic_variables_tags =
@@ -355,7 +351,6 @@ struct EvolutionMetavars<tmpl::list<InterpolationTargetTags...>,
             grmhd::AnalyticData::InitialMagneticFields::InitialMagneticField,
             grmhd::AnalyticData::InitialMagneticFields::
                 initial_magnetic_fields>,
-        tmpl::pair<LtsTimeStepper, TimeSteppers::lts_time_steppers>,
         tmpl::pair<PhaseChange, PhaseControl::factory_creatable_classes>,
         tmpl::pair<StepChooser<StepChooserUse::LtsStep>,
                    StepChoosers::standard_step_choosers<system>>,
@@ -443,7 +438,8 @@ struct EvolutionMetavars<tmpl::list<InterpolationTargetTags...>,
           tmpl::list<>>,
       Actions::MutateApply<CleanHistory<system>>,
       Actions::MutateApply<evolution::dg::CleanMortarHistory<volume_dim>>,
-      dg::Actions::SpectralFilter,
+      dg::Actions::SpectralFilter<volume_dim,
+                                  typename system::variables_tag::tags_list>,
       tmpl::conditional_t<
           use_dg_subcell, tmpl::list<>,
           tmpl::list<VariableFixing::Actions::FixVariables<
@@ -516,12 +512,11 @@ struct EvolutionMetavars<tmpl::list<InterpolationTargetTags...>,
   using dg_registration_list =
       tmpl::list<observers::Actions::RegisterEventsWithObservers>;
 
-  using equal_rate_regions = tmpl::flatten<
-      tmpl::list<evolution::dg::NonconformingEqualRateRegions<volume_dim>,
-                 tmpl::conditional_t<
-                     use_dg_subcell,
-                     evolution::dg::subcell::SubcellEqualRateRegion<volume_dim>,
-                     tmpl::list<>>>>;
+  using equal_rate_regions = tmpl::conditional_t<
+      use_dg_subcell,
+      tmpl::list<evolution::dg::subcell::
+                     SubcellAndNonconformingEqualRateRegions<volume_dim>>,
+      tmpl::list<evolution::dg::NonconformingEqualRateRegions<volume_dim>>>;
 
   using initialization_actions = tmpl::flatten<tmpl::list<
       Initialization::Actions::InitializeItems<
@@ -529,11 +524,12 @@ struct EvolutionMetavars<tmpl::list<InterpolationTargetTags...>,
                                        true>,
           evolution::dg::Initialization::Domain<EvolutionMetavars>,
           evolution::dg::subcell::GhostZoneInverseJacobian<
-              volume_dim, grmhd::ValenciaDivClean::fd::Tags::Reconstructor>,
-          Initialization::TimeStepperHistory<EvolutionMetavars>>,
+              volume_dim, grmhd::ValenciaDivClean::fd::Tags::Reconstructor>>,
       Initialization::Actions::AddSimpleTags<
           evolution::dg::BackgroundGrVars<system, EvolutionMetavars>>,
       Initialization::Actions::ConservativeSystem<system>,
+      Initialization::Actions::InitializeItems<
+          Initialization::TimeStepperHistory<system>>,
 
       tmpl::conditional_t<
           use_dg_subcell,

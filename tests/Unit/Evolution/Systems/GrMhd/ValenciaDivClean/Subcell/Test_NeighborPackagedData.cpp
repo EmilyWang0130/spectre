@@ -103,8 +103,8 @@ double test(const size_t num_dg_pts) {
   const Affine affine_map{-1.0, 1.0, 2.0, 3.0};
   const ElementId<3> element_id{
       0, {SegmentId{3, 4}, SegmentId{3, 4}, SegmentId{3, 4}}};
-  std::unordered_map<std::string,
-                     std::unique_ptr<domain::FunctionsOfTime::FunctionOfTime>>
+  const std::unordered_map<
+      std::string, std::unique_ptr<domain::FunctionsOfTime::FunctionOfTime>>
       functions_of_time{};
   std::vector<Block<3>> blocks;
   blocks.emplace_back(Block<3>(
@@ -112,7 +112,7 @@ double test(const size_t num_dg_pts) {
           Affine3D{affine_map, affine_map, affine_map}),
       0, {}));
   const auto& block = blocks[0];
-  ElementMap<3, Frame::Grid> element_map{
+  const ElementMap<3, Frame::Grid> element_map{
       element_id, block.is_time_dependent()
                       ? block.moving_mesh_logical_to_grid_map().get_clone()
                       : block.stationary_map().get_to_grid_frame()};
@@ -281,15 +281,14 @@ double test(const size_t num_dg_pts) {
       evolution::dg::subcell::SubcellOptions{
           4.0, 1_st, 1.0e-3, 1.0e-4, false, false,
           evolution::dg::subcell::fd::ReconstructionMethod::DimByDim, false,
-          std::nullopt, ::fd::DerivativeOrder::Two, 1, 1, 1},
+          ::fd::DerivativeOrder::Two, 1, 1, 1},
       VariableFixing::FixToAtmosphere<3>{1.0e-30, 1.0e-30, std::nullopt,
                                          std::nullopt});
   db::mutate_apply<ConservativeFromPrimitive>(make_not_null(&box));
 
   std::vector<DirectionalId<3>> mortars_to_reconstruct_to{};
   for (const auto& [direction, neighbors] : element.neighbors()) {
-    mortars_to_reconstruct_to.emplace_back(
-        DirectionalId<3>{direction, *neighbors.begin()});
+    mortars_to_reconstruct_to.emplace_back(direction, *neighbors.begin());
   }
 
   const auto all_packaged_data =
@@ -297,7 +296,7 @@ double test(const size_t num_dg_pts) {
 
   // Parse out evolved vars, since those are easiest to check for correctness,
   // then return absolute difference between analytic and reconstructed values.
-  DirectionalIdMap<3, typename variables_tag::type> evolved_vars_errors{};
+  const DirectionalIdMap<3, typename variables_tag::type> evolved_vars_errors{};
   double max_rel_error = 0.0;
   for (const auto& [direction_and_id, data] : all_packaged_data) {
     const auto& direction = direction_and_id.direction();

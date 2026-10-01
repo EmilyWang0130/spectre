@@ -267,7 +267,8 @@ bool receive_boundary_data(
       const auto& direction = received_mortar_id.direction();
       const auto& neighbor_mesh = received_mortar_data.volume_mesh;
       const size_t sliced_away_dim = direction.dimension();
-      const Mesh<face_dim> face_mesh = volume_mesh.slice_away(sliced_away_dim);
+      const Mesh<face_dim> face_mesh =
+          volume_mesh.on_interface(sliced_away_dim);
       // If there are multiple non-conforming neighbors, there is only a
       // single mortar labeled by the host ElementId.  This is done
       // because the data from all neighbors will be combined onto a
@@ -292,9 +293,9 @@ bool receive_boundary_data(
       if constexpr (using_subcell_v<Metavariables>) {
         if (time_stepping_policy == TimeSteppingPolicy::EqualRate) {
           evolution::dg::subcell::receive_subcell_data_for_dg<volume_dim>(
-              &db::as_access(*box), mortar_id, received_mortar_data);
+              &db::as_access(*box), received_mortar_id, received_mortar_data);
           evolution::dg::subcell::neighbor_tci_decision<volume_dim>(
-              make_not_null(&db::as_access(*box)), mortar_id,
+              make_not_null(&db::as_access(*box)), received_mortar_id,
               received_mortar_data);
         }
       }
@@ -328,7 +329,7 @@ bool receive_boundary_data(
                 neighbor_meshes->insert_or_assign(received_mortar_id,
                                                   neighbor_mesh);
                 const Mesh<face_dim> neighbor_face_mesh =
-                    received_mortar_data.volume_mesh.slice_away(
+                    received_mortar_data.volume_mesh.on_interface(
                         sliced_away_dim);
                 const Mesh<face_dim> mortar_mesh =
                     ::dg::mortar_mesh(face_mesh, neighbor_face_mesh);
@@ -549,6 +550,8 @@ bool receive_boundary_data(
   }
 }
 
+struct FetchFromMetavariables;
+
 /// Apply corrections from boundary communication.
 ///
 /// This is usually used indirectly through
@@ -564,7 +567,7 @@ bool receive_boundary_data(
 /// at ::Tags::Time instead of performing a full step.  This is only
 /// used for local time-stepping.
 template <bool LocalTimeStepping, typename Metavariables, bool DenseOutput,
-          bool ComputeAuxiliary = false>
+          bool ComputeAuxiliary, typename VariablesTag>
 struct ApplyBoundaryCorrections {
   static constexpr bool local_time_stepping = LocalTimeStepping;
   static_assert(local_time_stepping or not DenseOutput,
@@ -574,7 +577,11 @@ struct ApplyBoundaryCorrections {
 
   using system = typename Metavariables::system;
   static constexpr size_t volume_dim = system::volume_dim;
-  using variables_tag = typename system::variables_tag;
+  using variables_tag =
+      tmpl::conditional_t<std::is_same_v<VariablesTag, FetchFromMetavariables>,
+                          typename Metavariables::system::variables_tag,
+                          VariablesTag>;
+
   using FilterTagList = typename variables_tag::tags_list;
   using dt_variables_tag = db::add_tag_prefix<::Tags::dt, variables_tag>;
   using auxiliary_variables_tag = ::Tags::Variables<
@@ -946,20 +953,22 @@ struct ApplyBoundaryCorrections {
                      "instead. You may have unintentionally added external "
                      "mortars in one of the initialization actions.");
             }
-            if (volume_mesh.basis(direction.dimension()) ==
-                    Spectral::Basis::ZernikeB2 and
-                volume_mesh.quadrature(direction.dimension()) ==
-                    Spectral::Quadrature::GaussRadauUpper and
-                direction.side() != Side::Upper) {
+            if (UNLIKELY((volume_mesh.basis(direction.dimension()) ==
+                              Spectral::Basis::ZernikeB2 or
+                          volume_mesh.basis(direction.dimension()) ==
+                              Spectral::Basis::ZernikeB3) and
+                         volume_mesh.quadrature(direction.dimension()) ==
+                             Spectral::Quadrature::GaussRadauUpper and
+                         direction.side() != Side::Upper)) {
               ERROR(
-                  "Trying to use ZernikeB2 basis with GaussRadauUpper "
-                  "quadrature on the lower side: there is not a boundary here. "
-                  "volume mesh: "
+                  "Trying to use ZernikeB2 or ZernikeB3 basis with "
+                  "GaussRadauUpper quadrature on the lower side: there is not "
+                  "a boundary here. volume mesh: "
                   << volume_mesh << ", element ID " << element.id());
             }
 
             const Mesh<volume_dim - 1> face_mesh =
-                volume_mesh.slice_away(direction.dimension());
+                volume_mesh.on_interface(direction.dimension());
 
             // Whether the mesh has a collocation point on this face. True for
             // GaussLobatto (points on both faces) and GaussRadauUpper (point
@@ -1325,14 +1334,17 @@ struct ApplyBoundaryCorrections {
 };
 
 /// Apply corrections from boundary communication for LTS dense output.
-template <typename Metavariables>
+template <typename Metavariables,
+          typename VariablesTag = FetchFromMetavariables>
 struct ApplyLtsDenseBoundaryCorrections
-    : ApplyBoundaryCorrections<true, Metavariables, true> {};
+    : ApplyBoundaryCorrections<true, Metavariables, true, false, VariablesTag> {
+};
 
 namespace Actions {
 namespace ApplyBoundaryCorrections_detail {
 template <bool LocalTimeStepping, size_t VolumeDim, bool DenseOutput,
-          bool UseNodegroupDgElements, bool ComputeAuxiliary = false>
+          bool UseNodegroupDgElements, bool ComputeAuxiliary,
+          typename VariablesTag>
 struct ActionImpl {
   using inbox_tags =
       tmpl::list<evolution::dg::Tags::BoundaryCorrectionAndGhostCellsInbox<
@@ -1387,8 +1399,9 @@ struct ActionImpl {
       return {Parallel::AlgorithmExecution::Continue, std::nullopt};
     }
 
-    db::mutate_apply<ApplyBoundaryCorrections<LocalTimeStepping, Metavariables,
-                                              DenseOutput, ComputeAuxiliary>>(
+    db::mutate_apply<
+        ApplyBoundaryCorrections<LocalTimeStepping, Metavariables, DenseOutput,
+                                 ComputeAuxiliary, VariablesTag>>(
         make_not_null(&box));
     return {Parallel::AlgorithmExecution::Continue, std::nullopt};
   }
@@ -1399,10 +1412,12 @@ struct ActionImpl {
  * \brief Computes the boundary corrections for global time-stepping
  * and adds them to the time derivative.
  */
-template <size_t VolumeDim, bool UseNodegroupDgElements>
+template <size_t VolumeDim, bool UseNodegroupDgElements,
+          typename VariablesTag = FetchFromMetavariables>
 struct ApplyBoundaryCorrectionsToTimeDerivative
     : ApplyBoundaryCorrections_detail::ActionImpl<false, VolumeDim, false,
-                                                  UseNodegroupDgElements> {};
+                                                  UseNodegroupDgElements, false,
+                                                  VariablesTag> {};
 
 /*!
  * \brief Receives and lifts the LDG auxiliary boundary corrections into the
@@ -1414,11 +1429,12 @@ struct ApplyBoundaryCorrectionsToTimeDerivative
  * flux. The second step (the physical boundary correction) is done by
  * `ApplyBoundaryCorrectionsToTimeDerivative`.
  */
-template <size_t VolumeDim, bool UseNodegroupDgElements>
+template <size_t VolumeDim, bool UseNodegroupDgElements,
+          typename VariablesTag = FetchFromMetavariables>
 struct ApplyAuxiliaryBoundaryCorrectionsToVariables
-    : ApplyBoundaryCorrections_detail::ActionImpl<false, VolumeDim, false,
-                                                  UseNodegroupDgElements,
-                                                  /*ComputeAuxiliary=*/true> {};
+    : ApplyBoundaryCorrections_detail::ActionImpl<
+          false, VolumeDim, false, UseNodegroupDgElements,
+          /*ComputeAuxiliary=*/true, VariablesTag> {};
 
 /*!
  * \brief Computes the boundary corrections for local time-stepping
@@ -1431,9 +1447,11 @@ struct ApplyAuxiliaryBoundaryCorrectionsToVariables
  * data history, we insert the received temporal id, that is, the current time
  * of the neighbor, along with the boundary correction data.
  */
-template <size_t VolumeDim, bool UseNodegroupDgElements>
+template <size_t VolumeDim, bool UseNodegroupDgElements,
+          typename VariablesTag = FetchFromMetavariables>
 struct ApplyLtsBoundaryCorrections
-    : ApplyBoundaryCorrections_detail::ActionImpl<true, VolumeDim, false,
-                                                  UseNodegroupDgElements> {};
+    : ApplyBoundaryCorrections_detail::ActionImpl<
+          true, VolumeDim, false, UseNodegroupDgElements, false, VariablesTag> {
+};
 }  // namespace Actions
 }  // namespace evolution::dg

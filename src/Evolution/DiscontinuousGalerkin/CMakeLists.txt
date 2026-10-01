@@ -7,7 +7,9 @@ spectre_target_headers(
   HEADERS
   AtomicInboxBoundaryData.hpp
   BackgroundGrVars.hpp
+  BlockSupportsSubcell.hpp
   BoundaryData.hpp
+  BoundaryEvolvedVariables.hpp
   CleanMortarHistory.hpp
   DgElementArray.hpp
   InboxBoundaryData.hpp
@@ -19,6 +21,9 @@ spectre_target_headers(
   MortarInfo.hpp
   MortarTags.hpp
   NormalVectorTags.hpp
+  OnlyDgBlockIds.hpp
+  OptionTags.hpp
+  SubcellElementDistribution.hpp
   TimeDerivativeDecisions.hpp
   TimeSteppingPolicy.hpp
   UsingSubcell.hpp
@@ -38,6 +43,8 @@ spectre_target_sources(
   MortarData.cpp
   MortarDataHolder.cpp
   MortarInfo.cpp
+  OnlyDgBlockIds.cpp
+  SubcellElementDistribution.cpp
   TimeSteppingPolicy.cpp
   )
 

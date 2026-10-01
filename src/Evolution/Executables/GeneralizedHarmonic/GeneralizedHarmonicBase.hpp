@@ -116,6 +116,7 @@
 #include "PointwiseFunctions/GeneralRelativity/GeneralizedHarmonic/ExtrinsicCurvature.hpp"
 #include "PointwiseFunctions/GeneralRelativity/GeneralizedHarmonic/SpatialDerivOfLapse.hpp"
 #include "PointwiseFunctions/GeneralRelativity/GeneralizedHarmonic/SpatialDerivOfShift.hpp"
+#include "PointwiseFunctions/GeneralRelativity/Psi4Imag.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Psi4Real.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Ricci.hpp"
 #include "PointwiseFunctions/GeneralRelativity/SpacetimeNormalVector.hpp"
@@ -135,7 +136,6 @@
 #include "Time/Tags/Time.hpp"
 #include "Time/TimeSequence.hpp"
 #include "Time/TimeSteppers/Factory.hpp"
-#include "Time/TimeSteppers/LtsTimeStepper.hpp"
 #include "Time/TimeSteppers/TimeStepper.hpp"
 #include "Time/Triggers/TimeTriggers.hpp"
 #include "Time/UpdateU.hpp"
@@ -260,7 +260,8 @@ struct ObserverTags {
                                                   Frame::Inertial>,
               gr::Tags::WeylTypeD1Compute<DataVector, 3, Frame::Inertial>,
               gr::Tags::WeylTypeD1ScalarCompute<DataVector, 3, Frame::Inertial>,
-              gr::Tags::Psi4RealCompute<Frame::Inertial>>,
+              gr::Tags::Psi4RealCompute<Frame::Inertial>,
+              gr::Tags::Psi4ImagCompute<Frame::Inertial>>,
           tmpl::list<>>>;
   using non_tensor_compute_tags = tmpl::list<
       ::Events::Tags::ObserverMeshCompute<volume_dim>,
@@ -281,7 +282,7 @@ struct ObserverTags {
                                      non_tensor_compute_tags>;
 };
 
-template <size_t volume_dim, bool LocalTimeStepping>
+template <size_t volume_dim>
 struct FactoryCreation : tt::ConformsTo<Options::protocols::FactoryCreation> {
   using system = gh::System<volume_dim>;
 
@@ -317,7 +318,6 @@ struct FactoryCreation : tt::ConformsTo<Options::protocols::FactoryCreation> {
                        tmpl::conditional_t<volume_dim == 3,
                                            tmpl::list<gh::NumericInitialData>,
                                            tmpl::list<>>>>,
-      tmpl::pair<LtsTimeStepper, TimeSteppers::lts_time_steppers>,
       tmpl::pair<MathFunction<1, Frame::Inertial>,
                  MathFunctions::all_math_functions<1, Frame::Inertial>>,
       tmpl::pair<PhaseChange, PhaseControl::factory_creatable_classes>,
@@ -340,22 +340,17 @@ struct FactoryCreation : tt::ConformsTo<Options::protocols::FactoryCreation> {
 };
 }  // namespace detail
 
-template <size_t VolumeDim, bool LocalTimeStepping>
+template <size_t VolumeDim>
 struct GeneralizedHarmonicTemplateBase {
   static constexpr size_t volume_dim = VolumeDim;
   using system = gh::System<volume_dim>;
-  using TimeStepperBase =
-      tmpl::conditional_t<LocalTimeStepping, LtsTimeStepper, TimeStepper>;
 
-  static constexpr bool local_time_stepping =
-      TimeStepperBase::local_time_stepping;
   static constexpr bool use_dg_element_collection = false;
 
   // NOLINTNEXTLINE(google-runtime-references)
   void pup(PUP::er& /*p*/) {}
 
-  using factory_creation =
-      detail::FactoryCreation<volume_dim, local_time_stepping>;
+  using factory_creation = detail::FactoryCreation<volume_dim>;
 
   using observed_reduction_data_tags =
       observers::collect_reduction_data_tags<tmpl::push_back<
@@ -411,7 +406,8 @@ struct GeneralizedHarmonicTemplateBase {
       Actions::MutateApply<ChangeTimeStepperOrder<system>>,
       Actions::MutateApply<CleanHistory<system>>,
       Actions::MutateApply<evolution::dg::CleanMortarHistory<volume_dim>>,
-      dg::Actions::SpectralFilter>;
+      dg::Actions::SpectralFilter<volume_dim,
+                                  typename system::variables_tag::tags_list>>;
 
   template <typename DerivedMetavars, bool UseControlSystems>
   using initialization_actions = tmpl::list<
@@ -420,9 +416,10 @@ struct GeneralizedHarmonicTemplateBase {
                                        UseControlSystems, true>,
           evolution::dg::Initialization::Domain<DerivedMetavars,
                                                 UseControlSystems>,
-          ::amr::Initialization::Initialize<volume_dim, DerivedMetavars>,
-          Initialization::TimeStepperHistory<DerivedMetavars>>,
+          ::amr::Initialization::Initialize<volume_dim, DerivedMetavars>>,
       Initialization::Actions::NonconservativeSystem<system>,
+      Initialization::Actions::InitializeItems<
+          Initialization::TimeStepperHistory<system>>,
       Initialization::Actions::AddComputeTags<::Tags::DerivCompute<
           typename system::variables_tag, domain::Tags::Mesh<volume_dim>,
           domain::Tags::InverseJacobian<volume_dim, Frame::ElementLogical,

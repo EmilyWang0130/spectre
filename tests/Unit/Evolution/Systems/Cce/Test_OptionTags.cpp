@@ -31,7 +31,11 @@
 #include "Framework/TestCreation.hpp"
 #include "Helpers/DataStructures/DataBox/TestHelpers.hpp"
 #include "Helpers/Evolution/Systems/Cce/BoundaryTestHelpers.hpp"
+// Option parsing instantiates every class in
+// SpanInterpolator::creatable_classes.
+#include "NumericalAlgorithms/Interpolation/BarycentricRationalSpanInterpolator.hpp"  // IWYU pragma: keep
 #include "NumericalAlgorithms/Interpolation/CubicSpanInterpolator.hpp"
+#include "NumericalAlgorithms/Interpolation/LinearSpanInterpolator.hpp"  // IWYU pragma: keep
 #include "PointwiseFunctions/AnalyticSolutions/GeneralRelativity/KerrSchild.hpp"
 #include "Time/OptionTags/TimeStepper.hpp"
 #include "Time/Tags/TimeStepper.hpp"
@@ -168,10 +172,16 @@ SPECTRE_TEST_CASE("Unit.Evolution.Systems.Cce.OptionTags", "[Unit][Cce]") {
       "InverseCubic");
   TestHelpers::test_option_tag<Cce::OptionTags::InitializeJ<false>>(
       "CauchySecondOrder:\n"
-      "  AngularCoordTolerance: 1e-10\n"
-      "  MaxIterations: 300\n"
-      "  RequireConvergence: false\n"
-      "  MaxScriSecondDerivative: 1e-6");
+      "  J0Tolerance: 5e-12\n"
+      "  J0MaxIterations: 300\n"
+      "  J2Tolerance: 1e-14\n"
+      "  J2MaxIterations: 5\n"
+      "  MaxPartiallyFlatJ2: 1e-12\n"
+      "  MaxCauchyJ0: 5e-2\n"
+      "  DuDrJInterpolator:\n"
+      "    BarycentricRationalSpanInterpolator:\n"
+      "      MinOrder: 2\n"
+      "      MaxOrder: 2");
   CHECK_FALSE(
       TestHelpers::test_option_tag<Cce::OptionTags::AnalyticInitializeJ>(
           "FromAnalyticSolution")

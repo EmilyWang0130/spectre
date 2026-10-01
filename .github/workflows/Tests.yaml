@@ -142,12 +142,7 @@ jobs:
           git fetch --tags https://github.com/sxs-collaboration/spectre
       - name: Install Python dependencies
         run: |
-          pip3 install -r .github/scripts/requirements-release.txt
-          pip3 install -r support/Python/dev_requirements.txt
-      - name: Test tools
-        run: |
-          python3 -m unittest discover -p 'Test_CompileReleaseNotes.py' \
-            tests.tools -v
+          python3 -m pip install -r support/Python/dev_requirements.txt
       - name: Check Python formatting
         run: |
           cd $GITHUB_WORKSPACE
@@ -163,9 +158,21 @@ jobs:
         run: |
           cd $GITHUB_WORKSPACE
           ./tools/CheckFiles.sh
+      # Install the pinned release dependencies in a separate environment so
+      # they don't downgrade the container's packages for the other steps
+      - name: Install release dependencies
+        run: |
+          python3 -m venv /work/release-venv
+          /work/release-venv/bin/python -m pip install \
+            -r .github/scripts/requirements-release.txt
+          echo "RELEASE_PYTHON=/work/release-venv/bin/python" >> $GITHUB_ENV
+      - name: Test tools
+        run: |
+          $RELEASE_PYTHON -m unittest discover \
+            -p 'Test_CompileReleaseNotes.py' tests.tools -v
       - name: Check metadata
         run: |
-          python3 tools/CheckMetadata.py
+          $RELEASE_PYTHON tools/CheckMetadata.py
       - name: Check the metadata is consistent with the releases
         # No need to check this on forks. They would need to set a Zenodo token
         # for this test. Also disable on PRs because they don't have access to
@@ -174,16 +181,17 @@ jobs:
           github.repository == 'sxs-collaboration/spectre'
             && github.event_name != 'pull_request'
         run: |
-          python3 .github/scripts/Release.py prepare -vv --check-only \
+          $RELEASE_PYTHON .github/scripts/Release.py prepare -vv --check-only \
             --zenodo-token ${{ secrets.ZENODO_READONLY_TOKEN }} \
             --github-token ${{ secrets.GITHUB_TOKEN }}
-          python3 .github/scripts/Release.py publish -vv --check-only \
+          $RELEASE_PYTHON .github/scripts/Release.py publish -vv --check-only \
             --zenodo-token ${{ secrets.ZENODO_READONLY_TOKEN }} \
             --github-token ${{ secrets.GITHUB_TOKEN }} \
             --auto-publish
       - name: Check release notes
         run: |
-          python3 tools/CompileReleaseNotes.py -vv -o release_notes.md \
+          $RELEASE_PYTHON tools/CompileReleaseNotes.py -vv \
+            -o release_notes.md \
             --github-token ${{ secrets.GITHUB_TOKEN }}
       - name: Upload release notes
         uses: actions/upload-artifact@v7
@@ -200,89 +208,12 @@ jobs:
   # Lint with clang-tidy. We check only code that changed relative to the
   # nearest common ancestor commit with `sxs-collaboration/spectre/develop`.
   clang_tidy:
-    name: Clang-tidy
-    if: >
-      (github.event_name == 'pull_request'
-       && github.repository == 'sxs-collaboration/spectre'
-       && github.base_ref == 'develop')
-      || github.ref != 'refs/heads/develop'
-    runs-on: ubuntu-latest
-    container:
-      image: ${{ inputs.container || 'sxscollaboration/spectre:dev' }}
-    strategy:
-      matrix:
-        build_type: [Debug, Release]
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v5
-        with:
-          fetch-depth: 0
-      # Work around https://github.com/actions/checkout/issues/760
-      - name: Trust checkout
-        run: |
-          git config --global --add safe.directory $GITHUB_WORKSPACE
-      # Some cpp20 features aren't supported until clang-tidy-16. See:
-      # https://stackoverflow.com/questions/46114214/lambda-implicit-capture-fails-with-variable-declared-from-structured-binding#comment135007519_46115028
-      # The clang-tidy-diff tool doesn't report exit codes until version
-      # 18.1.0, so we grab the version that does:
-      # https://github.com/llvm/llvm-project/commit/4294bca5e4f6e6e8cfdbd9fbe8751c5e5415fd47
-      - name: Install clang-tidy-16
-        run: |
-          apt-get update -y
-          apt-get remove -y clang-tidy clang-tidy-14
-          apt-get install -y clang-tidy-16
-          ln -s /usr/bin/clang-tidy-16 /usr/bin/clang-tidy
-          wget https://raw.githubusercontent.com/llvm/llvm-project/4294bca5e4f6e6e8cfdbd9fbe8751c5e5415fd47/clang-tools-extra/clang-tidy/tool/clang-tidy-diff.py
-          chmod +x clang-tidy-diff.py
-          mv clang-tidy-diff.py /usr/bin/clang-tidy-diff.py
-          ln -s /usr/bin/clang-tidy-diff.py /usr/bin/clang-tidy-diff
-      - name: Configure annotations
-        # Has to be accessible outside the container, see issue:
-        # https://github.com/actions/toolkit/issues/305
-        run: |
-          cp .github/problem_matchers/ClangTidy.json "$HOME/"
-          echo "::add-matcher::$HOME/ClangTidy.json"
-      - name: Fetch sxs-collaboration/spectre/develop
-        run: >
-          cd $GITHUB_WORKSPACE
+    uses: $/.github/workflows/ClangTidy.yaml
 
-          git remote add upstream
-          https://github.com/sxs-collaboration/spectre.git
-
-          git remote -v
-
-          git fetch upstream develop
-      - name: Configure with cmake
-        run: >
-          mkdir build && cd build
-
-          cmake
-          -D CMAKE_C_COMPILER=clang-14
-          -D CMAKE_CXX_COMPILER=clang++-14
-          -D CMAKE_Fortran_COMPILER=gfortran
-          -D CHARM_ROOT=${CHARM_ROOT}
-          -D CMAKE_BUILD_TYPE=${{ matrix.build_type }}
-          -D OVERRIDE_ARCH=x86-64
-          -D USE_CCACHE=OFF
-          -D USE_PCH=OFF
-          -D DEBUG_SYMBOLS=OFF
-          -D BUILD_PYTHON_BINDINGS=ON
-          -D SPECTRE_AUTODIFF=ON
-          -D SPECTRE_FETCH_MISSING_DEPS=ON
-          $GITHUB_WORKSPACE
-
-          make -j4 module_All Libsharp-external
-      - name: Check clang-tidy
-        run: >
-          UPSTREAM_HASH=$(git merge-base HEAD upstream/develop)
-
-          echo "Running clang-tidy relative to: $UPSTREAM_HASH\n"
-
-          git diff -U0 $UPSTREAM_HASH |
-            clang-tidy-diff -path build -p1 -use-color -j4 \
-            -extra-arg=-I/usr/include/hdf5/serial \
-            -extra-arg=-I$GITHUB_WORKSPACE/build/_deps/autodiff-src
-
+  # Lint with clangd-tidy. We check only code that changed relative to the
+  # nearest common ancestor commit with `sxs-collaboration/spectre/develop`.
+  clang-tidy-d:
+    uses: $/.github/workflows/ClangdTidy.yaml
 
   # Build the documentation and check for problems, then upload as a workflow
   # artifact and deploy to gh-pages.
@@ -325,7 +256,7 @@ jobs:
         uses: actions/cache/restore@v5
         id: restore-ccache
         env:
-          CACHE_KEY_PREFIX: ccache-gcc-11-Debug-pch-ON
+          CACHE_KEY_PREFIX: ccache-gcc-15-Debug-pch-ON
         with:
           path: /work/ccache
           key: "${{ env.CACHE_KEY_PREFIX }}-${{ github.run_id }}"
@@ -340,9 +271,9 @@ jobs:
           mkdir build && cd build
 
           cmake
-          -D CMAKE_C_COMPILER=gcc-11
-          -D CMAKE_CXX_COMPILER=g++-11
-          -D CMAKE_Fortran_COMPILER=gfortran-11
+          -D CMAKE_C_COMPILER=gcc
+          -D CMAKE_CXX_COMPILER=g++
+          -D CMAKE_Fortran_COMPILER=gfortran
           -D CMAKE_CXX_FLAGS="-Werror"
           -D OVERRIDE_ARCH=x86-64
           -D CHARM_ROOT=${CHARM_ROOT}
@@ -418,10 +349,15 @@ jobs:
         # We have a sparse clang test configuration to reduce the amount of
         # GitHub cache space we use. GCC being the production compiler on
         # supercomputers means we need to thoroughly test it.
+        # The oldest compiler tested here is the oldest one we claim to
+        # support in docs/Installation/Installation.md, so keep the two in
+        # sync. Compilers older than the container's default need the
+        # container's libstdc++ on the link line, which the 'parse-compiler'
+        # action arranges.
         compiler:
-          - gcc-10
           - gcc-11
           - gcc-13
+          - gcc-15
         build_type: [Debug, Release]
         include:
           # Generate code coverage report for a single build
@@ -430,33 +366,30 @@ jobs:
           #   build_type: Debug
           #   COVERAGE: ON
           #   TEST_TIMEOUT_FACTOR: 3
-          # This configuration seems to run consistently slower than newer gcc
-          # or clang builds, so we increase the test timeout a bit
-          - compiler: gcc-10
+          - compiler: gcc-13
             build_type: Debug
-            TEST_TIMEOUT_FACTOR: 2
             # Test 3D rendering with ParaView
             # Note: currently disabled because of some unknown upstream issue
             # test_3d_rendering: ON
             # Need Python version consistent with ParaView
-            PYTHON_VERSION: "3.9"
+            # PYTHON_VERSION: "3.9"
           # Test with Kokkos enabled but without CUDA
-          - compiler: gcc-10
+          - compiler: gcc-13
             build_type: Release
             KOKKOS: ON
             # Disable FMA optimizations to avoid this issue:
             # https://github.com/sxs-collaboration/spectre/issues/5145
             EXTRA_CXX_FLAGS: "-mno-fma"
-          # Don't modify the gcc-11 Debug build so its cache can be reused for
+          # Don't modify the gcc-15 Debug build so its cache can be reused for
           # the documentation build
-          # - compiler: gcc-11
+          # - compiler: gcc-15
           #   build_type: Debug
-          # Test with Python 3.8 so that we retain backwards compatibility. We
-          # keep track of Python versions on supercomputers in this issue:
-          # https://github.com/sxs-collaboration/spectre/issues/442
           - compiler: gcc-11
             build_type: Release
-            PYTHON_VERSION: "3.8"
+            # Test the minimum Python version in this build. We keep track of
+            # Python versions on supercomputers in this issue:
+            # https://github.com/sxs-collaboration/spectre/issues/442
+            PYTHON_VERSION: "3.10"
             # Disable building executable for this build for now because it
             # exceeds the available memory. See issue:
             # https://github.com/sxs-collaboration/spectre/issues/5472
@@ -464,7 +397,7 @@ jobs:
           # Test building with static libraries. Do so with clang in release
           # mode because these builds use up little disk space compared to GCC
           # builds or clang Debug builds
-          - compiler: clang-13
+          - compiler: clang-17
             build_type: Release
             BUILD_SHARED_LIBS: OFF
             use_xsimd: ON
@@ -476,13 +409,13 @@ jobs:
           # Use this test also to build and test all input files with "normal"
           # or higher priority. The other configurations only test input files
           # with "high" priority to reduce the total build time.
-          - compiler: clang-13
+          - compiler: clang-17
             build_type: Debug
             use_pch: OFF
             unit_tests: OFF
             input_file_tests_min_priority: "normal"
           # Test with ASAN
-          - compiler: clang-14
+          - compiler: clang-21
             build_type: Debug
             # When building with ASAN we also need python bindings to be
             # disabled because otherwise we get link errors. See issue:
@@ -493,12 +426,12 @@ jobs:
             BUILD_PYTHON_BINDINGS: OFF
             MEMORY_ALLOCATOR: JEMALLOC
             TEST_TIMEOUT_FACTOR: 2
-          - compiler: clang-14
+          - compiler: clang-21
             build_type: Release
             # Test compatibility with oldest supported CMake version
-            CMAKE_VERSION: "3.18.2"
+            CMAKE_VERSION: "3.22.0"
             # Use an MPI version of Charm
-            CHARM_ROOT: /work/charm_7_0_0/mpi-linux-x86_64-smp-clang
+            CHARM_ROOT: /work/charm/mpi-linux-x86_64-smp-clang
             # MPI running tests is a bit slower than multicore
             TEST_TIMEOUT_FACTOR: 3
             # If MPI should be tested
@@ -506,8 +439,9 @@ jobs:
             # Test `install` target with clang in Release mode because it uses
             # little disk space
             install: ON
-          # Test compiling with nvcc and CUDA
-          - compiler: nvcc-12-6
+          # Test compiling with nvcc and CUDA. Choose a CUDA version that is
+          # compatible with the container's default gcc.
+          - compiler: nvcc-13-3
             SPECTRE_AUTODIFF: OFF
             CUDA: ON
             KOKKOS: ON
@@ -532,6 +466,10 @@ jobs:
             BUILD_PYTHON_BINDINGS: OFF
             # Disable warnings as nvcc emits a lot of them from system headers
             ENABLE_WARNINGS: OFF
+            # xsimd 14.3.0 (its latest release) picks a `__builtin_shuffle`
+            # code path under nvcc that GCC 15 rejects outright, and we don't
+            # need vectorization to test that the CUDA build compiles.
+            use_xsimd: "OFF"
 
     container:
       image: ${{ inputs.container || 'sxscollaboration/spectre:dev' }}
@@ -605,8 +543,12 @@ jobs:
           elif [[ $COMPILER_ID = clang ]]; then
             apt-get install -y $CC $FC
           elif [[ $COMPILER_ID = nvcc ]]; then
-            # Install CUDA
-            wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb
+            # Install CUDA from NVIDIA's apt repository for the Ubuntu version
+            # of the container. Deriving the repository name here means the
+            # container can be upgraded without editing this URL.
+            CUDA_REPOS=https://developer.download.nvidia.com/compute/cuda/repos
+            UBUNTU_REPO=ubuntu$(. /etc/os-release && echo ${VERSION_ID/./})
+            wget ${CUDA_REPOS}/${UBUNTU_REPO}/x86_64/cuda-keyring_1.1-1_all.deb
             dpkg -i cuda-keyring_1.1-1_all.deb
             apt-get update -y
             apt-get install -y cuda-nvcc-${COMPILER_VERSION} \
@@ -617,7 +559,7 @@ jobs:
         if: matrix.KOKKOS == 'ON'
         working-directory: /work
         run: |
-          KOKKOS_VERSION=4.4.00
+          KOKKOS_VERSION=5.2.1
           wget -O kokkos.tar.gz "https://github.com/kokkos/kokkos/releases/download/${KOKKOS_VERSION}/kokkos-${KOKKOS_VERSION}.tar.gz"
           tar -xzf kokkos.tar.gz && mv kokkos-* kokkos && cd kokkos
           mkdir build && cd build
@@ -649,19 +591,21 @@ jobs:
       - name: Install Python version
         if: matrix.PYTHON_VERSION
         run: |
+          VIRTUAL_ENV=/work/python${{ matrix.PYTHON_VERSION }}-venv
           add-apt-repository ppa:deadsnakes/ppa
           apt install -y python${{ matrix.PYTHON_VERSION }}-dev \
-            python${{ matrix.PYTHON_VERSION }}-venv \
-            python${{ matrix.PYTHON_VERSION }}-distutils
-          update-alternatives --install /usr/bin/python3 python3 \
-            /usr/bin/python${{ matrix.PYTHON_VERSION }} 1
+            python${{ matrix.PYTHON_VERSION }}-venv
+          python${{ matrix.PYTHON_VERSION }} -m venv $VIRTUAL_ENV
+          $VIRTUAL_ENV/bin/python -m pip install --upgrade pip
+          echo "VIRTUAL_ENV=$VIRTUAL_ENV" >> $GITHUB_ENV
+          echo "$VIRTUAL_ENV/bin" >> $GITHUB_PATH
       - name: Install Python dependencies
         if: matrix.PYTHON_VERSION
         run: |
-          python${{ matrix.PYTHON_VERSION }} -m pip install \
+          python3 -m pip install \
             -r support/Python/requirements.txt \
             -r support/Python/dev_requirements.txt
-          python${{ matrix.PYTHON_VERSION }} -m pip list -v
+          python3 -m pip list -v
       - name: Install ParaView
         if: matrix.test_3d_rendering == 'ON'
         working-directory: /work
@@ -685,8 +629,9 @@ jobs:
         working-directory: /work
         run: |
           apt-get install -y libopenmpi-dev
-          cd /work/charm_7_0_0 && ./build charm++ mpi-linux-x86_64-smp clang \
-          -j ${NUMBER_OF_CORES} -g0 -O1 --build-shared --with-production
+          cd /work/charm && ./build charm++ mpi-linux-x86_64-smp clang \
+            -j ${NUMBER_OF_CORES} -g0 -O1 --build-shared --with-production \
+            --disable-tls
 
       # Assign a unique cache key for every run.
       # - We will save the cache using this unique key, but only on the develop
@@ -731,7 +676,6 @@ ${{ matrix.build_type }}-pch-${{ matrix.use_pch || 'ON' }}"
           ENABLE_WARNINGS=${{ matrix.ENABLE_WARNINGS }}
           WERROR="${{ matrix.WERROR != 'OFF' && '-Werror' || '' }}"
           CXX_FLAGS="${WERROR} ${{ matrix.EXTRA_CXX_FLAGS }}"
-          PYTHON_VERSION=${{ matrix.PYTHON_VERSION }}
           BUILD_PYTHON_BINDINGS=${{ matrix.BUILD_PYTHON_BINDINGS }}
           BUILD_SHARED_LIBS=${{ matrix.BUILD_SHARED_LIBS }}
           KOKKOS=${{ matrix.KOKKOS }}
@@ -753,7 +697,6 @@ ${{ matrix.build_type }}-pch-${{ matrix.use_pch || 'ON' }}"
           -D CMAKE_C_COMPILER=${CC}
           -D CMAKE_CXX_COMPILER=${CXX}
           -D CMAKE_Fortran_COMPILER=${FC}
-          -D Python_EXECUTABLE=/usr/bin/python${PYTHON_VERSION:-'3'}
           -D CMAKE_CXX_FLAGS="${CXX_FLAGS}"
           -D OVERRIDE_ARCH=x86-64
           -D ENABLE_WARNINGS=${ENABLE_WARNINGS:-'ON'}
@@ -793,11 +736,16 @@ ${{ matrix.build_type }}-pch-${{ matrix.use_pch || 'ON' }}"
         working-directory: build
         run: |
           ! grep -A 6 "CMake Warning" ./CMakeOutput.txt
+      - name: Build libs
+        if:  matrix.CUDA != 'ON'
+        working-directory: build
+        run: |
+          make -j${NUMBER_OF_CORES} libs
       - name: Build unit tests
         if: matrix.unit_tests != 'OFF'
         working-directory: build
         run: |
-          make -j${NUMBER_OF_CORES} unit-tests
+          make -j2 unit-tests
       - name: Run unit tests
         if: matrix.unit_tests != 'OFF' && matrix.COVERAGE != 'ON'
         working-directory: build
@@ -961,7 +909,6 @@ ${{ matrix.build_type }}-pch-${{ matrix.use_pch || 'ON' }}"
           ENABLE_WARNINGS=${{ matrix.ENABLE_WARNINGS }}
           WERROR="${{ matrix.WERROR != 'OFF' && '-Werror' || '' }}"
           CXX_FLAGS="${WERROR} ${{ matrix.EXTRA_CXX_FLAGS }}"
-          PYTHON_VERSION=${{ matrix.PYTHON_VERSION }}
           BUILD_PYTHON_BINDINGS=${{ matrix.BUILD_PYTHON_BINDINGS }}
           MATRIX_CHARM_ROOT=${{ matrix.CHARM_ROOT }}
           MEMORY_ALLOCATOR=${{ matrix.MEMORY_ALLOCATOR }};
@@ -972,7 +919,6 @@ ${{ matrix.build_type }}-pch-${{ matrix.use_pch || 'ON' }}"
           -D CMAKE_C_COMPILER=${CC}
           -D CMAKE_CXX_COMPILER=${CXX}
           -D CMAKE_Fortran_COMPILER=${FC}
-          -D Python_EXECUTABLE=/usr/bin/python${PYTHON_VERSION:-'3'}
           -D CMAKE_CXX_FLAGS="${CXX_FLAGS}"
           -D OVERRIDE_ARCH=x86-64
           -D ENABLE_WARNINGS=${ENABLE_WARNINGS:-'ON'}
@@ -1029,26 +975,20 @@ ${{ matrix.build_type }}-pch-${{ matrix.use_pch || 'ON' }}"
       fail-fast: false
       matrix:
         os:
-          - macos-15-intel
           - macos-15
+          - macos-26
     runs-on: ${{ matrix.os }}
     env:
-      # We install some low-level dependencies with Homebrew. They get picked up
-      # by `spack external find`.
+      # We install some low-level dependencies with Homebrew. We could install
+      # a few more but don't to test SPECTRE_FETCH_MISSING_DEPS.
       SPECTRE_BREW_DEPS: >-  # Line breaks are spaces, no trailing newline
-        autoconf automake boost catch2 ccache cmake gsl hdf5 openblas yaml-cpp xsimd
-      # We install these packages with Spack and cache them. The full specs are
-      # listed below. This list is only needed to create the cache.
-      SPECTRE_SPACK_DEPS: blaze charmpp libxsmm
+        autoconf automake boost ccache cmake gsl fftw hdf5 openblas
       CCACHE_DIR: $HOME/ccache
       CCACHE_TEMPDIR: $HOME/ccache-tmp
       CCACHE_MAXSIZE: "2G"
       CCACHE_COMPRESS: 1
       CCACHE_COMPRESSLEVEL: 5
       CCACHE_COMPILERCHECK: content
-      SPACK_SKIP_MODULES: true
-      SPACK_COLOR: always
-      NUM_CORES: ${{ matrix.NUM_CORES }}
     steps:
       - name: Record start time
         id: start
@@ -1070,86 +1010,10 @@ ${{ matrix.build_type }}-pch-${{ matrix.use_pch || 'ON' }}"
         run: |
           brew uninstall cmake
           brew install $SPECTRE_BREW_DEPS
-      # We install the remaining dependencies with Spack and cache them.
-      # See the `unit_tests` job above for details on the cache configuration.
-      - name: Restore dependency cache
-        uses: actions/cache/restore@v5
-        id: restore-dependencies
-        env:
-          CACHE_KEY_PREFIX: "dependencies-${{ matrix.os }}-${{ runner.arch }}"
-        with:
-          path: ~/dependencies
-          key: "${{ env.CACHE_KEY_PREFIX }}-${{ github.run_id }}"
-          restore-keys: |
-            ${{ env.CACHE_KEY_PREFIX }}-
-      - name: Install Spack
-        # Pin a specific version of Spack to avoid breaking CI builds when
-        # Spack changes.
-        run: |
-          cd $HOME
-          git clone -c feature.manyFiles=true \
-            https://github.com/spack/spack.git
-          cd spack
-          git checkout 7d1de58378fa210b7db887964fcc17187a504ad8
-      - name: Configure Spack
-        # - To avoid re-building packages that are already installed by Homebrew
-        #   we let Spack find them.
-        # - Add the dependency cache as binary mirror.
-        run: |
-          source $HOME/spack/share/spack/setup-env.sh
-          spack debug report
-          spack compiler find && spack compiler list
-          spack external find
-          spack config get packages
-          spack mirror add dependencies file://$HOME/dependencies/spack
-      # Install the remaining dependencies from source with Spack. We install
-      # them in an environment that we can activate later. After building the
-      # dependencies from source we cache them as compressed tarballs.
-      - name: Install Spack dependencies
-        run: |
-          source $HOME/spack/share/spack/setup-env.sh
-          spack env create spectre
-          spack env activate spectre
-          spack add blaze@3.8.2 ~blas ~lapack smp=none
-          # Support installing charm 7.0.0 with CMake 4.0
-          export CMAKE_POLICY_VERSION_MINIMUM=3.5
-          spack add charmpp@7.0.0 +shared backend=multicore build-target=charm++
-          # Use main branch until spack has 2.0 release
-          spack add libxsmm@main
-          spack concretize --reuse
-          spack install --no-check-signature
-          spack find -v
-      - name: Update dependency cache
-        if: github.ref == 'refs/heads/develop'
-        run: |
-          source $HOME/spack/share/spack/setup-env.sh
-          # Clear existing buildcache so we don't accumulate old versions of
-          # packages in the cache
-          rm -rf $HOME/dependencies
-          spack buildcache create -uf dependencies $SPECTRE_SPACK_DEPS
-        # Allow the buildcache creation to fail without failing the job, since
-        # it sometimes runs out of memory
-        continue-on-error: true
-      - name: Save dependency cache
-        if: github.ref == 'refs/heads/develop'
-        uses: actions/cache/save@v5
-        with:
-          path: ~/dependencies
-          key: ${{ steps.restore-dependencies.outputs.cache-primary-key }}
-      # Install remaining pure Python dependencies with pip because the Spack
-      # package index can be incomplete (it can't mirror all of pip)
       - name: Install Python dependencies
         run: |
-          source $HOME/spack/share/spack/setup-env.sh
-          spack env activate spectre
+          pip install --upgrade pip
           pip install -r support/Python/requirements.txt
-      # Replace the ccache directory that building the dependencies may have
-      # generated with the cached ccache directory.
-      - name: Clear ccache from dependencies
-        run: |
-          ccache --clear
-          rm -rf $CCACHE_DIR
-          mkdir -p $CCACHE_DIR
       - name: Restore ccache
         uses: actions/cache/restore@v5
         id: restore-ccache
@@ -1170,14 +1034,25 @@ ${{ matrix.build_type }}-pch-${{ matrix.use_pch || 'ON' }}"
             && github.event.inputs.clear_ccache == 'yes'
         run: |
           ccache -C
+      - name: Install Charm++
+        run: |
+          git clone --branch v8.0.0 --depth 1 \
+            https://github.com/UIUC-PPL/charm
+          cd charm
+          CHARM_CONFIG="multicore-darwin-arm8"
+          # `-DCMK_NO_ISO_MALLOC=1` disables Charm++'s isomalloc, which is
+          # unusable on macOS 26 and causes random segfaults. See issue:
+          # https://github.com/charmplusplus/charm/issues/3995
+          ./build charm++ $CHARM_CONFIG \
+            --with-production -g3 -j --build-shared --disable-tls \
+            -DCMK_NO_ISO_MALLOC=1
+          echo "CHARM_ROOT=$PWD/$CHARM_CONFIG" >> $GITHUB_ENV
       # Configure, build and run tests. See the `unit_tests` job above for
       # details.
       # - We increase the timeout for tests because the GitHub-hosted macOS VMs
       #   appear to be quite slow.
       - name: Configure build with cmake
         run: |
-          source $HOME/spack/share/spack/setup-env.sh
-          spack env activate spectre
           mkdir build && cd build
           cmake \
             -D CMAKE_C_COMPILER=clang \
@@ -1187,9 +1062,10 @@ ${{ matrix.build_type }}-pch-${{ matrix.use_pch || 'ON' }}"
             -D BUILD_SHARED_LIBS=ON \
             -D BUILD_PYTHON_BINDINGS=ON \
             -D MEMORY_ALLOCATOR=SYSTEM \
-            -D CHARM_ROOT=$(spack location --install-dir charmpp) \
+            -D CHARM_ROOT=$CHARM_ROOT \
             -D BLAS_ROOT=$(brew --prefix openblas) \
             -D LAPACK_ROOT=$(brew --prefix openblas) \
+            -D SPECTRE_FETCH_MISSING_DEPS=ON \
             -D CMAKE_BUILD_TYPE=Debug \
             -D SPECTRE_DEBUG_Og=ON \
             -D DEBUG_SYMBOLS=OFF \
@@ -1291,10 +1167,10 @@ ${{ matrix.build_type }}-pch-${{ matrix.use_pch || 'ON' }}"
           token: ${{ secrets.GH_TOKEN_RELEASE }}
       - uses: actions/setup-python@v6
         with:
-          python-version: '3.8'
+          python-version: '3.14'
       - name: Install Python dependencies
         run: |
-          pip3 install -r .github/scripts/requirements-release.txt
+          python3 -m pip install -r .github/scripts/requirements-release.txt
       # We use the current date as tag name, unless a tag name was specified
       # as input to the `workflow_dispatch` event
       - name: Determine release version
@@ -1325,6 +1201,15 @@ ${{ matrix.build_type }}-pch-${{ matrix.use_pch || 'ON' }}"
           fi
           if [ $(git rev-parse HEAD) == $(git rev-parse origin/release) ]; then
             echo "Nothing changed since last release $(git describe release)."
+            exit 1
+          fi
+          # Fail early if 'develop' has changed since this workflow was
+          # dispatched
+          REMOTE_DEVELOP=$(git ls-remote origin refs/heads/develop | cut -f 1)
+          if [ "$(git rev-parse HEAD)" != "$REMOTE_DEVELOP" ]; then
+            echo "'develop' has moved to $REMOTE_DEVELOP since this workflow"
+            echo "was dispatched for $(git rev-parse HEAD). Dispatch the"
+            echo "workflow again to release the current state of 'develop'."
             exit 1
           fi
       - name: Reserve Zenodo DOI and prepare repository
@@ -1379,23 +1264,23 @@ ${{ matrix.build_type }}-pch-${{ matrix.use_pch || 'ON' }}"
       fail-fast: false
       matrix:
         compiler:
-          - gcc-10
           - gcc-11
-          - clang-13
-          - clang-14
+          - gcc-13
+          - clang-17
+          - clang-21
         include:
-          - sde_arch: ("-nhm;nehalem" "-snb;sandybridge" "-hsw;haswell"
-              "-skl;skylake" "-icx;icelake-server")
-            compiler: gcc-10
           - sde_arch: ("-nhm;nehalem" "-snb;sandybridge" "-hsw;haswell"
               "-skl;skylake" "-icx;icelake-server")
             compiler: gcc-11
           - sde_arch: ("-nhm;nehalem" "-snb;sandybridge" "-hsw;haswell"
               "-skl;skylake" "-icx;icelake-server")
-            compiler: clang-13
+            compiler: gcc-13
+          - sde_arch: ("-nhm;nehalem" "-snb;sandybridge" "-hsw;haswell"
+              "-skl;skylake" "-icx;icelake-server")
+            compiler: clang-17
           - sde_arch: ("-nhm;nehalem" "-snb;sandybridge" "-hsw;haswell"
               "-skl;skylake" "-icx;icelake-server" "-tgl;tigerlake")
-            compiler: clang-14
+            compiler: clang-21
     container:
       image: ${{ inputs.container || 'sxscollaboration/spectre:dev' }}
       env:

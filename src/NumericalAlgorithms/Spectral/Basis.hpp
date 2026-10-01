@@ -8,6 +8,8 @@
 #include <iosfwd>
 #include <string>
 
+#include "Utilities/MakeArray.hpp"
+
 /// \cond
 namespace Options {
 class Option;
@@ -42,6 +44,12 @@ constexpr uint8_t basis_shift = 4;
  * \note Choose `Fourier` for a dimension that is spatially periodic and in
  * which the expected solution is smooth.  A Mesh with this Basis cannot be
  * split by h-refinement in this dimension.
+ *
+ * \note Choose `HalfFourier` for a dimension that is spatially periodic and in
+ * which the expected solution is smooth and each tensor component has a
+ * definite parity, i.e. and be expanded purely in terms of either sines or
+ * cosines. A Mesh with this Basis cannot be split by h-refinement in this
+ * dimension.
  *
  * \note Choose two consecutive dimensions to have `SphericalHarmonic` to choose
  * a spherical harmonic basis.  By convention, the first dimension represents
@@ -81,17 +89,65 @@ enum class Basis : uint8_t {
   ZernikeB1 = 6 << basis_shift,
   ZernikeB2 = 7 << basis_shift,
   ZernikeB3 = 8 << basis_shift,
-  Cartoon = 9 << basis_shift
+  Cartoon = 9 << basis_shift,
+  HalfFourier = 10 << basis_shift
 };
 
 /// All possible values of Basis
-std::array<Basis, 10> all_bases();
+std::array<Basis, 11> all_bases();
 
 /// Convert a string to a Basis enum.
 Basis to_basis(const std::string& basis);
 
 /// Output operator for a Basis.
 std::ostream& operator<<(std::ostream& os, const Basis& basis);
+
+/// Shortcuts for common Basis products where the default for I1Basis is
+/// Basis::Legendre
+namespace bases {
+template <size_t VolumeDim, Basis I1Basis = Basis::Legendre>
+static constexpr auto hypercube = make_array<VolumeDim>(Basis::Legendre);
+
+template <size_t VolumeDim>
+static constexpr auto hypertorus = make_array<VolumeDim>(Basis::Fourier);
+
+template <Basis I1Basis = Basis::Legendre>
+static constexpr auto annulus = std::array{I1Basis, Basis::Fourier};
+
+static constexpr auto spherical_surface =
+    make_array<2>(Basis::SphericalHarmonic);
+
+static constexpr auto disk = make_array<2>(Basis::ZernikeB2);
+
+template <Basis I1Basis = Basis::Legendre>
+static constexpr auto spherical_shell =
+    std::array{I1Basis, Basis::SphericalHarmonic, Basis::SphericalHarmonic};
+
+template <Basis I1Basis = Basis::Legendre>
+static constexpr auto cylindrical_shell =
+    std::array{I1Basis, Basis::Fourier, I1Basis};
+
+template <Basis I1Basis = Basis::Legendre>
+static constexpr auto full_cylinder =
+    std::array{Basis::ZernikeB2, Basis::ZernikeB2, I1Basis};
+
+static constexpr auto full_sphere = make_array<3>(Basis::ZernikeB3);
+
+template <Basis I1Basis = Basis::Legendre>
+static constexpr auto cartoon_sphere =
+    std::array{I1Basis, Basis::Cartoon, Basis::Cartoon};
+
+static constexpr auto cartoon_sphere_inner =
+    std::array{Basis::ZernikeB1, Basis::Cartoon, Basis::Cartoon};
+
+template <Basis I1Basis = Basis::Legendre>
+static constexpr auto cartoon_cylinder =
+    std::array{I1Basis, I1Basis, Basis::Cartoon};
+
+template <Basis I1Basis = Basis::Legendre>
+static constexpr auto cartoon_cylinder_inner =
+    std::array{Basis::ZernikeB1, I1Basis, Basis::Cartoon};
+}  // namespace bases
 }  // namespace Spectral
 
 template <>

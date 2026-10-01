@@ -18,6 +18,7 @@
 #include "Domain/Structure/DirectionalIdMap.hpp"
 #include "Domain/Structure/Element.hpp"
 #include "Domain/Structure/ElementId.hpp"
+#include "Domain/Structure/IsValidDgMesh.hpp"
 #include "Domain/Structure/Neighbors.hpp"
 #include "Domain/Tags.hpp"
 #include "Domain/Tags/NeighborMesh.hpp"
@@ -38,6 +39,7 @@
 #include "ParallelAlgorithms/Amr/Tags.hpp"
 #include "Utilities/Algorithm.hpp"
 #include "Utilities/ErrorHandling/Assert.hpp"
+#include "Utilities/ErrorHandling/Error.hpp"
 #include "Utilities/Gsl.hpp"
 #include "Utilities/Literals.hpp"
 #include "Utilities/PrettyType.hpp"
@@ -220,18 +222,19 @@ struct AdjustDomain {
           std::make_pair(db::get<::domain::Tags::Mesh<volume_dim>>(box),
                          db::get<::domain::Tags::Element<volume_dim>>(box));
       const auto& old_mesh = old_mesh_and_element.first;
+      const auto& old_element = old_mesh_and_element.second;
 
       // Determine new neighbors and update the Element
       const auto& amr_info_of_neighbors =
           db::get<amr::Tags::NeighborInfo<volume_dim>>(box);
-      auto [new_neighbors, new_neighbor_meshes] =
-          neighbors_of_child(old_mesh_and_element.second, my_amr_info,
-                             amr_info_of_neighbors, element_id);
+      auto [new_neighbors, new_neighbor_meshes] = neighbors_of_child(
+          old_element, my_amr_info, amr_info_of_neighbors, element_id);
       ::Initialization::mutate_assign<
           tmpl::list<::domain::Tags::Element<volume_dim>,
                      ::domain::Tags::NeighborMesh<volume_dim>>>(
           make_not_null(&box),
-          Element<volume_dim>(element_id, std::move(new_neighbors)),
+          Element<volume_dim>(element_id, std::move(new_neighbors),
+                              old_element.topologies()),
           std::move(new_neighbor_meshes));
 
       // Check for p-refinement
@@ -252,6 +255,13 @@ struct AdjustDomain {
               old_mesh.extents(),
               db::get<::domain::Tags::Mesh<volume_dim>>(box).extents());
         }
+      }
+
+      const auto& new_mesh = db::get<::domain::Tags::Mesh<volume_dim>>(box);
+      const auto& new_element =
+          db::get<::domain::Tags::Element<volume_dim>>(box);
+      if (not domain::is_valid_dg_mesh(new_mesh, new_element)) {
+        ERROR("Invalid mesh " << new_mesh << " for Element " << new_element);
       }
 
       // Run the projectors on all elements, even if they did no p-refinement.
