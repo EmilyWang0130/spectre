@@ -340,7 +340,9 @@ double PlutoHlld::dg_package_data(
              max(abs(get(*packaged_largest_ingoing_char_speed))));
 }
 
-void PlutoHlld::dg_boundary_terms(
+namespace detail {
+void pluto_dg_boundary_terms(
+    const PlutoFluxFunction pluto_solver,
     const gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
     const gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
     const gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_tau,
@@ -653,13 +655,13 @@ void PlutoHlld::dg_boundary_terms(
   std::vector<double> pluto_flux(8 * n_solve, 0.0);
   std::vector<double> pluto_press(n_solve, 0.0);
   if (uniform_gamma) {
-    pluto_hlld_flux(static_cast<int>(n_solve), pluto_vl.data(), pluto_vr.data(),
-                    gamma_min, pluto_flux.data(), pluto_press.data());
+    pluto_solver(static_cast<int>(n_solve), pluto_vl.data(), pluto_vr.data(),
+                 gamma_min, pluto_flux.data(), pluto_press.data());
   } else {
     for (size_t k = 0; k < n_solve; ++k) {
-      pluto_hlld_flux(1, pluto_vl.data() + 8 * k, pluto_vr.data() + 8 * k,
-                      pt_gamma[k], pluto_flux.data() + 8 * k,
-                      pluto_press.data() + k);
+      pluto_solver(1, pluto_vl.data() + 8 * k, pluto_vr.data() + 8 * k,
+                   pt_gamma[k], pluto_flux.data() + 8 * k,
+                   pluto_press.data() + k);
     }
   }
 
@@ -716,6 +718,87 @@ void PlutoHlld::dg_boundary_terms(
           g_b[q] - (weak ? 0.0 : normal_dot_flux_tilde_b_int.get(q)[i]);
     }
   }
+}
+}  // namespace detail
+
+void PlutoHlld::dg_boundary_terms(
+    const gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
+    const gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
+    const gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_tau,
+    const gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
+        boundary_correction_tilde_s,
+    const gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
+        boundary_correction_tilde_b,
+    const gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_phi,
+    const Scalar<DataVector>& tilde_d_int,
+    const Scalar<DataVector>& tilde_ye_int,
+    const Scalar<DataVector>& tilde_tau_int,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& tilde_s_int,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& tilde_b_int,
+    const Scalar<DataVector>& tilde_phi_int,
+    const Scalar<DataVector>& normal_dot_flux_tilde_d_int,
+    const Scalar<DataVector>& normal_dot_flux_tilde_ye_int,
+    const Scalar<DataVector>& normal_dot_flux_tilde_tau_int,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& normal_dot_flux_tilde_s_int,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& normal_dot_flux_tilde_b_int,
+    const Scalar<DataVector>& normal_dot_flux_tilde_phi_int,
+    const Scalar<DataVector>& largest_outgoing_char_speed_int,
+    const Scalar<DataVector>& largest_ingoing_char_speed_int,
+    const Scalar<DataVector>& fast_outgoing_char_speed_int,
+    const Scalar<DataVector>& fast_ingoing_char_speed_int,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
+    const Scalar<DataVector>& metric_flatness_int,
+    const Scalar<DataVector>& rest_mass_density_int,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
+    const Scalar<DataVector>& pressure_int,
+    const Scalar<DataVector>& lorentz_factor_int,
+    const Scalar<DataVector>& specific_internal_energy_int,
+    const Scalar<DataVector>& tilde_d_ext,
+    const Scalar<DataVector>& tilde_ye_ext,
+    const Scalar<DataVector>& tilde_tau_ext,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& tilde_s_ext,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& tilde_b_ext,
+    const Scalar<DataVector>& tilde_phi_ext,
+    const Scalar<DataVector>& normal_dot_flux_tilde_d_ext,
+    const Scalar<DataVector>& normal_dot_flux_tilde_ye_ext,
+    const Scalar<DataVector>& normal_dot_flux_tilde_tau_ext,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& normal_dot_flux_tilde_s_ext,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& normal_dot_flux_tilde_b_ext,
+    const Scalar<DataVector>& normal_dot_flux_tilde_phi_ext,
+    const Scalar<DataVector>& largest_outgoing_char_speed_ext,
+    const Scalar<DataVector>& largest_ingoing_char_speed_ext,
+    const Scalar<DataVector>& fast_outgoing_char_speed_ext,
+    const Scalar<DataVector>& fast_ingoing_char_speed_ext,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& iface_normal_ext,
+    const Scalar<DataVector>& metric_flatness_ext,
+    const Scalar<DataVector>& rest_mass_density_ext,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
+    const Scalar<DataVector>& pressure_ext,
+    const Scalar<DataVector>& lorentz_factor_ext,
+    const Scalar<DataVector>& specific_internal_energy_ext,
+    const dg::Formulation dg_formulation) {
+  detail::pluto_dg_boundary_terms(
+      &pluto_hlld_flux, boundary_correction_tilde_d,
+      boundary_correction_tilde_ye, boundary_correction_tilde_tau,
+      boundary_correction_tilde_s, boundary_correction_tilde_b,
+      boundary_correction_tilde_phi, tilde_d_int, tilde_ye_int, tilde_tau_int,
+      tilde_s_int, tilde_b_int, tilde_phi_int, normal_dot_flux_tilde_d_int,
+      normal_dot_flux_tilde_ye_int, normal_dot_flux_tilde_tau_int,
+      normal_dot_flux_tilde_s_int, normal_dot_flux_tilde_b_int,
+      normal_dot_flux_tilde_phi_int, largest_outgoing_char_speed_int,
+      largest_ingoing_char_speed_int, fast_outgoing_char_speed_int,
+      fast_ingoing_char_speed_int, interface_unit_normal_int,
+      metric_flatness_int, rest_mass_density_int, spatial_velocity_int,
+      pressure_int, lorentz_factor_int, specific_internal_energy_int,
+      tilde_d_ext, tilde_ye_ext, tilde_tau_ext, tilde_s_ext, tilde_b_ext,
+      tilde_phi_ext, normal_dot_flux_tilde_d_ext, normal_dot_flux_tilde_ye_ext,
+      normal_dot_flux_tilde_tau_ext, normal_dot_flux_tilde_s_ext,
+      normal_dot_flux_tilde_b_ext, normal_dot_flux_tilde_phi_ext,
+      largest_outgoing_char_speed_ext, largest_ingoing_char_speed_ext,
+      fast_outgoing_char_speed_ext, fast_ingoing_char_speed_ext,
+      iface_normal_ext, metric_flatness_ext, rest_mass_density_ext,
+      spatial_velocity_ext, pressure_ext, lorentz_factor_ext,
+      specific_internal_energy_ext, dg_formulation);
 }
 
 bool operator==(const PlutoHlld& lhs, const PlutoHlld& rhs) {

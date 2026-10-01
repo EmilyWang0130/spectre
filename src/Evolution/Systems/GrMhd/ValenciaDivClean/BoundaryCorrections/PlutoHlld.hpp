@@ -308,4 +308,74 @@ class PlutoHlld final : public evolution::BoundaryCorrection {
       std::numeric_limits<double>::signaling_NaN()};
 };
 bool operator!=(const PlutoHlld& lhs, const PlutoHlld& rhs);
+
+namespace detail {
+/// The signature of the C shim's entry points (`pluto/pluto_hlld_shim.h`):
+/// `(npts, vL, vR, gamma, flux_out, press_out)`.
+using PlutoFluxFunction = int (*)(int, const double*, const double*, double,
+                                  double*, double*);
+
+/// The body of `PlutoHlld::dg_boundary_terms`, with the PLUTO solver it hands
+/// the five-wave (or three-wave) fan to as a parameter. Everything around that
+/// call -- the frame rotation, the GLM/MHD split, the HLL baseline and every
+/// fallback to it -- does not depend on which PLUTO solver is used, so
+/// `PlutoHllc` calls this with PLUTO's HLLC instead of duplicating it.
+void pluto_dg_boundary_terms(
+    PlutoFluxFunction pluto_solver,
+    gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
+    gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
+    gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_tau,
+    gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
+        boundary_correction_tilde_s,
+    gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
+        boundary_correction_tilde_b,
+    gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_phi,
+    const Scalar<DataVector>& tilde_d_int,
+    const Scalar<DataVector>& tilde_ye_int,
+    const Scalar<DataVector>& tilde_tau_int,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& tilde_s_int,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& tilde_b_int,
+    const Scalar<DataVector>& tilde_phi_int,
+    const Scalar<DataVector>& normal_dot_flux_tilde_d_int,
+    const Scalar<DataVector>& normal_dot_flux_tilde_ye_int,
+    const Scalar<DataVector>& normal_dot_flux_tilde_tau_int,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& normal_dot_flux_tilde_s_int,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& normal_dot_flux_tilde_b_int,
+    const Scalar<DataVector>& normal_dot_flux_tilde_phi_int,
+    const Scalar<DataVector>& largest_outgoing_char_speed_int,
+    const Scalar<DataVector>& largest_ingoing_char_speed_int,
+    const Scalar<DataVector>& fast_outgoing_char_speed_int,
+    const Scalar<DataVector>& fast_ingoing_char_speed_int,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
+    const Scalar<DataVector>& metric_flatness_int,
+    const Scalar<DataVector>& rest_mass_density_int,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
+    const Scalar<DataVector>& pressure_int,
+    const Scalar<DataVector>& /*lorentz_factor_int*/,
+    const Scalar<DataVector>& specific_internal_energy_int,
+    const Scalar<DataVector>& tilde_d_ext,
+    const Scalar<DataVector>& tilde_ye_ext,
+    const Scalar<DataVector>& tilde_tau_ext,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& tilde_s_ext,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& tilde_b_ext,
+    const Scalar<DataVector>& tilde_phi_ext,
+    const Scalar<DataVector>& normal_dot_flux_tilde_d_ext,
+    const Scalar<DataVector>& normal_dot_flux_tilde_ye_ext,
+    const Scalar<DataVector>& normal_dot_flux_tilde_tau_ext,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& normal_dot_flux_tilde_s_ext,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& normal_dot_flux_tilde_b_ext,
+    const Scalar<DataVector>& normal_dot_flux_tilde_phi_ext,
+    const Scalar<DataVector>& largest_outgoing_char_speed_ext,
+    const Scalar<DataVector>& largest_ingoing_char_speed_ext,
+    const Scalar<DataVector>& fast_outgoing_char_speed_ext,
+    const Scalar<DataVector>& fast_ingoing_char_speed_ext,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& /*iface_normal_ext*/,
+    const Scalar<DataVector>& metric_flatness_ext,
+    const Scalar<DataVector>& rest_mass_density_ext,
+    const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
+    const Scalar<DataVector>& pressure_ext,
+    const Scalar<DataVector>& /*lorentz_factor_ext*/,
+    const Scalar<DataVector>& /*specific_internal_energy_ext*/,
+    dg::Formulation dg_formulation);
+}  // namespace detail
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections
