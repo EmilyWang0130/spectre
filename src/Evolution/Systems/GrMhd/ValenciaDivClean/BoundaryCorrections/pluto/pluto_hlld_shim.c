@@ -28,8 +28,12 @@ static void shim_init(void) {
   shim_ready = 1;
 }
 
-int pluto_hlld_flux(int npts, const double* vL, const double* vR, double gamma,
-                    double* flux_out, double* press_out) {
+/* One batch through any of PLUTO's RMHD Riemann solvers. They all share the
+   same contract: u and v of both states filled, everything else (a2, h, flux,
+   prs, SL, SR) computed inside the solver. */
+static int pluto_riemann_flux(Riemann_Solver* solver, int npts,
+                              const double* vL, const double* vR, double gamma,
+                              double* flux_out, double* press_out) {
   if (npts <= 0) return 0;
   shim_init();
   g_gamma = gamma;
@@ -49,15 +53,17 @@ int pluto_hlld_flux(int npts, const double* vL, const double* vR, double gamma,
       dR[BX1]=sR[4]; dR[BX2]=sR[5]; dR[BX3]=sR[6]; dR[PRS]=sR[7];
       shim_sweep.flag[i] = 0;
     }
-    /* HLLD_Solver computes a2 (SoundSpeed2), flux/prs (Flux) and SL/SR
-       (HLL_Speed) itself; it needs u and h supplied. grid may be NULL --
-       it is only dereferenced inside the HLLD_DEBUG block, which is off. */
+    /* The solvers compute a2 (SoundSpeed2, which also refills h), flux/prs
+       (Flux) and SL/SR (HLL_Speed) themselves; they need u supplied. grid may
+       be NULL: HLLD dereferences it only inside its HLLD_DEBUG block, which is
+       off, and otherwise every solver only passes it to SoundSpeed2, which
+       does not read it (the GLM/CT/EIGHT_WAVES uses are compiled out). */
     PrimToCons(shim_sweep.stateL.v, shim_sweep.stateL.u, 0, n - 1);
     PrimToCons(shim_sweep.stateR.v, shim_sweep.stateR.u, 0, n - 1);
     Enthalpy  (shim_sweep.stateL.v, shim_sweep.stateL.h, 0, n - 1);
     Enthalpy  (shim_sweep.stateR.v, shim_sweep.stateR.h, 0, n - 1);
 
-    HLLD_Solver(&shim_sweep, 0, n - 1, shim_cmax, NULL);
+    solver(&shim_sweep, 0, n - 1, shim_cmax, NULL);
 
     for (int i = 0; i < n; ++i) {
       double* out = flux_out + (size_t)(base + i) * 8;
@@ -66,4 +72,22 @@ int pluto_hlld_flux(int npts, const double* vL, const double* vR, double gamma,
     }
   }
   return 0;
+}
+
+int pluto_hlld_flux(int npts, const double* vL, const double* vR, double gamma,
+                    double* flux_out, double* press_out) {
+  return pluto_riemann_flux(HLLD_Solver, npts, vL, vR, gamma, flux_out,
+                            press_out);
+}
+
+int pluto_hllc_mb_flux(int npts, const double* vL, const double* vR,
+                       double gamma, double* flux_out, double* press_out) {
+  return pluto_riemann_flux(HLLC_MB_Solver, npts, vL, vR, gamma, flux_out,
+                            press_out);
+}
+
+int pluto_hllc_kb_flux(int npts, const double* vL, const double* vR,
+                       double gamma, double* flux_out, double* press_out) {
+  return pluto_riemann_flux(HLLC_KB_Solver, npts, vL, vR, gamma, flux_out,
+                            press_out);
 }

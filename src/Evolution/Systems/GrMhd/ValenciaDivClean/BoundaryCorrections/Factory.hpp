@@ -10,6 +10,7 @@
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Hllem.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/HllemHydroYe.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Marquina.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/PlutoHllc.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/PlutoHlld.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/Rusanov.hpp"
 #include "Utilities/TMPL.hpp"
@@ -17,5 +18,5 @@
 namespace grmhd::ValenciaDivClean::BoundaryCorrections {
 using standard_boundary_corrections =
     tmpl::list<Hll, Hllc, HllcGr, Hlld, Hllem, HllemHydroYe, Marquina,
-               PlutoHlld, Rusanov>;
+               PlutoHllc, PlutoHlld, Rusanov>;
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections

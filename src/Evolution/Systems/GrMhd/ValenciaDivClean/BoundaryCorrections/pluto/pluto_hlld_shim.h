@@ -1,4 +1,5 @@
-/* C interface to PLUTO's HLLD Riemann solver, for use from SpECTRE.
+/* C interface to PLUTO's RMHD Riemann solvers (HLLD and the two HLLCs), for
+ * use from SpECTRE.
  *
  * Everything PLUTO-side is reached through this one entry point; the C++ side
  * never sees a PLUTO type. See README.md for the list of local modifications
@@ -29,6 +30,18 @@ extern "C" {
  * thread lazily builds its own Sweep. */
 int pluto_hlld_flux(int npts, const double* vL, const double* vR, double gamma,
                     double* flux_out, double* press_out);
+
+/* The same contract, through PLUTO's two RMHD HLLC solvers instead:
+ *   pluto_hllc_mb_flux -- HLLC_MB_Solver (hllc_mb.c), Mignone & Bodo 2006,
+ *                         PLUTO's default "hllc";
+ *   pluto_hllc_kb_flux -- HLLC_KB_Solver (hllc_kb.c), which its header
+ *                         attributes to Balsara & Kim 2016.
+ * Both fall back to the HLL flux internally where their star state is
+ * unphysical. */
+int pluto_hllc_mb_flux(int npts, const double* vL, const double* vR,
+                       double gamma, double* flux_out, double* press_out);
+int pluto_hllc_kb_flux(int npts, const double* vL, const double* vR,
+                       double gamma, double* flux_out, double* press_out);
 
 #ifdef __cplusplus
 }

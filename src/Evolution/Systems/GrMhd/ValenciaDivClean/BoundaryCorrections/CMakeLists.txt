@@ -12,6 +12,7 @@ spectre_target_sources(
   Hllem.cpp
   HllemHydroYe.cpp
   Marquina.cpp
+  PlutoHllc.cpp
   PlutoHlld.cpp
   Rusanov.cpp
   )
@@ -30,13 +31,15 @@ spectre_target_headers(
   Hllem.hpp
   HllemHydroYe.hpp
   Marquina.hpp
+  PlutoHllc.hpp
   PlutoHlld.hpp
   NamespaceDocs.hpp
   Rusanov.hpp
   )
 
-# --- Vendored PLUTO v4.4 HLLD (see pluto/README.md) -------------------------
-# PlutoHlld calls PLUTO's own compiled HLLD rather than a re-implementation.
+# --- Vendored PLUTO v4.4 HLLD and HLLC (see pluto/README.md) ----------------
+# PlutoHlld and PlutoHllc call PLUTO's own compiled solvers rather than
+# re-implementations of them.
 #
 # These are C sources, and they must live in their OWN target rather than being
 # added to ${LIBRARY}: SpECTRE precompiles a C++ header for that library, and
@@ -46,7 +49,8 @@ spectre_target_headers(
 # library with PCH disabled keeps the C and C++ toolchains cleanly apart.
 set(PLUTO_HLLD_SOURCES
   pluto/arrays.c pluto/debug_tools.c pluto/eigenv.c pluto/eos.c
-  pluto/fluxes.c pluto/hll_speed.c pluto/hlld.c pluto/mappers.c
+  pluto/fluxes.c pluto/hll_speed.c pluto/hllc_kb.c pluto/hllc_mb.c
+  pluto/hlld.c pluto/mappers.c
   pluto/math_misc.c pluto/math_qr_decomp.c pluto/math_root_finders.c
   pluto/output_log.c pluto/rmhd_energy_solve.c pluto/rmhd_pressure_fix.c
   pluto/set_indexes.c pluto/tools.c pluto/pluto_hlld_shim.c

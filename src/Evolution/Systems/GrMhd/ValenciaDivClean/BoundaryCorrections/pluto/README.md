@@ -1,8 +1,9 @@
-# Vendored PLUTO sources — HLLD Riemann solver
+# Vendored PLUTO sources — HLLD and HLLC Riemann solvers
 
 This directory contains a **minimal subset of PLUTO v4.4** (Mignone et al.),
-vendored so that SpECTRE's `PlutoHlld` boundary correction calls PLUTO's *own*
-compiled HLLD rather than a re-implementation of it.
+vendored so that SpECTRE's `PlutoHlld` and `PlutoHllc` boundary corrections
+call PLUTO's *own* compiled HLLD and HLLC rather than re-implementations of
+them.
 
 Why vendored rather than re-implemented: we ported `hlld.c` to C++ by hand and
 spent several sessions chasing a high-order-reconstruction instability that we
@@ -16,17 +17,29 @@ Upstream: PLUTO v4.4, `Src/` tree. Copied from a local working tree.
 **That tree was NOT pristine** — it carried our own experiment code. Everything
 we removed or changed is listed below. Nothing else was touched.
 
-## Source set (16 PLUTO files + 1 shim)
+`hllc_mb.c` and `hllc_kb.c` (added 2026-09-30, for `PlutoHllc`) come from the
+official **pluto-4.4-patch4** release tarball (plutocode.ph.unito.it). Against
+that release, every other vendored PLUTO file differs only in the
+`SPECTRE-MOD` lines listed below, so the two HLLC files belong to the same
+code. A copy of the full release is in the workspace at
+`~/refs/pluto/pluto-4.4-patch4/`.
+
+## Source set (18 PLUTO files + 1 shim)
 
 Determined from a link map, not by guessing: these are exactly the objects the
-linker pulls when resolving `HLLD_Solver` and its transitive dependencies.
+linker pulls when resolving `HLLD_Solver` and its transitive dependencies. The
+two HLLC solvers need nothing beyond that set (`hllc_kb.c` also calls
+`ConsToPrim`, which HLLD already pulls in).
 
 ```
 arrays.c  debug_tools.c  eigenv.c  eos.c (EOS/Ideal)  fluxes.c  hll_speed.c
-hlld.c  mappers.c  math_misc.c  math_qr_decomp.c  math_root_finders.c
-output_log.c  rmhd_energy_solve.c  rmhd_pressure_fix.c  set_indexes.c  tools.c
+hllc_kb.c  hllc_mb.c  hlld.c  mappers.c  math_misc.c  math_qr_decomp.c
+math_root_finders.c  output_log.c  rmhd_energy_solve.c  rmhd_pressure_fix.c
+set_indexes.c  tools.c
 ```
-`pluto_hlld_shim.{c,h}` is ours: the only entry point the C++ side uses.
+`pluto_hlld_shim.{c,h}` is ours: the only entry points the C++ side uses --
+`pluto_hlld_flux`, `pluto_hllc_mb_flux` and `pluto_hllc_kb_flux`, which all go
+through one routine that takes the PLUTO solver as a function pointer.
 
 `rmhd_entropy_solve.c` is not needed (entropy switch off) and
 `riemann_check.c` is not needed once `COUNT_FAILURES` is off.
@@ -42,6 +55,10 @@ output_log.c  rmhd_energy_solve.c  rmhd_pressure_fix.c  set_indexes.c  tools.c
    runs Charm++ in SMP mode (many worker threads per process); PLUTO was written
    for one thread per process and uses file-scope and function-static state.
    - `hlld.c`: `static double Sc, Bx;` and `static double **Uhll, **Fhll, **Vhll;`
+   - `hllc_mb.c`: `static double **Uhll, **Fhll;`; `hllc_kb.c`:
+     `static uint16_t *flag;` and `static double **Uhll, **Fhll, **Vhll;`
+     (added with the HLLC files; their `totfail/totzones` statics are compiled
+     out with `COUNT_FAILURES`)
    - `globals.h` + `pluto.h`: `VXn/VXt/VXb`, `MXn/MXt/MXb`, `BXn/BXt/BXb`,
      `g_maxRiemannIter`, `NMAX_POINT`, `g_gamma`
    - **and every lazily-allocated function static in the other vendored
@@ -114,3 +131,23 @@ the 8 MHD fluxes.
   `ScopedFpeState(false)`; any direct caller of the shim must do the same.
 - PLUTO's `Flux()` needs `state->h` (enthalpy) prefilled; `HLLD_Solver` computes
   `a2`, `flux`, `prs`, `SL`, `SR` itself.
+
+## Verifying the vendored HLLC (2026-09-30)
+
+A standalone C driver built from the UNMODIFIED 4.4-patch4 sources
+(`~/refs/pluto/pluto-4.4-patch4/rmhd_solver_reference_driver.c`, which
+prepares states the way PLUTO's own `States/flat_states.c` does) gives the
+reference fluxes in `Test_PlutoHllc.cpp`. The same driver reproduces the HLLD
+reference in `Test_PlutoHlld.cpp` to all 17 digits. This vendored copy, through
+the shim, matches the driver to every printed digit for HLLD and both HLLCs,
+under gcc and clang.
+
+Two properties of PLUTO's HLLC that the reference values pin, and that are
+easy to mistake for bugs:
+- `hllc_mb.c` falls back to the HLL flux when its star velocity is
+  superluminal. On the Balsara-1 (relativistic Brio-Wu) interface it does, so
+  there its flux IS HLL's.
+- At `B^x = 0`, `hllc_mb.c` uses Mignone & Bodo's limit formula (their Eq. 47),
+  which jumps the tangential field across the contact and agrees with HLLD to
+  round-off. `hllc_kb.c` always keeps the HLL-averaged field, so its tangential
+  field flux there is HLL's.
