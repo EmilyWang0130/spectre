@@ -8,6 +8,7 @@ set(LIBRARY_SOURCES
   InitialMagneticFields/Test_Toroidal.cpp
   Test_AxisymmetricJet.cpp
   Test_BeckwithStoneKhInstability.cpp
+  Test_MignoneKhInstability.cpp
   Test_BlastWave.cpp
   Test_BondiHoyleAccretion.cpp
   Test_CcsnCollapse.cpp

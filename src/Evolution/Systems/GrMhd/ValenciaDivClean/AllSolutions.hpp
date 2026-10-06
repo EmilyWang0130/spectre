@@ -10,6 +10,7 @@
 #include "PointwiseFunctions/AnalyticData/GrMhd/BondiHoyleAccretion.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/CcsnCollapse.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/KhInstability.hpp"
+#include "PointwiseFunctions/AnalyticData/GrMhd/MignoneKhInstability.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/MagneticFieldLoop.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/MagneticRotor.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/MagnetizedFmDisk.hpp"
@@ -35,6 +36,7 @@ using initial_data_list = tmpl::list<
     AnalyticData::AxisymmetricJet, AnalyticData::BeckwithStoneKhInstability,
     AnalyticData::BlastWave, AnalyticData::BondiHoyleAccretion,
     AnalyticData::CcsnCollapse, AnalyticData::KhInstability,
+    AnalyticData::MignoneKhInstability,
     AnalyticData::MagneticFieldLoop, AnalyticData::MagneticRotor,
     AnalyticData::MagnetizedFmDisk, AnalyticData::MagnetizedTovStar,
     AnalyticData::OrszagTangVortex, AnalyticData::PerturbedTovStar,

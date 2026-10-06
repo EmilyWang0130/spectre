@@ -14,6 +14,7 @@ spectre_target_sources(
   BondiHoyleAccretion.cpp
   CcsnCollapse.cpp
   KhInstability.cpp
+  MignoneKhInstability.cpp
   MagneticFieldLoop.cpp
   MagneticRotor.cpp
   MagnetizedFmDisk.cpp
@@ -38,6 +39,7 @@ spectre_target_headers(
   BondiHoyleAccretion.hpp
   CcsnCollapse.hpp
   KhInstability.hpp
+  MignoneKhInstability.hpp
   MagneticFieldLoop.hpp
   MagneticRotor.hpp
   MagnetizedFmDisk.hpp
