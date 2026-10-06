@@ -43,6 +43,13 @@ int pluto_hllc_mb_flux(int npts, const double* vL, const double* vR,
 int pluto_hllc_kb_flux(int npts, const double* vL, const double* vR,
                        double gamma, double* flux_out, double* press_out);
 
+/* The same contract, through the seven-wave solver HLLX_Solver (hllx.c, our
+ * addition to PLUTO: PLUTO's HLLD stage, then slow fronts closed by a Newton
+ * solve; falls back to HLLD's flux where that solve fails, and to HLL where
+ * HLLD's own root does). */
+int pluto_hllx_flux(int npts, const double* vL, const double* vR, double gamma,
+                    double* flux_out, double* press_out);
+
 #ifdef __cplusplus
 }
 #endif

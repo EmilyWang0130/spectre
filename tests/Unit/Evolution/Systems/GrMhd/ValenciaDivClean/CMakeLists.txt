@@ -20,6 +20,7 @@ set(LIBRARY_SOURCES
   BoundaryCorrections/Test_Marquina.cpp
   BoundaryCorrections/Test_PlutoHllc.cpp
   BoundaryCorrections/Test_PlutoHlld.cpp
+  BoundaryCorrections/Test_PlutoHllx.cpp
   BoundaryCorrections/Test_Rusanov.cpp
   FiniteDifference/Test_BoundaryConditionGhostData.cpp
   FiniteDifference/Test_MonotonicityPreserving5.cpp

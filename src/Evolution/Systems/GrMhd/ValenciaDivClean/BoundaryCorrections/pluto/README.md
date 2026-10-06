@@ -1,4 +1,4 @@
-# Vendored PLUTO sources — HLLD and HLLC Riemann solvers
+# Vendored PLUTO sources — HLLD, HLLC and the seven-wave HLLx Riemann solvers
 
 This directory contains a **minimal subset of PLUTO v4.4** (Mignone et al.),
 vendored so that SpECTRE's `PlutoHlld` and `PlutoHllc` boundary corrections
@@ -24,7 +24,7 @@ that release, every other vendored PLUTO file differs only in the
 code. A copy of the full release is in the workspace at
 `~/refs/pluto/pluto-4.4-patch4/`.
 
-## Source set (18 PLUTO files + 1 shim)
+## Source set (18 PLUTO files + our `hllx.c` + 1 shim)
 
 Determined from a link map, not by guessing: these are exactly the objects the
 linker pulls when resolving `HLLD_Solver` and its transitive dependencies. The
@@ -37,9 +37,16 @@ hllc_kb.c  hllc_mb.c  hlld.c  mappers.c  math_misc.c  math_qr_decomp.c
 math_root_finders.c  output_log.c  rmhd_energy_solve.c  rmhd_pressure_fix.c
 set_indexes.c  tools.c
 ```
+`hllx.c` (added 2026-10-06, for `PlutoHllx`) is not PLUTO's: it is the seven-wave
+solver we added to the release tree (`~/refs/pluto/pluto-4.4-patch4/PLUTO/Src/RMHD/hllx.c`,
+local git commit `dca07c7`), copied verbatim apart from the `_Thread_local`
+qualifiers below. It carries its own renamed copy of `hlld.c`'s machinery and
+needs nothing beyond the 18 files above (`HLL_Speed`, `Magnetosonic`,
+`SoundSpeed2`, `Flux`, `ConsToPrim`, the array allocators and `print`).
 `pluto_hlld_shim.{c,h}` is ours: the only entry points the C++ side uses --
-`pluto_hlld_flux`, `pluto_hllc_mb_flux` and `pluto_hllc_kb_flux`, which all go
-through one routine that takes the PLUTO solver as a function pointer.
+`pluto_hlld_flux`, `pluto_hllc_mb_flux`, `pluto_hllc_kb_flux` and
+`pluto_hllx_flux`, which all go through one routine that takes the PLUTO solver
+as a function pointer.
 
 `rmhd_entropy_solve.c` is not needed (entropy switch off) and
 `riemann_check.c` is not needed once `COUNT_FAILURES` is off.
@@ -55,6 +62,10 @@ through one routine that takes the PLUTO solver as a function pointer.
    runs Charm++ in SMP mode (many worker threads per process); PLUTO was written
    for one thread per process and uses file-scope and function-static state.
    - `hlld.c`: `static double Sc, Bx;` and `static double **Uhll, **Fhll, **Vhll;`
+   - `hllx.c`: `hx_stat[]`, `hx_newton_iters`, `hx_calls`, `hx_seven_waves`,
+     `hx_Sc`, `hx_Bx`, and `HLLX_Solver`'s lazily-allocated `Uhll/Fhll/Vhll` and
+     `lamL/lamR` (six declarations; `mod_defs.h` also declares `HLLX_Solver` and
+     `HLLDR_Solver`)
    - `hllc_mb.c`: `static double **Uhll, **Fhll;`; `hllc_kb.c`:
      `static uint16_t *flag;` and `static double **Uhll, **Fhll, **Vhll;`
      (added with the HLLC files; their `totfail/totzones` statics are compiled
@@ -151,3 +162,22 @@ easy to mistake for bugs:
   which jumps the tangential field across the contact and agrees with HLLD to
   round-off. `hllc_kb.c` always keeps the HLL-averaged field, so its tangential
   field flux there is HLL's.
+
+## Verifying the vendored seven-wave solver (2026-10-06)
+
+`Test_PlutoHllx.cpp` pins the shim's `pluto_hllx_flux` to the fluxes of the
+standalone face driver built from the release tree plus `hllx.c`
+(`notes/projects/active/hllx_rmhd/scripts/pluto_face_driver/`, which also
+reproduces the HLLD reference of `Test_PlutoHlld.cpp`), on five faces: two that
+reach a seven-wave root, one that reaches it only at intermediate slow speeds,
+the `B^x = 0` face where `hllx` keeps HLLD's flux exactly, and the large-`B_x`
+Dai-Woodward face where PLUTO's own secant fails and both are HLL. The
+seven-wave fluxes are checked to 1e-9 (a Newton root to a 1e-10 relative
+residual; a compiler may stop at a slightly different iterate), HLLD's to
+round-off. The same thread test as for HLLD and HLLC applies: different states
+per thread, exact agreement with the single-threaded answer.
+
+The solver's design, derivation and validation (face by face against a numpy
+reference, PLUTO's RMHD shock-tube suite, the low-beta blast) are documented in
+the research notes (`notes/projects/active/hllx_rmhd/hllx_in_pluto.md`).
+

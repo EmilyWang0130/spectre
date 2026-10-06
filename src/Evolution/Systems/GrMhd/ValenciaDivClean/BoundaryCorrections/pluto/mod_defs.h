@@ -199,7 +199,7 @@ int  Magnetosonic (double *, double, double, double *);
 void RiemannCheck (double *, double *s);
 
 Riemann_Solver LF_Solver, HLL_Solver, HLLC_MB_Solver, HLLC_KB_Solver;
-Riemann_Solver HLLD_Solver, HLLEM_Solver;
+Riemann_Solver HLLD_Solver, HLLEM_Solver, HLLX_Solver, HLLDR_Solver; /* SPECTRE-MOD: hllx.c */
 Riemann_Solver HLL_Linde_Solver, GMUSTA1_Solver; 
 Riemann_Solver GFORCE_Solver;
 

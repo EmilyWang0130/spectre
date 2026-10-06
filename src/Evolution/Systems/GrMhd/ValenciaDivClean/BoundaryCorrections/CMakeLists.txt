@@ -14,6 +14,7 @@ spectre_target_sources(
   Marquina.cpp
   PlutoHllc.cpp
   PlutoHlld.cpp
+  PlutoHllx.cpp
   Rusanov.cpp
   )
 
@@ -33,6 +34,7 @@ spectre_target_headers(
   Marquina.hpp
   PlutoHllc.hpp
   PlutoHlld.hpp
+  PlutoHllx.hpp
   NamespaceDocs.hpp
   Rusanov.hpp
   )
@@ -50,7 +52,7 @@ spectre_target_headers(
 set(PLUTO_HLLD_SOURCES
   pluto/arrays.c pluto/debug_tools.c pluto/eigenv.c pluto/eos.c
   pluto/fluxes.c pluto/hll_speed.c pluto/hllc_kb.c pluto/hllc_mb.c
-  pluto/hlld.c pluto/mappers.c
+  pluto/hlld.c pluto/hllx.c pluto/mappers.c
   pluto/math_misc.c pluto/math_qr_decomp.c pluto/math_root_finders.c
   pluto/output_log.c pluto/rmhd_energy_solve.c pluto/rmhd_pressure_fix.c
   pluto/set_indexes.c pluto/tools.c pluto/pluto_hlld_shim.c

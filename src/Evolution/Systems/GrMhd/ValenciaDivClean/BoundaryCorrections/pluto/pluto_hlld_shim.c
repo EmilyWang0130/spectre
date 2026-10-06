@@ -91,3 +91,9 @@ int pluto_hllc_kb_flux(int npts, const double* vL, const double* vR,
   return pluto_riemann_flux(HLLC_KB_Solver, npts, vL, vR, gamma, flux_out,
                             press_out);
 }
+
+int pluto_hllx_flux(int npts, const double* vL, const double* vR, double gamma,
+                    double* flux_out, double* press_out) {
+  return pluto_riemann_flux(HLLX_Solver, npts, vL, vR, gamma, flux_out,
+                            press_out);
+}
