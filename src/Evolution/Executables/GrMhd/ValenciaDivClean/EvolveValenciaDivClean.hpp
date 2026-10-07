@@ -147,6 +147,7 @@
 #include "PointwiseFunctions/AnalyticData/GrMhd/OrszagTangVortex.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/PolarMagnetizedFmDisk.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/RiemannProblem.hpp"
+#include "PointwiseFunctions/AnalyticData/GrMhd/RotatedRiemannProblem.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/SlabJet.hpp"
 #include "PointwiseFunctions/AnalyticData/Tags.hpp"
 #include "PointwiseFunctions/AnalyticSolutions/AnalyticSolution.hpp"

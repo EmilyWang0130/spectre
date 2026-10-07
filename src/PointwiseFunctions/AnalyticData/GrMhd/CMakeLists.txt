@@ -23,6 +23,7 @@ spectre_target_sources(
   PerturbedTovStar.cpp
   PolarMagnetizedFmDisk.cpp
   RiemannProblem.cpp
+  RotatedRiemannProblem.cpp
   SlabJet.cpp
   SphericalTorus.cpp
   Tabulated3DShockTube.cpp
@@ -48,6 +49,7 @@ spectre_target_headers(
   PerturbedTovStar.hpp
   PolarMagnetizedFmDisk.hpp
   RiemannProblem.hpp
+  RotatedRiemannProblem.hpp
   SlabJet.hpp
   SphericalTorus.hpp
   Tabulated3DShockTube.hpp

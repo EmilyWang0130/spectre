@@ -19,6 +19,7 @@
 #include "PointwiseFunctions/AnalyticData/GrMhd/PerturbedTovStar.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/PolarMagnetizedFmDisk.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/RiemannProblem.hpp"
+#include "PointwiseFunctions/AnalyticData/GrMhd/RotatedRiemannProblem.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/SlabJet.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/Tabulated3DShockTube.hpp"
 #include "PointwiseFunctions/AnalyticSolutions/AnalyticSolution.hpp"
@@ -41,6 +42,7 @@ using initial_data_list = tmpl::list<
     AnalyticData::MagnetizedFmDisk, AnalyticData::MagnetizedTovStar,
     AnalyticData::OrszagTangVortex, AnalyticData::PerturbedTovStar,
     AnalyticData::PolarMagnetizedFmDisk, AnalyticData::RiemannProblem,
+    AnalyticData::RotatedRiemannProblem,
     AnalyticData::SlabJet, AnalyticData::Tabulated3DShockTube,
     Solutions::AlfvenWave, grmhd::Solutions::BondiMichel,
     Solutions::KomissarovShock, Solutions::SmoothFlow,

@@ -21,6 +21,7 @@ set(LIBRARY_SOURCES
   Test_PerturbedTovStar.cpp
   Test_PolarMagnetizedFmDisk.cpp
   Test_RiemannProblem.cpp
+  Test_RotatedRiemannProblem.cpp
   Test_SlabJet.cpp
   Test_SphericalTorus.cpp
   )
