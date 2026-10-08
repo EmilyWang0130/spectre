@@ -9,6 +9,7 @@
 #include "Parallel/Printf/Printf.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <cmath>
 #include <pup.h>
@@ -503,6 +504,9 @@ void pluto_dg_boundary_terms(
   // Raw (weak-form) GLM flux for the normal field, filled by the block below
   // and reused by the PLUTO scatter.
   DataVector glm_normal_b_flux{num_points, 0.0};
+  // The GLM face STATE of the normal field (the HLL intermediate state), kept for the
+  // energy pairing below.
+  DataVector glm_normal_b_star{num_points, 0.0};
   // Magnetic field: the NORMAL component belongs to the GLM subsystem (light
   // speed), the TANGENTIAL component is MHD (fast bounds). Split along the
   // interface normal, use the appropriate bounds for each part, and recombine
@@ -535,6 +539,9 @@ void pluto_dg_boundary_terms(
       }
       glm_normal_b_flux = (lambda_max * nfbn_int + lambda_min * nfbn_ext +
                            lambda_max * lambda_min * (bn_ext - bn_int)) /
+                          dl;
+      glm_normal_b_star = (lambda_max * bn_ext - lambda_min * bn_int +
+                           nfbn_int - nfbn_ext) /
                           dl;
     }
     for (size_t i = 0; i < 3; ++i) {
@@ -716,6 +723,50 @@ void pluto_dg_boundary_terms(
           g_s[q] - (weak ? 0.0 : normal_dot_flux_tilde_s_int.get(q)[i]);
       boundary_correction_tilde_b->get(q)[i] =
           g_b[q] - (weak ? 0.0 : normal_dot_flux_tilde_b_int.get(q)[i]);
+    }
+  }
+
+  // GLM ENERGY PAIRING (2026-10-08; environment SPECTRE_GLM_PAIR=1, default off while it is
+  // tested; flat space only, like the GLM split above). ValenciaDivClean transports the
+  // normal field with the cleaning flux Phi and Phi with B_n, but its TildeTau flux carries no
+  // matching term, so the non-solenoidal part of the field update changes magnetic energy at
+  // fixed total energy and the gas pays for it -- at beta ~ 1e-3 the seven-wave solver's 2-D
+  // contact entropy loss (task 2 of the HLLx campaign, 2026-10-07/08; PLUTO's RMHD GLM has the
+  // same omission and the same term, GLM_PAIR, removes the loss there). The relativistic
+  // entropy variables pair a field change dB at fixed (D, m, E) with dE = (b/W).dB,
+  // b/W = (1 - v^2) B + (v.B) v; in flux form on every face, with the GLM face values
+  // Phi* (= the normal-field flux) and B_n*:
+  //   F_tau += Phi* [(1 - v^2) B_n* + (v.B) v_n],   v, B the face means.
+  // It is added to the numerical flux G in both DG formulations (the system's volume flux has
+  // no such term; on FD-subcell faces, which the tube runs use, the update is the face-flux
+  // difference and this is exactly PLUTO's scheme).
+  {
+    static const int glm_pair = [] {
+      const char* e = std::getenv("SPECTRE_GLM_PAIR");
+      return e == nullptr ? 0 : std::atoi(e);
+    }();
+    if (glm_pair != 0) {
+      const auto& n = interface_unit_normal_int;
+      for (size_t i = 0; i < num_points; ++i) {
+        // metric_flatness is |lapse - 1| + |shift| + |gamma - delta|: zero in flat space
+        if (get(metric_flatness_int)[i] > 1.0e-12 or
+            get(metric_flatness_ext)[i] > 1.0e-12) {
+          continue;
+        }
+        double v2 = 0.0, vb = 0.0, vn = 0.0;
+        for (size_t q = 0; q < 3; ++q) {
+          const double vq = 0.5 * (spatial_velocity_int.get(q)[i] +
+                                   spatial_velocity_ext.get(q)[i]);
+          const double bq =
+              0.5 * (tilde_b_int.get(q)[i] + tilde_b_ext.get(q)[i]);
+          v2 += vq * vq;
+          vb += vq * bq;
+          vn += vq * n.get(q)[i];
+        }
+        get(*boundary_correction_tilde_tau)[i] +=
+            glm_normal_b_flux[i] *
+            ((1.0 - v2) * glm_normal_b_star[i] + vb * vn);
+      }
     }
   }
 }
