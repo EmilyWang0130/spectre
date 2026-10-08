@@ -4,6 +4,7 @@
 #include "PointwiseFunctions/AnalyticData/GrMhd/RotatedRiemannProblem.hpp"
 
 #include <cmath>
+#include <optional>
 #include <pup.h>
 
 #include "DataStructures/DataVector.hpp"
@@ -16,6 +17,7 @@
 #include "Utilities/GenerateInstantiations.hpp"
 #include "Utilities/MakeWithValue.hpp"
 #include "Utilities/Math.hpp"
+#include "Utilities/Serialization/PupStlCpp17.hpp"
 
 namespace grmhd::AnalyticData {
 
@@ -27,7 +29,9 @@ RotatedRiemannProblem::RotatedRiemannProblem(
     const std::array<double, 3>& right_spatial_velocity,
     const std::array<double, 3>& left_magnetic_field,
     const std::array<double, 3>& right_magnetic_field, const double lapse,
-    const double shift, const double interface_angle)
+    const double shift, const double interface_angle,
+    const std::optional<double> slab_half_width,
+    const std::optional<double> slab_period)
     : equation_of_state_(adiabatic_index),
       adiabatic_index_(adiabatic_index),
       left_rest_mass_density_(left_rest_mass_density),
@@ -40,7 +44,9 @@ RotatedRiemannProblem::RotatedRiemannProblem(
       right_magnetic_field_(right_magnetic_field),
       lapse_(lapse),
       shift_(shift),
-      interface_angle_(interface_angle) {}
+      interface_angle_(interface_angle),
+      slab_half_width_(slab_half_width),
+      slab_period_(slab_period) {}
 
 std::unique_ptr<evolution::initial_data::InitialData>
 RotatedRiemannProblem::get_clone() const {
@@ -66,6 +72,8 @@ void RotatedRiemannProblem::pup(PUP::er& p) {
   p | lapse_;
   p | shift_;
   p | interface_angle_;
+  p | slab_half_width_;
+  p | slab_period_;
 }
 
 std::array<double, 3> RotatedRiemannProblem::to_grid_frame(
@@ -78,8 +86,16 @@ std::array<double, 3> RotatedRiemannProblem::to_grid_frame(
 template <typename DataType>
 DataType RotatedRiemannProblem::signed_distance(
     const tnsr::I<DataType, 3>& x) const {
-  return DataType{get<0>(x) * std::cos(interface_angle_) +
-                  get<1>(x) * std::sin(interface_angle_)};
+  DataType s{get<0>(x) * std::cos(interface_angle_) +
+             get<1>(x) * std::sin(interface_angle_)};
+  if (slab_period_.has_value()) {
+    const double period = *slab_period_;
+    for (size_t i = 0; i < get_size(s); ++i) {
+      get_element(s, i) -=
+          period * std::floor(get_element(s, i) / period + 0.5);
+    }
+  }
+  return s;
 }
 
 template <typename DataType>
@@ -90,7 +106,7 @@ RotatedRiemannProblem::variables(
   auto mass_density = make_with_value<Scalar<DataType>>(x, 0.0);
   const auto s = signed_distance(x);
   for (size_t i = 0; i < get_size(get<0>(x)); ++i) {
-    get_element(get(mass_density), i) = get_element(s, i) <= 0.0
+    get_element(get(mass_density), i) = is_left(get_element(s, i))
                                             ? left_rest_mass_density_
                                             : right_rest_mass_density_;
   }
@@ -116,7 +132,7 @@ RotatedRiemannProblem::variables(
   const auto left = to_grid_frame(left_spatial_velocity_);
   const auto right = to_grid_frame(right_spatial_velocity_);
   for (size_t i = 0; i < get_size(get<0>(x)); ++i) {
-    const auto& v = get_element(s, i) <= 0.0 ? left : right;
+    const auto& v = is_left(get_element(s, i)) ? left : right;
     get_element(get<0>(spatial_velocity), i) = v[0];
     get_element(get<1>(spatial_velocity), i) = v[1];
     get_element(get<2>(spatial_velocity), i) = v[2];
@@ -145,7 +161,7 @@ RotatedRiemannProblem::variables(
   const auto s = signed_distance(x);
   for (size_t i = 0; i < get_size(get<0>(x)); ++i) {
     get_element(get(pressure), i) =
-        get_element(s, i) <= 0.0 ? left_pressure_ : right_pressure_;
+        is_left(get_element(s, i)) ? left_pressure_ : right_pressure_;
   }
   return pressure;
 }
@@ -161,7 +177,7 @@ RotatedRiemannProblem::variables(
   const auto left = to_grid_frame(left_magnetic_field_);
   const auto right = to_grid_frame(right_magnetic_field_);
   for (size_t i = 0; i < get_size(get<0>(x)); ++i) {
-    const auto& b = get_element(s, i) <= 0.0 ? left : right;
+    const auto& b = is_left(get_element(s, i)) ? left : right;
     get_element(get<0>(magnetic_field), i) = b[0];
     get_element(get<1>(magnetic_field), i) = b[1];
     get_element(get<2>(magnetic_field), i) = b[2];
@@ -234,7 +250,9 @@ bool operator==(const RotatedRiemannProblem& lhs,
          lhs.left_magnetic_field_ == rhs.left_magnetic_field_ and
          lhs.right_magnetic_field_ == rhs.right_magnetic_field_ and
          lhs.lapse_ == rhs.lapse_ and lhs.shift_ == rhs.shift_ and
-         lhs.interface_angle_ == rhs.interface_angle_;
+         lhs.interface_angle_ == rhs.interface_angle_ and
+         lhs.slab_half_width_ == rhs.slab_half_width_ and
+         lhs.slab_period_ == rhs.slab_period_;
 }
 
 bool operator!=(const RotatedRiemannProblem& lhs,

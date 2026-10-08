@@ -8,7 +8,10 @@
 #include <cmath>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <tuple>
+#include <utility>
+#include <vector>
 
 #include "DataStructures/DataBox/Prefixes.hpp"
 #include "DataStructures/DataVector.hpp"
@@ -92,7 +95,9 @@ void test_create_from_options() {
           "0.005641895835477563]\n"
           "  Lapse: 1.0\n"
           "  ShiftX: 0.0\n"
-          "  InterfaceAngle: 0.4636476090008061\n")
+          "  InterfaceAngle: 0.4636476090008061\n"
+          "  SlabHalfWidth: None\n"
+          "  SlabPeriod: None\n")
           ->get_clone();
   const auto deserialized_option_solution =
       serialize_and_deserialize(option_solution);
@@ -138,7 +143,9 @@ void test_variables(const DataType& used_for_size) {
   const auto member_variables = std::make_tuple(
       adiabatic_index, left_density, right_density, left_pressure,
       right_pressure, left_velocity, right_velocity, left_magnetic_field,
-      right_magnetic_field, lapse, shift, angle);
+      right_magnetic_field, lapse, shift, angle);  // the slab options stay
+                                                   // out of the pypp tuple
+                                                   // (tested in test_slab)
 
   RotatedRiemannProblemProxy riemann_problem(
       adiabatic_index, left_density, right_density, left_pressure,
@@ -214,6 +221,29 @@ void test_against_riemann_problem() {
     CHECK(-get<0>(b) * s + get<1>(b) * c == approx(right_magnetic_field[1]));
   }
 }
+
+// the periodic slab: on a 2 x 2 box at 45 degrees with period sqrt(2) and half-width sqrt(2)/4,
+// the bands alternate consistently: (0.1, 0.1) is left, (0.6, 0.6) right, (1.0, 1.0) [s = 1.414,
+// wrapped to 0] left again, and (-0.9, -0.9) [s = -1.273, wrapped to +0.141] left
+void test_slab() {
+  const double angle = 0.25 * M_PI;
+  const double period = 2.0 / std::sqrt(2.0);
+  const grmhd::AnalyticData::RotatedRiemannProblem slab(
+      2.0, 1.0, 0.125, 1.0, 0.1, left_velocity, right_velocity,
+      left_magnetic_field, right_magnetic_field, 1.0, 0.0, angle,
+      0.25 * period, period);
+  using tags = tmpl::list<hydro::Tags::RestMassDensity<double>>;
+  for (const auto& [point, expected] :
+       std::vector<std::pair<std::array<double, 2>, double>>{
+           {{0.1, 0.1}, 1.0}, {{0.6, 0.6}, 0.125}, {{1.0, 1.0}, 1.0},
+           {{-0.9, -0.9}, 1.0}, {{0.3, -0.3}, 1.0}, {{0.9, 0.0}, 0.125}}) {
+    const tnsr::I<double, 3> x{{{point[0], point[1], 0.0}}};
+    CHECK(get(get<hydro::Tags::RestMassDensity<double>>(
+              slab.variables(x, tags{}))) == expected);
+  }
+  const auto deserialized = serialize_and_deserialize(slab);
+  CHECK(deserialized == slab);
+}
 }  // namespace
 
 SPECTRE_TEST_CASE(
@@ -229,4 +259,5 @@ SPECTRE_TEST_CASE(
 
   test_variables(std::numeric_limits<double>::signaling_NaN());
   test_variables(DataVector(5));
+  test_slab();
 }

@@ -4,11 +4,14 @@
 #pragma once
 
 #include <array>
+#include <cmath>
 #include <limits>
+#include <optional>
 #include <string>
 
 #include "DataStructures/TaggedTuple.hpp"
 #include "DataStructures/Tensor/TypeAliases.hpp"
+#include "Options/Auto.hpp"
 #include "Options/String.hpp"
 #include "PointwiseFunctions/AnalyticData/AnalyticData.hpp"
 #include "PointwiseFunctions/AnalyticData/GrMhd/AnalyticData.hpp"
@@ -134,12 +137,27 @@ class RotatedRiemannProblem
         "Angle (radians) between the interface normal and the x axis, in the "
         "x-y plane. 0 reproduces RiemannProblem."};
   };
+  struct SlabHalfWidth {
+    using type = Options::Auto<double, Options::AutoLabel::None>;
+    static constexpr Options::String help = {
+        "None: a single interface, the left state where s <= 0 (s = x cos + y "
+        "sin). A value w: the left state fills the slab |s| < w, two interfaces. "
+        "With SlabPeriod the pattern repeats along s, for periodic domains."};
+  };
+  struct SlabPeriod {
+    using type = Options::Auto<double, Options::AutoLabel::None>;
+    static constexpr Options::String help = {
+        "None: no repetition. A value P: s is wrapped into (-P/2, P/2] before "
+        "the slab test, so that the bands alternate with period P along s. On "
+        "an L x L periodic box at 45 degrees P = L / sqrt(2) with w = P / 4 is "
+        "consistent across the periodic boundaries (PLUTO's SodRot config 05)."};
+  };
 
   using options =
       tmpl::list<AdiabaticIndex, LeftRestMassDensity, RightRestMassDensity,
                  LeftPressure, RightPressure, LeftSpatialVelocity,
                  RightSpatialVelocity, LeftMagneticField, RightMagneticField,
-                 Lapse, ShiftX, InterfaceAngle>;
+                 Lapse, ShiftX, InterfaceAngle, SlabHalfWidth, SlabPeriod>;
 
   static constexpr Options::String help = {
       "Analytic initial data for a GRMHD Riemann problem whose interface is "
@@ -163,7 +181,9 @@ class RotatedRiemannProblem
                         const std::array<double, 3>& right_spatial_velocity,
                         const std::array<double, 3>& left_magnetic_field,
                         const std::array<double, 3>& right_magnetic_field,
-                        double lapse, double shift, double interface_angle);
+                        double lapse, double shift, double interface_angle,
+                        std::optional<double> slab_half_width = std::nullopt,
+                        std::optional<double> slab_period = std::nullopt);
 
   auto get_clone() const
       -> std::unique_ptr<evolution::initial_data::InitialData> override;
@@ -277,9 +297,16 @@ class RotatedRiemannProblem
   /// A (normal, tangent, z) vector in the grid frame.
   std::array<double, 3> to_grid_frame(const std::array<double, 3>& v) const;
 
-  /// The signed distance from the interface, s = x cos(angle) + y sin(angle).
+  /// The signed distance from the interface, s = x cos(angle) + y sin(angle),
+  /// wrapped into one period when SlabPeriod is set.
   template <typename DataType>
   DataType signed_distance(const tnsr::I<DataType, 3>& x) const;
+
+  /// Is the point in the left state? (s <= 0, or |s| < SlabHalfWidth)
+  bool is_left(double s) const {
+    return slab_half_width_.has_value() ? std::abs(s) < *slab_half_width_
+                                        : s <= 0.0;
+  }
 
   EquationsOfState::IdealFluid<true> equation_of_state_{};
   gr::Solutions::Minkowski<3> background_spacetime_{};
@@ -309,6 +336,8 @@ class RotatedRiemannProblem
   double lapse_ = std::numeric_limits<double>::signaling_NaN();
   double shift_ = std::numeric_limits<double>::signaling_NaN();
   double interface_angle_ = std::numeric_limits<double>::signaling_NaN();
+  std::optional<double> slab_half_width_ = std::nullopt;
+  std::optional<double> slab_period_ = std::nullopt;
 };
 
 bool operator==(const RotatedRiemannProblem& lhs,

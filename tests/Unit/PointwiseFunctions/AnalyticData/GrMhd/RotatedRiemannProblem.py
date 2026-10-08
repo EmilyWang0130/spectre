@@ -4,9 +4,14 @@
 import numpy as np
 
 
-def _is_left(x, interface_angle):
+def _is_left(x, interface_angle, slab_half_width=None, slab_period=None):
     assert len(x) == 3
-    return x[0] * np.cos(interface_angle) + x[1] * np.sin(interface_angle) <= 0.0
+    s = x[0] * np.cos(interface_angle) + x[1] * np.sin(interface_angle)
+    if slab_period is not None:
+        s -= slab_period * np.floor(s / slab_period + 0.5)
+    if slab_half_width is not None:
+        return abs(s) < slab_half_width
+    return s <= 0.0
 
 
 def _to_grid_frame(v, interface_angle):
