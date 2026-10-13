@@ -620,6 +620,19 @@ void pluto_dg_boundary_terms(
     // 3-VELOCITY, not W*v: PLUTO forms its Lorentz factor internally as
     // g2 = 1/(1 - v.v) (mappers.c PrimToCons). The hand-ported solver took
     // W*v here, so this is a genuine difference in what gets passed.
+    // PLUTO's GLM_Solve replaces BOTH sides' normal field (and psi) by the
+    // face values of the 2x2 GLM Riemann problem before any Riemann solver
+    // runs, so hlld.c / hllx.c always see one B_n. Handing them the two sides'
+    // own B_n (the behaviour until 2026-10-13) gives an inconsistent fan
+    // wherever [B_n] != 0; HLLD's diffusion tolerated it, the seven-wave
+    // Newton did not (a cell-scale instability in the periodic slab's slow
+    // rarefaction, with 100x PLUTO's divergence error). glm_normal_b_star is
+    // the light-speed HLL state of B_n, identical to PLUTO's Bm for c_h = 1.
+    // SPECTRE_GLM_BN_STAR=0 restores the old behaviour for comparison.
+    static const bool use_glm_bn_star = [] {
+      const char* e = std::getenv("SPECTRE_GLM_BN_STAR");
+      return e == nullptr or std::atoi(e) != 0;
+    }();
     auto push = [&](std::vector<double>* out, const Scalar<DataVector>& rho,
                     const tnsr::I<DataVector, 3, Frame::Inertial>& vel,
                     const tnsr::I<DataVector, 3, Frame::Inertial>& bfield,
@@ -628,7 +641,7 @@ void pluto_dg_boundary_terms(
       out->push_back(proj(vel, 0));
       out->push_back(proj(vel, 1));
       out->push_back(proj(vel, 2));
-      out->push_back(proj(bfield, 0));
+      out->push_back(use_glm_bn_star ? glm_normal_b_star[i] : proj(bfield, 0));
       out->push_back(proj(bfield, 1));
       out->push_back(proj(bfield, 2));
       out->push_back(get(press)[i]);
