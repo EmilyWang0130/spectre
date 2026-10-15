@@ -542,20 +542,21 @@ void pluto_dg_boundary_terms(
       glm_normal_b_flux = (lambda_max * nfbn_int + lambda_min * nfbn_ext +
                            lambda_max * lambda_min * (bn_ext - bn_int)) /
                           dl;
-      if (force_common_normal_field) {
-        // The exterior normal flux is nfbn_ext = -F_Bn,R. Thus the HLL
-        // state (SR UR - SL UL + F_L - F_R) / (SR - SL) uses the SUM of
-        // the two outward normal fluxes. D2-R requires this common Bn state
-        // in both the seven-state fan and its GLM energy pairing.
-        glm_normal_b_star = (lambda_max * bn_ext - lambda_min * bn_int +
-                             nfbn_int + nfbn_ext) /
-                            dl;
-      } else {
-        // Preserve the existing PLUTO adapters' default arithmetic.
-        glm_normal_b_star = (lambda_max * bn_ext - lambda_min * bn_int +
-                             nfbn_int - nfbn_ext) /
-                            dl;
-      }
+      // The HLL intermediate state is U* = (SR UR - SL UL + F_L - F_R)/(SR - SL)
+      // with both fluxes along the INTERIOR normal. The packaged exterior
+      // normal flux carries the exterior normal, nfbn_ext = -F_R . n_int (that
+      // is why the HLL flux above takes lambda_min * nfbn_ext), so the state
+      // needs the SUM nfbn_int + nfbn_ext. In flat space F_Bn . n = Phi, so this
+      // is PLUTO's GLM_Solve value Bm = (Bn_L + Bn_R)/2 - (Phi_R - Phi_L)/(2 c_h)
+      // for c_h = 1. Until 2026-10-15 this read nfbn_int - nfbn_ext, i.e. the
+      // sign of Phi_R was wrong (found by the task-3 session's unequal-Bn,
+      // nonzero-Phi test; the error is 2 Phi_R/(SR - SL), zero wherever Phi = 0,
+      // so every 1-D tube is unaffected and only 2-D GLM runs since 72620d6e2
+      // saw it). The same expression now serves every PLUTO-backed solver;
+      // `force_common_normal_field` only forces its use below.
+      glm_normal_b_star = (lambda_max * bn_ext - lambda_min * bn_int +
+                           nfbn_int + nfbn_ext) /
+                          dl;
     }
     for (size_t i = 0; i < 3; ++i) {
       const DataVector bt_int = tilde_b_int.get(i) - bn_int * n.get(i);
