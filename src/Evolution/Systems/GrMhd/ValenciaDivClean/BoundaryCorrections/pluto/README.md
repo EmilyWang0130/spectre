@@ -181,3 +181,20 @@ The solver's design, derivation and validation (face by face against a numpy
 reference, PLUTO's RMHD shock-tube suite, the low-beta blast) are documented in
 the research notes (`notes/projects/active/hllx_rmhd/hllx_in_pluto.md`).
 
+## Private D2-R correctness bridge
+
+`spectre_d2r_core.c/.h` provides the isolated seven-state reduced-energy API
+used by `PlutoD2R`. `d2r_sr_context.c` and `d2r_sr_face.h` define private
+thread-local contexts and fixed-helper records. The existing shim continues
+to own the vendor globals. Context capacity is at least 1026 before lazy
+native allocations, matching the legacy 1024-interface batch capacity.
+
+`d2r_hlld_fixed.c` derives from the research source_v5 pressure-coherent
+helper, with only thread-local scratch-storage changes to its numerical C
+source. It refreshes the final intermediate states and refines a selected
+sign-changing pressure-history bracket to represented precision; unavailable
+refinement explicitly uses HLL. Native `hlld.c` remains the control and is
+not replaced. The D2-R C++ kernel serializes calls in this first correctness
+backend. See [the implementation note](../D2R/README.md) for state ordering,
+precision, fallback, threading and evolution limitations.
+

@@ -398,7 +398,8 @@ void pluto_dg_boundary_terms(
     const Scalar<DataVector>& pressure_ext,
     const Scalar<DataVector>& /*lorentz_factor_ext*/,
     const Scalar<DataVector>& /*specific_internal_energy_ext*/,
-    const dg::Formulation dg_formulation) {
+    const dg::Formulation dg_formulation, const bool force_common_normal_field,
+    const bool force_glm_energy_pair, const bool force_mass_consistent_ye) {
   const size_t num_points = get(tilde_d_int).size();
   const bool weak = dg_formulation == dg::Formulation::WeakInertial;
 
@@ -412,9 +413,10 @@ void pluto_dg_boundary_terms(
   // be, so the HLLD *logic* is applied to the MHD part and the GLM part is
   // carried separately at +/-c.
   //
-  // Note this baseline is not merely cosmetic for HLLD: it supplies TildeYe and
-  // TildePhi outright, it seeds TildeD/S/B/Tau, and it is what a point falls
-  // back to if the fan solve returns something non-finite.
+  // Note this baseline is not merely cosmetic for HLLD: it supplies TildePhi
+  // outright, seeds TildeYe/D/S/B/Tau, and is what a point falls back to if the
+  // fan solve returns something non-finite. Legacy callers retain this TildeYe
+  // flux; D2-R requests passive-scalar transport by the accepted mass flux.
   DataVector lambda_max = max(0.0, get(largest_outgoing_char_speed_int),
                               -get(largest_ingoing_char_speed_ext));
   DataVector lambda_min = min(0.0, get(largest_ingoing_char_speed_int),
@@ -540,9 +542,20 @@ void pluto_dg_boundary_terms(
       glm_normal_b_flux = (lambda_max * nfbn_int + lambda_min * nfbn_ext +
                            lambda_max * lambda_min * (bn_ext - bn_int)) /
                           dl;
-      glm_normal_b_star = (lambda_max * bn_ext - lambda_min * bn_int +
-                           nfbn_int - nfbn_ext) /
-                          dl;
+      if (force_common_normal_field) {
+        // The exterior normal flux is nfbn_ext = -F_Bn,R. Thus the HLL
+        // state (SR UR - SL UL + F_L - F_R) / (SR - SL) uses the SUM of
+        // the two outward normal fluxes. D2-R requires this common Bn state
+        // in both the seven-state fan and its GLM energy pairing.
+        glm_normal_b_star = (lambda_max * bn_ext - lambda_min * bn_int +
+                             nfbn_int + nfbn_ext) /
+                            dl;
+      } else {
+        // Preserve the existing PLUTO adapters' default arithmetic.
+        glm_normal_b_star = (lambda_max * bn_ext - lambda_min * bn_int +
+                             nfbn_int - nfbn_ext) /
+                            dl;
+      }
     }
     for (size_t i = 0; i < 3; ++i) {
       const DataVector bt_int = tilde_b_int.get(i) - bn_int * n.get(i);
@@ -641,7 +654,9 @@ void pluto_dg_boundary_terms(
       out->push_back(proj(vel, 0));
       out->push_back(proj(vel, 1));
       out->push_back(proj(vel, 2));
-      out->push_back(use_glm_bn_star ? glm_normal_b_star[i] : proj(bfield, 0));
+      out->push_back((use_glm_bn_star or force_common_normal_field)
+                         ? glm_normal_b_star[i]
+                         : proj(bfield, 0));
       out->push_back(proj(bfield, 1));
       out->push_back(proj(bfield, 2));
       out->push_back(get(press)[i]);
@@ -700,6 +715,27 @@ void pluto_dg_boundary_terms(
       continue;  // keep HLL if PLUTO returned a non-finite result
     }
     const size_t i = pt_index[k];
+    double g_ye = 0.0;
+    if (force_mass_consistent_ye) {
+      // DYe is a passive conserved density: advect the upwind concentration
+      // with the SAME accepted numerical mass flux. In particular, constant
+      // Ye must obey G(DYe) = Ye G(D). Retaining an independent HLL DYe flux
+      // after replacing G(D) would violate that identity. No change is made
+      // to any field until this concentration and its flux are usable.
+      const double upwind_d =
+          f[0] >= 0.0 ? get(tilde_d_int)[i] : get(tilde_d_ext)[i];
+      const double upwind_dye =
+          f[0] >= 0.0 ? get(tilde_ye_int)[i] : get(tilde_ye_ext)[i];
+      if (not std::isfinite(upwind_d) or upwind_d <= 0.0 or
+          not std::isfinite(upwind_dye)) {
+        continue;  // retain the complete HLL baseline
+      }
+      const double upwind_ye = upwind_dye / upwind_d;
+      g_ye = upwind_ye * f[0];
+      if (not std::isfinite(upwind_ye) or not std::isfinite(g_ye)) {
+        continue;
+      }
+    }
     const std::array<double, 3>& n = triad_n[k];
     const std::array<double, 3>& t1 = triad_t1[k];
     const std::array<double, 3>& t2 = triad_t2[k];
@@ -730,6 +766,10 @@ void pluto_dg_boundary_terms(
     const double sub_d = weak ? 0.0 : get(normal_dot_flux_tilde_d_int)[i];
     const double sub_tau = weak ? 0.0 : get(normal_dot_flux_tilde_tau_int)[i];
     get(*boundary_correction_tilde_d)[i] = g_d - sub_d;
+    if (force_mass_consistent_ye) {
+      get(*boundary_correction_tilde_ye)[i] =
+          g_ye - (weak ? 0.0 : get(normal_dot_flux_tilde_ye_int)[i]);
+    }
     get(*boundary_correction_tilde_tau)[i] = g_tau - sub_tau;
     for (size_t q = 0; q < 3; ++q) {
       boundary_correction_tilde_s->get(q)[i] =
@@ -758,7 +798,7 @@ void pluto_dg_boundary_terms(
       const char* e = std::getenv("SPECTRE_GLM_PAIR");
       return e == nullptr ? 0 : std::atoi(e);
     }();
-    if (glm_pair != 0) {
+    if (glm_pair != 0 or force_glm_energy_pair) {
       const auto& n = interface_unit_normal_int;
       for (size_t i = 0; i < num_points; ++i) {
         // metric_flatness is |lapse - 1| + |shift| + |gamma - delta|: zero in flat space

@@ -5,6 +5,9 @@
 spectre_target_sources(
   ${LIBRARY}
   PRIVATE
+  D2R/Flux.cpp
+  D2R/SlowModes.cpp
+  D2R/State.cpp
   Hll.cpp
   Hllc.cpp
   HllcGr.cpp
@@ -12,6 +15,7 @@ spectre_target_sources(
   Hllem.cpp
   HllemHydroYe.cpp
   Marquina.cpp
+  PlutoD2R.cpp
   PlutoHllc.cpp
   PlutoHlld.cpp
   PlutoHllx.cpp
@@ -22,6 +26,10 @@ spectre_target_headers(
   ${LIBRARY}
   INCLUDE_DIRECTORY ${CMAKE_SOURCE_DIR}/src
   HEADERS
+  D2R/Flux.hpp
+  D2R/SlowModes.hpp
+  D2R/State.hpp
+  D2R/Types.hpp
   Factory.hpp
   HatTransform.hpp
   Hll.hpp
@@ -32,6 +40,7 @@ spectre_target_headers(
   Hllem.hpp
   HllemHydroYe.hpp
   Marquina.hpp
+  PlutoD2R.hpp
   PlutoHllc.hpp
   PlutoHlld.hpp
   PlutoHllx.hpp
@@ -56,6 +65,7 @@ set(PLUTO_HLLD_SOURCES
   pluto/math_misc.c pluto/math_qr_decomp.c pluto/math_root_finders.c
   pluto/output_log.c pluto/rmhd_energy_solve.c pluto/rmhd_pressure_fix.c
   pluto/set_indexes.c pluto/tools.c pluto/pluto_hlld_shim.c
+  pluto/d2r_hlld_fixed.c pluto/d2r_sr_context.c pluto/spectre_d2r_core.c
   )
 
 add_library(PlutoHlldC STATIC ${PLUTO_HLLD_SOURCES})
@@ -75,6 +85,15 @@ target_include_directories(
 
 # Upstream PLUTO is not warning-clean under SpECTRE's flags. We do not patch
 # third-party code to silence warnings; our own shim is small and reviewed.
-target_compile_options(PlutoHlldC PRIVATE -w)
+target_compile_options(PlutoHlldC PRIVATE -w -ffp-contract=off)
+
+# The D2-R correctness backend relies on represented affine flux arithmetic.
+# Do not inherit reciprocal approximations from the default optimized flags.
+set_source_files_properties(
+  D2R/Flux.cpp D2R/SlowModes.cpp D2R/State.cpp
+  PROPERTIES
+  COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off"
+  SKIP_PRECOMPILE_HEADERS ON
+  )
 
 target_link_libraries(${LIBRARY} PRIVATE PlutoHlldC)

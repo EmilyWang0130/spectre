@@ -320,6 +320,8 @@ using PlutoFluxFunction = int (*)(int, const double*, const double*, double,
 /// call -- the frame rotation, the GLM/MHD split, the HLL baseline and every
 /// fallback to it -- does not depend on which PLUTO solver is used, so
 /// `PlutoHllc` calls this with PLUTO's HLLC instead of duplicating it.
+/// The trailing switches opt D2-R into common GLM Bn, energy pairing and
+/// passive Ye transport by its accepted mass flux; legacy defaults are kept.
 void pluto_dg_boundary_terms(
     PlutoFluxFunction pluto_solver,
     gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
@@ -376,6 +378,8 @@ void pluto_dg_boundary_terms(
     const Scalar<DataVector>& pressure_ext,
     const Scalar<DataVector>& /*lorentz_factor_ext*/,
     const Scalar<DataVector>& /*specific_internal_energy_ext*/,
-    dg::Formulation dg_formulation);
+    dg::Formulation dg_formulation, bool force_common_normal_field = false,
+    bool force_glm_energy_pair = false,
+    bool force_mass_consistent_ye = false);
 }  // namespace detail
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections
