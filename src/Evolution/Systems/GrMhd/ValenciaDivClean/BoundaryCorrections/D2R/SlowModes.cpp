@@ -6,10 +6,12 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstddef>
 #include <exception>
 #include <limits>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 #include <boost/math/special_functions/fpclassify.hpp>
@@ -208,6 +210,36 @@ struct FilterWeights {
   bool bound_active = false;
 };
 
+// SPECTRE_D2R_WEIGHT selects the family-filter weight (2026-10-15, task 2's
+// integration tests). Unset or "polynomial": the audited weight below, whose
+// rest-frame form is (b_A/f^2) (1 - c_s^2/f^2)^2 (1 - s^2/f^2). On the warm
+// relativistic large-B_x tube (c_s^2/f^2 = 0.17) that is 0.54 where the cold
+// tubes give 0.998, and D2-R recovers only half of the seven-wave gain there.
+//   "linear":      w = (b_A/f^2) (1 - c_s^2/f^2) = (mu_s^2/c_s^2)(1 - c_s^2/mu_f^2):
+//                  the same zeros (B_n -> 0, slow = Alfven at c_s^2 = f^2, the
+//                  umbilic), each simple instead of repeated; same cold limit;
+//                  0 <= w <= 1 by f^2 >= b_A and f^2 >= c_s^2. No constants.
+//   "roe-balsara": w = (b_A/f^2) alpha_s^2 with alpha_s^2 = (f^2 - c_s^2)/(f^2 - s^2),
+//                  the standard slow-magnetosonic normalization factor; 1/2 at
+//                  the umbilic by continuity instead of 0.
+// Both use s^2 f^2 = c_s^2 b_A (the rest-frame dispersion relation) to write
+// b_A/f^2 as mu_s^2/c_s^2. Per side: mu_s and mu_f of that side.
+enum class WeightLaw { Polynomial, Linear, RoeBalsara };
+const WeightLaw weight_law = [] {
+  const char* e = std::getenv("SPECTRE_D2R_WEIGHT");
+  if (e == nullptr) {
+    return WeightLaw::Polynomial;
+  }
+  const std::string law(e);
+  if (law == "linear") {
+    return WeightLaw::Linear;
+  }
+  if (law == "roe-balsara") {
+    return WeightLaw::RoeBalsara;
+  }
+  return WeightLaw::Polynomial;
+}();
+
 FilterWeights family_weights(const PhysicalState& state,
                              const Spectrum& spectrum) {
   std::array<Real, 7> mu{};
@@ -215,6 +247,26 @@ FilterWeights family_weights(const PhysicalState& state,
     const Real rest_frequency = state.lorentz * spectrum.gap[k];
     mu[k] = rest_frequency /
             sqrt(1 - square(spectrum.lambda[k]) + square(rest_frequency));
+  }
+  if (weight_law != WeightLaw::Polynomial) {
+    FilterWeights result{};
+    const Real& cs2 = state.sound_squared;
+    const std::array<std::pair<size_t, size_t>, 2> sides{
+        std::pair<size_t, size_t>{SlowMinus, FastMinus},
+        std::pair<size_t, size_t>{SlowPlus, FastPlus}};
+    for (size_t j = 0; j < 2; ++j) {
+      const Real s2 = square(mu[sides[j].first]);
+      const Real f2 = square(mu[sides[j].second]);
+      Real w = (s2 / cs2) * (weight_law == WeightLaw::Linear
+                                 ? (1 - cs2 / f2)
+                                 : (f2 - cs2) / (f2 - s2));
+      if (not finite(w)) {
+        throw std::runtime_error("filter_weight_arithmetic_unsupported");
+      }
+      // The bounds hold analytically; round-off may overshoot them by an ulp.
+      result.weights[j] = std::min(std::max(w, Real(0)), Real(1));
+    }
+    return result;
   }
   const auto polynomial = [&mu](const Real& z) -> Real {
     return square(z) * square(z - mu[AlfvenMinus]) *
