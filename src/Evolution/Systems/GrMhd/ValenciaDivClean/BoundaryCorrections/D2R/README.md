@@ -99,3 +99,22 @@ Evolved SR shocktubes, multidimensional evolution, GR, general/tabulated EOS,
 full GLM entropy analysis and neutron-star/BNS validation remain separate
 requirements. Build `Test_ValenciaDivClean` and run the PlutoD2R tests with
 `ctest --output-on-failure` in a normally configured SpECTRE build.
+
+## Integration switches (task 2, 2026-10-15)
+
+Two environment variables, both off when unset, added when the kernel was merged
+into `hydroYe-mhd-tov` and first evolved:
+
+- `SPECTRE_D2R_STATS=N` prints a cost line to stderr every N batch calls: points,
+  solves (equal / active / unsupported), near-equal faces, memo hits, kernel
+  seconds against wall seconds, slowest face.
+- `SPECTRE_D2R_ROUNDOFF_TOL=tol` returns the native HLLD flux of the pair, with no
+  slow-mode response, on faces whose states differ by at most `tol` relative in
+  every component (rho and p by themselves, velocities by c, the field by |B|).
+  SpECTRE's FD slab is transversely uniform only to ~1e-12, so a "1-D" tube
+  otherwise pays a full 0.15 s solve on every transverse face. The tube arms use
+  1e-10. This is a round-off floor, not a physical activation band; with it
+  unset the kernel is exactly the audited one.
+
+Independent of these, bit-identical left and right states return their physical
+flux at once, and bit-identical faces within one batch are solved once.

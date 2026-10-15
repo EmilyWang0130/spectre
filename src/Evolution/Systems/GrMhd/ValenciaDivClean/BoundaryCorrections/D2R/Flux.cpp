@@ -256,7 +256,7 @@ thread_local PlutoD2RDiagnostics diagnostics{};
 // no flux depends on it. (2026-10-15, task 2's integration tests.)
 struct Stats {
   long calls = 0, points = 0, solves = 0, memo_hits = 0, equal = 0, active = 0,
-       unsupported = 0;
+       unsupported = 0, near_equal = 0;
   double kernel_seconds = 0., max_face_seconds = 0.;
   std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 };
@@ -265,6 +265,35 @@ const long stats_every = [] {
   const char* e = std::getenv("SPECTRE_D2R_STATS");
   return e == nullptr ? 0L : std::atol(e);
 }();
+
+// SPECTRE_D2R_ROUNDOFF_TOL (unset or 0 = off): a face whose two states differ
+// by no more than this relative amount in every component gets the native
+// HLLD flux of the pair (one C call) and no slow-mode response. SpECTRE's FD
+// slab is transversely uniform only to ~1e-12 (HLLD and HLLx never notice),
+// so without this every y/z face of a "1-D" tube is a distinct 0.15 s solve:
+// ~60x the x-faces. A response to a 1e-12 jump is below round-off anyway.
+// Scales: rho and p by themselves, velocities by c = 1, the field by |B|.
+// (2026-10-15, task 2's integration tests.)
+const double roundoff_tol = [] {
+  const char* e = std::getenv("SPECTRE_D2R_ROUNDOFF_TOL");
+  return e == nullptr ? 0.0 : std::atof(e);
+}();
+
+bool near_equal(const double* l, const double* r, const double tol) {
+  // P = (rho, vn, vt, vb, Bn, Bt, Bb, p)
+  const double b_scale =
+      std::max(std::sqrt(l[4] * l[4] + l[5] * l[5] + l[6] * l[6]),
+               std::sqrt(r[4] * r[4] + r[5] * r[5] + r[6] * r[6]));
+  const std::array<double, 8> scale{std::max(std::abs(l[0]), std::abs(r[0])),
+                                    1., 1., 1., b_scale, b_scale, b_scale,
+                                    std::max(std::abs(l[7]), std::abs(r[7]))};
+  for (int i = 0; i < 8; ++i) {
+    if (std::abs(l[i] - r[i]) > tol * scale[i]) {
+      return false;
+    }
+  }
+  return true;
+}
 }  // namespace
 
 extern "C" void pluto_d2r_reset_diagnostics() { diagnostics = {}; }
@@ -326,6 +355,27 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
     try {
       const State pl{l[0], l[1], l[2], l[3], l[7], l[5], l[6]};
       const State pr{r[0], r[1], r[2], r[3], r[7], r[5], r[6]};
+      if (roundoff_tol > 0. and pl != pr and near_equal(l, r, roundoff_tol)) {
+        // Round-off-level jump: the baseline (native HLLD of the pair), no
+        // response. Falls through to the full path if the core call fails.
+        const auto base = core(0, pl, pr, l[4], gamma);
+        if (base.status() == 1 and finite(base.flux)) {
+          out[0] = base.flux[0];
+          out[1] = base.flux[1];
+          out[2] = base.flux[2];
+          out[3] = base.flux[3];
+          out[4] = 0.;
+          out[5] = base.flux[5];
+          out[6] = base.flux[6];
+          out[7] = base.flux[4];
+          pressure[k] = 0.;
+          ++supported;
+          ++diagnostics.supported;
+          ++stats.near_equal;
+          seen.emplace(key, Seen{k, true, false, false});
+          continue;
+        }
+      }
       const auto t0 = std::chrono::steady_clock::now();
       const auto face = solve_face(pl, pr, l[4], gamma);
       const double dt = std::chrono::duration<double>(
@@ -370,11 +420,13 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
                             .count();
     std::fprintf(stderr,
                  "D2R stats: %ld calls, %ld points, %ld solves (%ld equal, "
-                 "%ld active, %ld unsupported), %ld memo hits; kernel %.1f s "
-                 "of %.1f s wall, max face %.3f s\n",
+                 "%ld active, %ld unsupported), %ld near-equal (tol %g), "
+                 "%ld memo hits; kernel %.1f s of %.1f s wall, max face "
+                 "%.3f s\n",
                  stats.calls, stats.points, stats.solves, stats.equal,
-                 stats.active, stats.unsupported, stats.memo_hits,
-                 stats.kernel_seconds, wall, stats.max_face_seconds);
+                 stats.active, stats.unsupported, stats.near_equal,
+                 roundoff_tol, stats.memo_hits, stats.kernel_seconds, wall,
+                 stats.max_face_seconds);
     std::fflush(stderr);
   }
   return supported;
