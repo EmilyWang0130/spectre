@@ -266,7 +266,6 @@ const long stats_every = [] {
   return e == nullptr ? 0L : std::atol(e);
 }();
 }  // namespace
-namespace {
 
 extern "C" void pluto_d2r_reset_diagnostics() { diagnostics = {}; }
 extern "C" PlutoD2RDiagnostics pluto_d2r_diagnostics() { return diagnostics; }
