@@ -5,8 +5,11 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <exception>
 #include <limits>
+#include <map>
 #include <mutex>
 
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/D2R/SlowModes.hpp"
@@ -103,6 +106,20 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   const bool equal = left == right;
   if (equal) {
     candidate = base.fl;
+    // Identical primitives: the flux is this state's physical flux and the
+    // slow-mode response is identically zero (G = W_s (U_R - U_L) = 0). The
+    // original path still built the two-state entropy model -- two 160-digit
+    // recoveries -- and ran the (identity) repair before returning this same
+    // flux, so the uniform transverse faces of a 1-D tube on SpECTRE's 3-D
+    // slab cost as much as real faces (hours per step). Return it directly
+    // when it is finite; a non-finite map falls through to the original path.
+    // (2026-10-15, task 2's integration of the kernel.)
+    if (finite(candidate)) {
+      result.supported = true;
+      result.flux = result.baseline = candidate;
+      result.status = "equal_state_physical_flux";
+      return result;
+    }
   } else if (not result.causal_fallback and base.bounds[0] < 0. and
              base.bounds[1] > 0.) {
     const auto refined = core(1, left, right, bn, gamma, base.bounds);
@@ -232,6 +249,18 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
     return 0;
   }
   int supported = 0;
+  // Faces with bit-identical inputs inside one batch share a single solve: on
+  // SpECTRE's 3-D slab a 1-D tube presents every x-face 25 times (the 5 x 5
+  // transverse points of a 3-point element), and the kernel is deterministic,
+  // so the copies are exact. Keyed on the bit patterns of gamma and the two
+  // 8-component states; NaN inputs never reach the map. (2026-10-15)
+  struct Seen {
+    int index;
+    bool supported;
+    bool active;
+    bool causal_fallback;
+  };
+  std::map<std::array<std::uint64_t, 17>, Seen> seen;
   for (int k = 0; k < npts; ++k) {
     ++diagnostics.faces;
     auto* out = flux + 8 * k;
@@ -243,6 +272,24 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
       ++diagnostics.unsupported;
       continue;
     }
+    std::array<std::uint64_t, 17> key{};
+    std::memcpy(key.data(), &gamma, sizeof(double));
+    std::memcpy(key.data() + 1, l, 8 * sizeof(double));
+    std::memcpy(key.data() + 9, r, 8 * sizeof(double));
+    if (const auto it = seen.find(key); it != seen.end()) {
+      const Seen& first = it->second;
+      std::copy_n(flux + 8 * first.index, 8, out);
+      pressure[k] = pressure[first.index];
+      diagnostics.causal_fallback += first.causal_fallback;
+      if (first.supported) {
+        ++supported;
+        ++diagnostics.supported;
+        diagnostics.active += first.active;
+      } else {
+        ++diagnostics.unsupported;
+      }
+      continue;
+    }
     try {
       const State pl{l[0], l[1], l[2], l[3], l[7], l[5], l[6]};
       const State pr{r[0], r[1], r[2], r[3], r[7], r[5], r[6]};
@@ -250,8 +297,10 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
       diagnostics.causal_fallback += face.causal_fallback;
       if (not face.supported or not finite(face.flux)) {
         ++diagnostics.unsupported;
+        seen.emplace(key, Seen{k, false, false, face.causal_fallback});
         continue;
       }
+      seen.emplace(key, Seen{k, true, face.active, face.causal_fallback});
       out[0] = face.flux[0];
       out[1] = face.flux[1];
       out[2] = face.flux[2];
