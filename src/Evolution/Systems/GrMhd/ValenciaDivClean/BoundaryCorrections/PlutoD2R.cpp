@@ -139,8 +139,12 @@ double PlutoD2R::dg_package_data(
       supported[pt] = false;
     } else {
       const double gamma = 1.0 + p / (rho * eps);
+      // Gamma is recomputed from p, rho, eps, so Gamma = 2 (Balsara 1) can land
+      // an ulp above 2; a face would then silently drop to light-speed HLL.
+      // Allow a relative 1e-12, the same slack the shared adapter uses when it
+      // checks that the batch's Gamma is uniform.
       supported[pt] = supported[pt] and std::isfinite(gamma) and gamma > 1.0 and
-                      gamma <= 2.0;
+                      gamma <= 2.0 * (1.0 + 1.0e-12);
     }
     all_supported = all_supported and supported[pt];
   }

@@ -204,6 +204,18 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   if (k0.status() != 1 or kc.status() != 1) {
     return keep("fixed_core_unusable");
   }
+  // The response T = V_c - V_0 compares two fixed-bound solves that must come
+  // from the same branch of the helper (an HLLD fan, or its HLL fallback): if
+  // the original and the modified inputs land on different branches, T carries
+  // the O(dU) HLLD-HLL difference instead of an O(beta G) slow response and
+  // only the entropy cap would bound it. Keep the baseline then. (Review of
+  // 2026-10-15; integers[5] is the helper's outcome code, as for
+  // baseline_outcome above.)
+  if (k0.integers[5] != kc.integers[5] or
+      (result.baseline_outcome >= 0 and
+       k0.integers[5] != result.baseline_outcome)) {
+    return keep("baseline_outcome_mismatch");
+  }
   for (const auto* encoded : {&k0.ul, &k0.ur, &kc.ul, &kc.ur}) {
     if (not admissibility(*encoded, bn, gamma).admissible) {
       return keep("helper_encoded_input_unsupported");
@@ -316,6 +328,8 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
     } catch (const std::exception&) {
       // A numerical-domain failure must select the outer HLL fallback rather
       // than escape through the C function-pointer interface.
+      ++diagnostics.unsupported;
+    } catch (...) {
       ++diagnostics.unsupported;
     }
   }

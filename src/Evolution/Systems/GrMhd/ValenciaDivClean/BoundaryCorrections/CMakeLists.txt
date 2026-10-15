@@ -89,8 +89,12 @@ target_compile_options(PlutoHlldC PRIVATE -w -ffp-contract=off)
 
 # The D2-R correctness backend relies on represented affine flux arithmetic.
 # Do not inherit reciprocal approximations from the default optimized flags.
+# TARGET_DIRECTORY: the target is created in the parent directory, so without it
+# these properties never applied (compile_commands.json showed the PCH and no
+# -ffp-contract=off on the D2R sources; found in review, 2026-10-15).
 set_source_files_properties(
   D2R/Flux.cpp D2R/SlowModes.cpp D2R/State.cpp
+  TARGET_DIRECTORY ${LIBRARY}
   PROPERTIES
   COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off"
   SKIP_PRECOMPILE_HEADERS ON

@@ -265,7 +265,9 @@ LineResult line(bool supported, const std::string& reason,
 }  // namespace
 
 bool valid_gamma(double gamma) {
-  return std::isfinite(gamma) && 1 < gamma && gamma <= 2;
+  // Relative 1e-12 above 2: the index arrives as 1 + p/(rho eps) and Gamma = 2
+  // can round an ulp high (see PlutoD2R::dg_package_data).
+  return std::isfinite(gamma) && 1 < gamma && gamma <= 2 * (1 + 1e-12);
 }
 bool physical_primitive(const State& p, double bn, double gamma) {
   if (!finite(p) || !std::isfinite(bn) || !valid_gamma(gamma) || !(p[0] > 0) ||
