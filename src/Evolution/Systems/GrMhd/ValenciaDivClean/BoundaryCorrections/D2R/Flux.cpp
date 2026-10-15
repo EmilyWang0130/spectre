@@ -4,8 +4,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -247,7 +250,23 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
 
 namespace {
 thread_local PlutoD2RDiagnostics diagnostics{};
-}
+
+// Cost statistics, printed to stderr every SPECTRE_D2R_STATS calls of
+// pluto_d2r_flux (environment variable; unset or 0 = silent). Diagnostic only;
+// no flux depends on it. (2026-10-15, task 2's integration tests.)
+struct Stats {
+  long calls = 0, points = 0, solves = 0, memo_hits = 0, equal = 0, active = 0,
+       unsupported = 0;
+  double kernel_seconds = 0., max_face_seconds = 0.;
+  std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+};
+thread_local Stats stats{};
+const long stats_every = [] {
+  const char* e = std::getenv("SPECTRE_D2R_STATS");
+  return e == nullptr ? 0L : std::atol(e);
+}();
+}  // namespace
+namespace {
 
 extern "C" void pluto_d2r_reset_diagnostics() { diagnostics = {}; }
 extern "C" PlutoD2RDiagnostics pluto_d2r_diagnostics() { return diagnostics; }
@@ -273,6 +292,8 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
     bool causal_fallback;
   };
   std::map<std::array<std::uint64_t, 17>, Seen> seen;
+  ++stats.calls;
+  stats.points += npts;
   for (int k = 0; k < npts; ++k) {
     ++diagnostics.faces;
     auto* out = flux + 8 * k;
@@ -289,6 +310,7 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
     std::memcpy(key.data() + 1, l, 8 * sizeof(double));
     std::memcpy(key.data() + 9, r, 8 * sizeof(double));
     if (const auto it = seen.find(key); it != seen.end()) {
+      ++stats.memo_hits;
       const Seen& first = it->second;
       std::copy_n(flux + 8 * first.index, 8, out);
       pressure[k] = pressure[first.index];
@@ -305,7 +327,17 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
     try {
       const State pl{l[0], l[1], l[2], l[3], l[7], l[5], l[6]};
       const State pr{r[0], r[1], r[2], r[3], r[7], r[5], r[6]};
+      const auto t0 = std::chrono::steady_clock::now();
       const auto face = solve_face(pl, pr, l[4], gamma);
+      const double dt = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - t0)
+                            .count();
+      ++stats.solves;
+      stats.kernel_seconds += dt;
+      stats.max_face_seconds = std::max(stats.max_face_seconds, dt);
+      stats.equal += (pl == pr);
+      stats.active += face.active;
+      stats.unsupported += not face.supported;
       diagnostics.causal_fallback += face.causal_fallback;
       if (not face.supported or not finite(face.flux)) {
         ++diagnostics.unsupported;
@@ -332,6 +364,19 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
     } catch (...) {
       ++diagnostics.unsupported;
     }
+  }
+  if (stats_every > 0 and stats.calls % stats_every == 0) {
+    const double wall = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - stats.start)
+                            .count();
+    std::fprintf(stderr,
+                 "D2R stats: %ld calls, %ld points, %ld solves (%ld equal, "
+                 "%ld active, %ld unsupported), %ld memo hits; kernel %.1f s "
+                 "of %.1f s wall, max face %.3f s\n",
+                 stats.calls, stats.points, stats.solves, stats.equal,
+                 stats.active, stats.unsupported, stats.memo_hits,
+                 stats.kernel_seconds, wall, stats.max_face_seconds);
+    std::fflush(stderr);
   }
   return supported;
 }
