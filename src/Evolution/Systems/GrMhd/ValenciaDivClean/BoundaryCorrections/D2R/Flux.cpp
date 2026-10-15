@@ -14,6 +14,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <vector>
 
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/D2R/SlowModes.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/D2R/State.hpp"
@@ -256,7 +257,7 @@ thread_local PlutoD2RDiagnostics diagnostics{};
 // no flux depends on it. (2026-10-15, task 2's integration tests.)
 struct Stats {
   long calls = 0, points = 0, solves = 0, memo_hits = 0, equal = 0, active = 0,
-       unsupported = 0, near_equal = 0;
+       unsupported = 0, near_equal = 0, near_memo = 0;
   double kernel_seconds = 0., max_face_seconds = 0.;
   std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 };
@@ -278,6 +279,29 @@ const double roundoff_tol = [] {
   const char* e = std::getenv("SPECTRE_D2R_ROUNDOFF_TOL");
   return e == nullptr ? 0.0 : std::atof(e);
 }();
+
+// Two faces (lA, rA) and (lB, rB) whose inputs agree component by component
+// to within tol (same scales as near_equal, taken from face A) are the same
+// face at the round-off level: the second reuses the first's flux. Used by
+// the per-batch memo when SPECTRE_D2R_ROUNDOFF_TOL is set, so the 25
+// transverse copies of a 1-D tube's x-face, which SpECTRE keeps equal only to
+// ~1e-12, are one solve instead of 25.
+bool near_inputs(const double* lA, const double* rA, const double* lB,
+                 const double* rB, const double tol) {
+  const double b_scale =
+      std::max(std::sqrt(lA[4] * lA[4] + lA[5] * lA[5] + lA[6] * lA[6]),
+               std::sqrt(rA[4] * rA[4] + rA[5] * rA[5] + rA[6] * rA[6]));
+  const std::array<double, 8> scale{
+      std::max(std::abs(lA[0]), std::abs(rA[0])), 1., 1., 1., b_scale,
+      b_scale, b_scale, std::max(std::abs(lA[7]), std::abs(rA[7]))};
+  for (int i = 0; i < 8; ++i) {
+    if (std::abs(lA[i] - lB[i]) > tol * scale[i] or
+        std::abs(rA[i] - rB[i]) > tol * scale[i]) {
+      return false;
+    }
+  }
+  return true;
+}
 
 bool near_equal(const double* l, const double* r, const double tol) {
   // P = (rho, vn, vt, vb, Bn, Bt, Bb, p)
@@ -320,6 +344,8 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
     bool causal_fallback;
   };
   std::map<std::array<std::uint64_t, 17>, Seen> seen;
+  // Solved points of this batch, for the round-off-tolerance memo.
+  std::vector<Seen> representatives;
   ++stats.calls;
   stats.points += npts;
   for (int k = 0; k < npts; ++k) {
@@ -337,9 +363,7 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
     std::memcpy(key.data(), &gamma, sizeof(double));
     std::memcpy(key.data() + 1, l, 8 * sizeof(double));
     std::memcpy(key.data() + 9, r, 8 * sizeof(double));
-    if (const auto it = seen.find(key); it != seen.end()) {
-      ++stats.memo_hits;
-      const Seen& first = it->second;
+    const auto reuse = [&](const Seen& first) {
       std::copy_n(flux + 8 * first.index, 8, out);
       pressure[k] = pressure[first.index];
       diagnostics.causal_fallback += first.causal_fallback;
@@ -350,7 +374,26 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
       } else {
         ++diagnostics.unsupported;
       }
+    };
+    if (const auto it = seen.find(key); it != seen.end()) {
+      ++stats.memo_hits;
+      reuse(it->second);
       continue;
+    }
+    if (roundoff_tol > 0.) {
+      bool reused = false;
+      for (const Seen& rep : representatives) {
+        if (near_inputs(left + 8 * rep.index, right + 8 * rep.index, l, r,
+                        roundoff_tol)) {
+          ++stats.near_memo;
+          reuse(rep);
+          reused = true;
+          break;
+        }
+      }
+      if (reused) {
+        continue;
+      }
     }
     try {
       const State pl{l[0], l[1], l[2], l[3], l[7], l[5], l[6]};
@@ -373,6 +416,7 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
           ++diagnostics.supported;
           ++stats.near_equal;
           seen.emplace(key, Seen{k, true, false, false});
+          representatives.push_back(Seen{k, true, false, false});
           continue;
         }
       }
@@ -391,9 +435,12 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
       if (not face.supported or not finite(face.flux)) {
         ++diagnostics.unsupported;
         seen.emplace(key, Seen{k, false, false, face.causal_fallback});
+        representatives.push_back(Seen{k, false, false, face.causal_fallback});
         continue;
       }
       seen.emplace(key, Seen{k, true, face.active, face.causal_fallback});
+      representatives.push_back(
+          Seen{k, true, face.active, face.causal_fallback});
       out[0] = face.flux[0];
       out[1] = face.flux[1];
       out[2] = face.flux[2];
@@ -421,12 +468,12 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
     std::fprintf(stderr,
                  "D2R stats: %ld calls, %ld points, %ld solves (%ld equal, "
                  "%ld active, %ld unsupported), %ld near-equal (tol %g), "
-                 "%ld memo hits; kernel %.1f s of %.1f s wall, max face "
-                 "%.3f s\n",
+                 "%ld memo hits + %ld near-memo; kernel %.1f s of %.1f s "
+                 "wall, max face %.3f s\n",
                  stats.calls, stats.points, stats.solves, stats.equal,
                  stats.active, stats.unsupported, stats.near_equal,
-                 roundoff_tol, stats.memo_hits, stats.kernel_seconds, wall,
-                 stats.max_face_seconds);
+                 roundoff_tol, stats.memo_hits, stats.near_memo,
+                 stats.kernel_seconds, wall, stats.max_face_seconds);
     std::fflush(stderr);
   }
   return supported;

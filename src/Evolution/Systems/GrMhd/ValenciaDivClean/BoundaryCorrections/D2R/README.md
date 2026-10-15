@@ -113,8 +113,11 @@ into `hydroYe-mhd-tov` and first evolved:
   every component (rho and p by themselves, velocities by c, the field by |B|).
   SpECTRE's FD slab is transversely uniform only to ~1e-12, so a "1-D" tube
   otherwise pays a full 0.15 s solve on every transverse face. The tube arms use
-  1e-10. This is a round-off floor, not a physical activation band; with it
-  unset the kernel is exactly the audited one.
+  1e-10. With the same tolerance, points of one batch whose left and right
+  inputs agree component by component reuse the first point's flux (the 25
+  transverse copies of a tube's x-face differ at 1e-12 too). This is a
+  round-off floor, not a physical activation band; with it unset the kernel is
+  exactly the audited one.
 
 Independent of these, bit-identical left and right states return their physical
 flux at once, and bit-identical faces within one batch are solved once.
