@@ -210,34 +210,38 @@ struct FilterWeights {
   bool bound_active = false;
 };
 
-// SPECTRE_D2R_WEIGHT selects the family-filter weight (2026-10-15, task 2's
-// integration tests). Unset or "polynomial": the audited weight below, whose
-// rest-frame form is (b_A/f^2) (1 - c_s^2/f^2)^2 (1 - s^2/f^2). On the warm
-// relativistic large-B_x tube (c_s^2/f^2 = 0.17) that is 0.54 where the cold
-// tubes give 0.998, and D2-R recovers only half of the seven-wave gain there.
-//   "linear":      w = (b_A/f^2) (1 - c_s^2/f^2) = (mu_s^2/c_s^2)(1 - c_s^2/mu_f^2):
-//                  the same zeros (B_n -> 0, slow = Alfven at c_s^2 = f^2, the
-//                  umbilic), each simple instead of repeated; same cold limit;
-//                  0 <= w <= 1 by f^2 >= b_A and f^2 >= c_s^2. No constants.
-//   "roe-balsara": w = (b_A/f^2) alpha_s^2 with alpha_s^2 = (f^2 - c_s^2)/(f^2 - s^2),
-//                  the standard slow-magnetosonic normalization factor; 1/2 at
-//                  the umbilic by continuity instead of 0.
-// Both use s^2 f^2 = c_s^2 b_A (the rest-frame dispersion relation) to write
-// b_A/f^2 as mu_s^2/c_s^2. Per side: mu_s and mu_f of that side.
+// The family-filter weight. Default since 2026-10-19 (the user's decision on
+// the exact-reference tubes at 80 and 160 cells): "roe-balsara",
+//   w = (b_A/f^2) alpha_s^2,  alpha_s^2 = (f^2 - c_s^2)/(f^2 - s^2),
+// the standard slow-magnetosonic normalization factor (1/2 at the umbilic by
+// continuity). SPECTRE_D2R_WEIGHT selects the alternatives:
+//   "polynomial" (the audited weight of the Newtonian design):
+//                  (b_A/f^2) (1 - c_s^2/f^2)^2 (1 - s^2/f^2). On the warm
+//                  relativistic large-B_x tube (c_s^2/f^2 = 0.17) it is 0.54
+//                  where the cold tubes give 0.998, and D2-R recovers only half
+//                  of the seven-wave gain there (task 2, 2026-10-15).
+//   "linear":      (b_A/f^2) (1 - c_s^2/f^2) = (mu_s^2/c_s^2)(1 - c_s^2/mu_f^2):
+//                  the same zeros as the audited weight (B_n -> 0, slow = Alfven
+//                  at c_s^2 = f^2, the umbilic), each simple; ties HLLx.
+// All three use s^2 f^2 = c_s^2 b_A (the rest-frame dispersion relation) to
+// write b_A/f^2 as mu_s^2/c_s^2. Per side: mu_s and mu_f of that side.
+// Relativistic large-B_x tube against its exact solution (L1 of rho, % of the
+// exact range): 80 cells HLLD 9.81, polynomial 8.22, HLLx 6.72, linear 7.17,
+// roe-balsara 6.43; 160 cells 7.02 / 5.95 / 4.91 / 5.26 / 4.73.
 enum class WeightLaw { Polynomial, Linear, RoeBalsara };
 const WeightLaw weight_law = [] {
   const char* e = std::getenv("SPECTRE_D2R_WEIGHT");
   if (e == nullptr) {
-    return WeightLaw::Polynomial;
+    return WeightLaw::RoeBalsara;
   }
   const std::string law(e);
+  if (law == "polynomial" or law == "audited") {
+    return WeightLaw::Polynomial;
+  }
   if (law == "linear") {
     return WeightLaw::Linear;
   }
-  if (law == "roe-balsara") {
-    return WeightLaw::RoeBalsara;
-  }
-  return WeightLaw::Polynomial;
+  return WeightLaw::RoeBalsara;
 }();
 
 FilterWeights family_weights(const PhysicalState& state,

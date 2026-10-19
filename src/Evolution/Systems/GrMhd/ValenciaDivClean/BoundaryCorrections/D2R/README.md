@@ -121,3 +121,29 @@ into `hydroYe-mhd-tov` and first evolved:
 
 Independent of these, bit-identical left and right states return their physical
 flux at once, and bit-identical faces within one batch are solved once.
+
+## The family-filter weight (decided 2026-10-19)
+
+Step 4's weights `Ws` multiply the slow-family projections of the jump. The
+default is the Roe–Balsara law,
+
+    w = (b_A / f^2) * alpha_s^2,   alpha_s^2 = (f^2 - c_s^2) / (f^2 - s^2),
+
+per side with that side's rest-frame slow and fast speeds `s`, `f`, the normal
+Alfvén speed squared `b_A` and the sound speed `c_s`; `alpha_s` is the standard
+normalization factor of the slow magnetosonic eigenvectors, 1/2 at the umbilic
+by continuity. It vanishes with the normal field and at slow–Alfvén coalescence
+and is 1 where the slow wave is acoustic-like, whatever the temperature.
+`SPECTRE_D2R_WEIGHT=polynomial` restores the audited weight of the Newtonian
+design, `(b_A/f^2)(1 - c_s^2/f^2)^2 (1 - s^2/f^2)`, which halves on a warm
+plasma (c_s^2/f^2 = 0.17 on the relativistic large-B_x tube) and left D2-R with
+half of HLLx's gain there; `linear` gives `(b_A/f^2)(1 - c_s^2/f^2)`. Evidence
+(relativistic large-B_x tube against its exact GR06 solution, L1 of rho in % of
+the exact range, |x| < 0.4): 80 cells HLLD 9.81, polynomial 8.22, HLLx 6.72,
+linear 7.17, roe-balsara 6.43; 160 cells 7.02 / 5.95 / 4.91 / 5.26 / 4.73; the
+same ordering in p, v and B. What the simple zero gives up against the audited
+weight is the quadratic vanishing at slow–Alfvén coalescence: `w Pi_s` stays
+bounded there instead of going to zero, with the caps `alpha` and `beta` as the
+remaining guards. The method as it runs, step by step, is written up in
+`notes/projects/active/hlld_slow_antidiffusion/D2R_SR_METHOD.md` of the research
+workspace.
