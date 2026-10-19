@@ -66,6 +66,31 @@ HLL mass/composition pair. This behavior is enabled only for `PlutoD2R`.
 enables common `Bn` and pairing without changing legacy environment switches.
 Strong and weak DG forms use the same returned interface flux.
 
+## Two builds of the kernel (2026-10-19)
+
+The same sources are compiled twice (`Types.hpp` selects the scalar type by the
+`D2R_MULTIPRECISION` macro; the `*Mp.cpp` wrappers set it):
+
+- **double** (namespace `d2r_detail`, the default): `Real = double`; the exact
+  rational bookkeeping of the correctness backend becomes ordinary arithmetic
+  carried in `long double` and rounded once; the entropy margins are accumulated
+  in `long double` and compared against a round-off tolerance of
+  32 ε (|Δψ| + Σ|dz_i F_i|) instead of exact zero; the recovery's round-trip
+  budget is eight times the binary64 model's, because the bisection root is only
+  resolved to binary64. Everything else — the steps, the fallbacks, the weights,
+  the caps — is the same code.
+- **160-digit** (namespace `d2r_detail_mp`): task 3's original correctness backend,
+  selected at run time by `SPECTRE_D2R_PRECISION=mp` (also `160`,
+  `multiprecision`). It is the oracle: the face harness in the research workspace
+  (`notes/projects/active/hllx_rmhd/scripts/d2r_face_harness/`,
+  `harness6_double_vs_mp.cpp.txt`) runs both on stored faces and reports the
+  largest relative flux difference, the support agreement and the time per face.
+
+The `extern "C"` entry points dispatch to one of the two; the SpECTRE adapter and
+the unit tests do not know which. The paragraphs below describe the 160-digit
+backend as it was written; they apply to the double build with the
+qualifications above.
+
 ## Precision, support and cost
 
 This first compiled correctness backend uses fixed 160-digit decimal
