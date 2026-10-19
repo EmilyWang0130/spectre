@@ -8,7 +8,7 @@
 
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/D2R/Types.hpp"
 
-namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail {
+namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE {
 
 // Gamma-law, fixed common Bn, c=1. P=(rho,vn,vt,vb,p,Bt,Bb),
 // U/F=(D,mn,mt,mb,tau,Bt,Bb). Numerical high-precision support only:
@@ -103,6 +103,7 @@ struct EntropyModel {
 
   EntropyModel(const State& ul, const State& ur, double bn, double gamma);
   Real margin(const State& flux) const;
+  Real tolerance(const State& flux) const;
   LineResult repair(const State& candidate) const;
   LineResult cap(const State& baseline, const State& direction) const;
 
@@ -111,4 +112,4 @@ struct EntropyModel {
   State ur_{};
 };
 
-}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail
+}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE

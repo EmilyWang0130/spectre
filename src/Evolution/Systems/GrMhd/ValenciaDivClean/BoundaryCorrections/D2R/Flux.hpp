@@ -7,7 +7,7 @@
 
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/D2R/Types.hpp"
 
-namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail {
+namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE {
 
 // Compiled correctness backend: flat SR, gamma-law 1<Gamma<=2, common Bn.
 // Numerical entropy support is not an interval or full-update certificate.
@@ -32,7 +32,24 @@ struct FaceResult {
 FaceResult solve_face(const State& left, const State& right, double bn,
                       double gamma);
 
+}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE
+
+struct PlutoD2RDiagnostics;
+// The batch entry points of each precision build; the extern "C" functions
+// below dispatch to one of them (SPECTRE_D2R_PRECISION: unset or "double" ->
+// d2r_detail, "mp" -> the 160-digit oracle d2r_detail_mp).
+namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail {
+int pluto_d2r_flux_impl(int npts, const double* left, const double* right,
+                        double gamma, double* flux, double* pressure);
+void reset_diagnostics_impl();
+PlutoD2RDiagnostics diagnostics_impl();
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail
+namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail_mp {
+int pluto_d2r_flux_impl(int npts, const double* left, const double* right,
+                        double gamma, double* flux, double* pressure);
+void reset_diagnostics_impl();
+PlutoD2RDiagnostics diagnostics_impl();
+}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail_mp
 
 extern "C" {
 // PLUTO shim-compatible eight-component interface. P=(rho,vn,vt,vb,Bn,Bt,Bb,p),

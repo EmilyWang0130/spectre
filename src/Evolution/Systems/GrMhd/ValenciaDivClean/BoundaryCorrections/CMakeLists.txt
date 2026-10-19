@@ -6,8 +6,11 @@ spectre_target_sources(
   ${LIBRARY}
   PRIVATE
   D2R/Flux.cpp
+  D2R/FluxMp.cpp
   D2R/SlowModes.cpp
+  D2R/SlowModesMp.cpp
   D2R/State.cpp
+  D2R/StateMp.cpp
   Hll.cpp
   Hllc.cpp
   HllcGr.cpp
@@ -93,7 +96,8 @@ target_compile_options(PlutoHlldC PRIVATE -w -ffp-contract=off)
 # these properties never applied (compile_commands.json showed the PCH and no
 # -ffp-contract=off on the D2R sources; found in review, 2026-10-15).
 set_source_files_properties(
-  D2R/Flux.cpp D2R/SlowModes.cpp D2R/State.cpp
+  D2R/Flux.cpp D2R/FluxMp.cpp D2R/SlowModes.cpp D2R/SlowModesMp.cpp D2R/State.cpp
+  D2R/StateMp.cpp
   TARGET_DIRECTORY ${LIBRARY}
   PROPERTIES
   COMPILE_OPTIONS "-fno-fast-math;-ffp-contract=off"

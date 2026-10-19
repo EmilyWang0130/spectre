@@ -23,7 +23,7 @@ extern "C" {
 #include "spectre_d2r_core.h"
 }
 
-namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail {
+namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE {
 namespace {
 struct CoreResult {
   bool api_ok = false;
@@ -242,13 +242,14 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
     return keep("output_line_unsupported");
   }
   result.flux = output.flux;
-  result.alpha = output.coefficient.convert_to<double>();
+  result.alpha = to_double(output.coefficient);
   result.active = result.flux != result.baseline;
   result.status = output.reason;
   return result;
 }
-}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail
+}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE
 
+namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE {
 namespace {
 thread_local PlutoD2RDiagnostics diagnostics{};
 
@@ -320,13 +321,12 @@ bool near_equal(const double* l, const double* r, const double tol) {
 }
 }  // namespace
 
-extern "C" void pluto_d2r_reset_diagnostics() { diagnostics = {}; }
-extern "C" PlutoD2RDiagnostics pluto_d2r_diagnostics() { return diagnostics; }
+void reset_diagnostics_impl() { diagnostics = {}; }
+PlutoD2RDiagnostics diagnostics_impl() { return diagnostics; }
 
-extern "C" int pluto_d2r_flux(const int npts, const double* left,
-                              const double* right, const double gamma,
-                              double* flux, double* pressure) {
-  using namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail;
+int pluto_d2r_flux_impl(const int npts, const double* left,
+                        const double* right, const double gamma, double* flux,
+                        double* pressure) {
   if (npts < 0 or left == nullptr or right == nullptr or flux == nullptr or
       pressure == nullptr) {
     return 0;
@@ -466,11 +466,12 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
                             std::chrono::steady_clock::now() - stats.start)
                             .count();
     std::fprintf(stderr,
-                 "D2R stats: %ld calls, %ld points, %ld solves (%ld equal, "
+                 "D2R stats [%s]: %ld calls, %ld points, %ld solves (%ld equal, "
                  "%ld active, %ld unsupported), %ld near-equal (tol %g), "
                  "%ld memo hits + %ld near-memo; kernel %.1f s of %.1f s "
                  "wall, max face %.3f s\n",
-                 stats.calls, stats.points, stats.solves, stats.equal,
+                 multiprecision_build ? "160-digit" : "double", stats.calls,
+                 stats.points, stats.solves, stats.equal,
                  stats.active, stats.unsupported, stats.near_equal,
                  roundoff_tol, stats.memo_hits, stats.near_memo,
                  stats.kernel_seconds, wall, stats.max_face_seconds);
@@ -478,3 +479,47 @@ extern "C" int pluto_d2r_flux(const int npts, const double* left,
   }
   return supported;
 }
+}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE
+
+#ifndef D2R_MULTIPRECISION
+// The extern "C" interface the SpECTRE adapter and the tests call, defined once
+// (in the double build) and dispatched by SPECTRE_D2R_PRECISION: unset or
+// "double" selects the production kernel, "mp" the 160-digit oracle that the
+// *Mp.cpp wrappers compile from the same sources. (2026-10-19)
+namespace {
+const bool use_multiprecision = [] {
+  const char* e = std::getenv("SPECTRE_D2R_PRECISION");
+  return e != nullptr and (std::strcmp(e, "mp") == 0 or
+                           std::strcmp(e, "160") == 0 or
+                           std::strcmp(e, "multiprecision") == 0);
+}();
+}  // namespace
+
+extern "C" void pluto_d2r_reset_diagnostics() {
+  if (use_multiprecision) {
+    grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail_mp::
+        reset_diagnostics_impl();
+  } else {
+    grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail::
+        reset_diagnostics_impl();
+  }
+}
+extern "C" PlutoD2RDiagnostics pluto_d2r_diagnostics() {
+  return use_multiprecision
+             ? grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail_mp::
+                   diagnostics_impl()
+             : grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail::
+                   diagnostics_impl();
+}
+extern "C" int pluto_d2r_flux(const int npts, const double* left,
+                              const double* right, const double gamma,
+                              double* flux, double* pressure) {
+  return use_multiprecision
+             ? grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail_mp::
+                   pluto_d2r_flux_impl(npts, left, right, gamma, flux,
+                                       pressure)
+             : grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail::
+                   pluto_d2r_flux_impl(npts, left, right, gamma, flux,
+                                       pressure);
+}
+#endif

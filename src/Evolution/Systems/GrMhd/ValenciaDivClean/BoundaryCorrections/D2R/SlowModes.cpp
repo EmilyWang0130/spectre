@@ -14,9 +14,8 @@
 #include <string>
 #include <utility>
 
-#include <boost/math/special_functions/fpclassify.hpp>
 
-namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail {
+namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE {
 namespace {
 
 constexpr size_t FastMinus = 0;
@@ -28,8 +27,8 @@ constexpr size_t FastPlus = 6;
 
 Real square(const Real& value) { return value * value; }
 Real cube(const Real& value) { return value * value * value; }
-Real magnitude(const Real& value) { return boost::multiprecision::abs(value); }
-bool finite(const Real& value) { return boost::math::isfinite(value); }
+Real magnitude(const Real& value) { return abs_real(value); }
+bool finite(const Real& value) { return finite_real(value); }
 
 Real dot(const MpState& a, const MpState& b) {
   Real result = 0;
@@ -408,10 +407,10 @@ SlowAction slow_action(const State& primitive, const double bn,
     const FilterWeights filter = family_weights(state, spectrum);
     result.normalization_bound_active = filter.bound_active;
     for (size_t k = 0; k < 7; ++k) {
-      result.lambdas[k] = spectrum.lambda[k].convert_to<double>();
+      result.lambdas[k] = to_double(spectrum.lambda[k]);
     }
     for (size_t j = 0; j < 2; ++j) {
-      result.weights[j] = filter.weights[j].convert_to<double>();
+      result.weights[j] = to_double(filter.weights[j]);
     }
     if (spectrum.exact_slow_alfven_collision) {
       result.supported = true;
@@ -444,9 +443,9 @@ SlowAction slow_action(const State& primitive, const double bn,
               finite(result.absolute_slow_jump_mp[i]))) {
         throw std::runtime_error("nonfinite_high_precision_slow_action");
       }
-      result.slow_jump[i] = result.slow_jump_mp[i].convert_to<double>();
+      result.slow_jump[i] = to_double(result.slow_jump_mp[i]);
       result.absolute_slow_jump[i] =
-          result.absolute_slow_jump_mp[i].convert_to<double>();
+          to_double(result.absolute_slow_jump_mp[i]);
       if (not(std::isfinite(result.slow_jump[i]) and
               std::isfinite(result.absolute_slow_jump[i]))) {
         throw std::runtime_error("nonfinite_rounded_slow_action");
@@ -461,4 +460,4 @@ SlowAction slow_action(const State& primitive, const double bn,
   return result;
 }
 
-}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail
+}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE

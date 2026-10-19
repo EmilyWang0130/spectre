@@ -8,7 +8,7 @@
 
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/D2R/Types.hpp"
 
-namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail {
+namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE {
 
 struct SlowAction {
   bool supported = false;
@@ -39,4 +39,4 @@ struct SlowAction {
 SlowAction slow_action(const State& primitive, double bn, double gamma,
                        const State& left_tau, const State& right_tau);
 
-}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail
+}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE

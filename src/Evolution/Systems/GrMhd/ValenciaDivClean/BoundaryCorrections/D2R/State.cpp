@@ -11,22 +11,28 @@
 #include <utility>
 #include <vector>
 
-#include <boost/math/special_functions/fpclassify.hpp>
-#include <boost/math/special_functions/next.hpp>
+#ifdef D2R_MULTIPRECISION
 #include <boost/multiprecision/cpp_int.hpp>
+#endif
 
-namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail {
+namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE {
 namespace {
+#ifdef D2R_MULTIPRECISION
 using Integer = boost::multiprecision::cpp_int;
 using Rational = boost::multiprecision::cpp_rational;
+#else
+// In the double build the "exact rational" bookkeeping is ordinary arithmetic
+// carried in long double and rounded once to double at the end.
+using Rational = long double;
+#endif
 using Triple = std::array<Real, 3>;
 
 bool finite(const State& x) {
   return std::all_of(x.begin(), x.end(),
                      [](double a) { return std::isfinite(a); });
 }
-bool finite(const Real& x) { return boost::math::isfinite(x); }
-Real absolute(const Real& x) { return boost::multiprecision::abs(x); }
+bool finite(const Real& x) { return finite_real(x); }
+Real absolute(const Real& x) { return abs_real(x); }
 Real maximum(const Real& a, const Real& b) { return a > b ? a : b; }
 Real dot(const Triple& a, const Triple& b) {
   Real out = 0;
@@ -50,6 +56,7 @@ MpState imported(const State& x) {
     out[i] = exact_double(x[i]);
   return out;
 }
+#ifdef D2R_MULTIPRECISION
 Rational dyadic(double x) {
   if (x == 0.)
     return Rational(0);
@@ -158,6 +165,27 @@ bool rounded_state(State* out, const MpState& value) {
       return false;
   return true;
 }
+
+#else
+Rational dyadic(const double x) { return x; }
+Rational represented_real(const Real& value) { return value; }
+bool rounded_rational(double* out, const Rational& value) {
+  *out = static_cast<double>(value);
+  return std::isfinite(*out);
+}
+bool rounded_real(double* out, const Real& value) {
+  if (!std::isfinite(value))
+    return false;
+  *out = value;
+  return true;
+}
+bool rounded_state(State* out, const MpState& value) {
+  for (std::size_t i = 0; i < 7; ++i)
+    if (!rounded_real(&(*out)[i], value[i]))
+      return false;
+  return true;
+}
+#endif
 
 struct Parts {
   Real rho, p, v2, b2, vb, w, wm1;
@@ -327,7 +355,7 @@ Admissibility admissibility(const State& u, double bn, double gamma) {
     out.reason = "Psi_nonpositive_or_unresolved";
     return out;
   }
-  out.psi = first * first * inner - Real("13.5") * (d * d * b2 + mb * mb);
+  out.psi = first * first * inner - Real(13.5) * (d * d * b2 + mb * mb);
   out.admissible = out.psi > 0;
   out.reason = out.admissible ? "admissible"
                : out.psi == 0 ? "Psi_zero_or_precision_unresolved"
@@ -489,10 +517,12 @@ Recovery recover(const State& original, double bn, double gamma) {
       const Real delta = absolute(exact_double(rebuilt[i]) - u[i]);
       scale = maximum(scale, absolute(u[i]));
       error = maximum(error, delta);
+      // The double build's root is resolved to binary64 precision only, so its
+      // round trip carries that error on top of the rounding of p; allow it.
       ok = ok &&
            (original[i] == 0 ||
             std::abs(original[i]) >= std::numeric_limits<double>::min()) &&
-           delta <= budget[i];
+           delta <= (multiprecision_build ? budget[i] : 8 * budget[i]);
     }
     error /= scale;
     if (!found || (ok && !out.roundtrip_checked) ||
@@ -502,9 +532,9 @@ Recovery recover(const State& original, double bn, double gamma) {
       out.high_precision_primitive = mp;
       out.roundtrip_checked = ok;
       best_error = error;
-      out.reconstruction_error = error.convert_to<double>();
+      out.reconstruction_error = to_double(error);
       out.thermal_relative_error =
-          (absolute(exact_double(p[4]) - s.p) / s.p).convert_to<double>();
+          to_double(absolute(exact_double(p[4]) - s.p) / s.p);
     }
   }
   if (!found) {
@@ -698,7 +728,25 @@ EntropyModel::EntropyModel(const State& ul, const State& ur, double bn,
   h = dot(dz, jump);
 }
 Real EntropyModel::margin(const State& flux) const {
+#ifdef D2R_MULTIPRECISION
   return dpsi - dot(dz, imported(flux));
+#else
+  long double acc = dpsi;
+  for (std::size_t i = 0; i < 7; ++i)
+    acc -= static_cast<long double>(dz[i]) * flux[i];
+  return static_cast<Real>(acc);
+#endif
+}
+Real EntropyModel::tolerance(const State& flux) const {
+  // The 160-digit build decides entropy signs exactly; in double the margin is
+  // a difference of terms of size |dpsi| + sum |dz_i F_i| and carries their
+  // round-off, so a margin within that round-off of zero counts as zero.
+  if (multiprecision_build)
+    return 0;
+  long double scale = std::fabs(static_cast<long double>(dpsi));
+  for (std::size_t i = 0; i < 7; ++i)
+    scale += std::fabs(static_cast<long double>(dz[i]) * flux[i]);
+  return static_cast<Real>(32 * std::numeric_limits<double>::epsilon() * scale);
 }
 LineResult EntropyModel::repair(const State& candidate) const {
   if (!supported)
@@ -706,7 +754,7 @@ LineResult EntropyModel::repair(const State& candidate) const {
   if (!finite(candidate))
     return line(false, "nonfinite_native");
   const Real m0 = margin(candidate);
-  if (m0 >= 0)
+  if (m0 >= -tolerance(candidate))
     return line(true, "native_entropy_supported", candidate, 0, m0);
   if (!(h > 0))
     return line(false, "nonpositive_entropy_jump");
@@ -722,7 +770,7 @@ LineResult EntropyModel::repair(const State& candidate) const {
   if (!(denominator > 0))
     return line(false, "repair_rounding_budget_unresolved");
   Real nu = (-m0 + u * a + sigma * c) / denominator;
-  nu = boost::math::float_next(nu);
+  nu = next_up(nu);
   State flux{};
   const Rational coefficient = represented_real(nu);
   for (std::size_t i = 0; i < 7; ++i)
@@ -731,7 +779,7 @@ LineResult EntropyModel::repair(const State& candidate) const {
                               coefficient * (dyadic(ur_[i]) - dyadic(ul_[i]))))
       return line(false, "repair_overflow");
   const Real m = margin(flux);
-  if (m < 0)
+  if (m < -tolerance(flux))
     return line(false, "stored_repair_postcheck_failed", flux, nu, m);
   return line(true, "scalar_repaired", flux, nu, m);
 }
@@ -744,7 +792,7 @@ LineResult EntropyModel::cap(const State& baseline,
   if (!finite(direction))
     return line(false, "nonfinite_direction");
   const Real mb = margin(baseline);
-  if (mb < 0)
+  if (mb < -tolerance(baseline))
     return line(false, "unsupported_baseline_entropy");
   if (std::all_of(direction.begin(), direction.end(),
                   [](double x) { return x == 0.; }))
@@ -752,7 +800,7 @@ LineResult EntropyModel::cap(const State& baseline,
   State full{};
   if (rounded_ray(&full, baseline, direction, Real(1))) {
     const Real m = margin(full);
-    if (m >= 0)
+    if (m >= -tolerance(full))
       return line(true, "full_response", full, 1, m);
   }
   const Real u = pow(Real(2), -53), sigma = pow(Real(2), -1075);
@@ -776,9 +824,10 @@ LineResult EntropyModel::cap(const State& baseline,
     return line(true, "affine_coefficient_unrepresentable", baseline, 0, mb);
   State flux{};
   const Real coefficient = exact_double(alpha);
-  if (!rounded_ray(&flux, baseline, direction, coefficient) || margin(flux) < 0)
+  if (!rounded_ray(&flux, baseline, direction, coefficient) ||
+      margin(flux) < -tolerance(flux))
     return line(true, "stored_response_postcheck_failed", baseline, 0, mb);
   return line(true, "fractional_response", flux, coefficient, margin(flux));
 }
 
-}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::d2r_detail
+}  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE
