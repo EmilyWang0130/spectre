@@ -12,6 +12,8 @@
 #include "Evolution/BoundaryCorrection.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/Tags.hpp"
 #include "NumericalAlgorithms/DiscontinuousGalerkin/Formulation.hpp"
+#include "Options/Auto.hpp"
+#include "Options/Context.hpp"
 #include "Options/String.hpp"
 #include "PointwiseFunctions/GeneralRelativity/Tags.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
@@ -216,11 +218,18 @@ class Hllem final : public evolution::BoundaryCorrection {
         "wave pair rather than adding it on top of the contact."};
   };
   struct DegeneracyTolerance {
+    using type = double;
+    static type lower_bound() { return 0.0; }
+    // At 1e-4, HLLEM with all waves restored runs the magnetized Del Zanna jet
+    // to completion, and the Balsara 1-4 shock tubes give the same results, to
+    // round-off, as with exactly degenerate slow speeds. At 1e-10 the guard
+    // keeps more near-degenerate slow waves and the jet aborts. Values between
+    // 1e-10 and 1e-4 have not been tested.
+    static type suggested_value() { return 1.0e-4; }
     static constexpr Options::String help = {
         "Speed-gap below which neighbouring waves are treated as degenerate "
-        "and "
-        "handled by the complementary projection."};
-    using type = double;
+        "and handled by the complementary projection (or dropped, without "
+        "it)."};
   };
   struct UseComplementaryProjection {
     static constexpr Options::String help = {
@@ -247,10 +256,17 @@ class Hllem final : public evolution::BoundaryCorrection {
         "the characteristic speeds."};
     using type = double;
   };
+  struct MaxConditionNumber {
+    using type = Options::Auto<double, Options::AutoLabel::None>;
+    static constexpr Options::String help = {
+        "Drop a restored wave where its eigenvalue condition number "
+        "|l| |r| / |l.r| exceeds this value (at least 1). None disables the "
+        "check."};
+  };
   using options =
       tmpl::list<WavesToRestore, UseComplementaryProjection,
                  DegeneracyTolerance, MagneticFieldMagnitudeForHydro,
-                 LightSpeedDensityCutoff>;
+                 LightSpeedDensityCutoff, MaxConditionNumber>;
   static constexpr Options::String help = {
       "Computes the HLLEM boundary correction term for the GRMHD system."};
 
@@ -263,7 +279,9 @@ class Hllem final : public evolution::BoundaryCorrection {
 
   Hllem(HllemWaves waves_to_restore, bool use_complementary_projection,
         double degeneracy_tolerance, double magnetic_field_magnitude_for_hydro,
-        double light_speed_density_cutoff);
+        double light_speed_density_cutoff,
+        std::optional<double> max_condition_number = std::nullopt,
+        const Options::Context& context = {});
 
   /// \cond
   explicit Hllem(CkMigrateMessage* /*unused*/);
@@ -442,6 +460,7 @@ class Hllem final : public evolution::BoundaryCorrection {
       std::numeric_limits<double>::signaling_NaN()};
   double light_speed_density_cutoff_{
       std::numeric_limits<double>::signaling_NaN()};
+  std::optional<double> max_condition_number_{};
 };
 bool operator!=(const Hllem& lhs, const Hllem& rhs);
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections
@@ -457,7 +476,8 @@ struct Options::create_from_yaml<
   }
 };
 template <>
-grmhd::ValenciaDivClean::BoundaryCorrections::HllemWaves Options::
-    create_from_yaml<grmhd::ValenciaDivClean::BoundaryCorrections::HllemWaves>::
-        create<void>(const Options::Option& options);
+grmhd::ValenciaDivClean::BoundaryCorrections::HllemWaves
+Options::create_from_yaml<
+    grmhd::ValenciaDivClean::BoundaryCorrections::HllemWaves>::
+    create<void>(const Options::Option& options);
 /// \endcond

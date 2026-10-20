@@ -26,9 +26,11 @@
 #include "Options/Options.hpp"
 #include "Options/ParseOptions.hpp"
 #include "PointwiseFunctions/Hydro/SpecificEnthalpy.hpp"
+#include "Utilities/ConstantExpressions.hpp"
 #include "Utilities/ErrorHandling/Error.hpp"
 #include "Utilities/ErrorHandling/FloatingPointExceptions.hpp"
 #include "Utilities/Gsl.hpp"
+#include "Utilities/Serialization/PupStlCpp17.hpp"
 
 namespace grmhd::ValenciaDivClean::BoundaryCorrections {
 
@@ -103,12 +105,22 @@ Hllem::Hllem(const HllemWaves waves_to_restore,
              const bool use_complementary_projection,
              const double degeneracy_tolerance,
              const double magnetic_field_magnitude_for_hydro,
-             const double light_speed_density_cutoff)
+             const double light_speed_density_cutoff,
+             const std::optional<double> max_condition_number,
+             const Options::Context& context)
     : waves_to_restore_(waves_to_restore),
       use_complementary_projection_(use_complementary_projection),
       degeneracy_tolerance_(degeneracy_tolerance),
       magnetic_field_magnitude_for_hydro_(magnetic_field_magnitude_for_hydro),
-      light_speed_density_cutoff_(light_speed_density_cutoff) {}
+      light_speed_density_cutoff_(light_speed_density_cutoff),
+      max_condition_number_(max_condition_number) {
+  if (max_condition_number_.has_value() and
+      not(*max_condition_number_ >= 1.0)) {
+    PARSE_ERROR(context,
+                "MaxConditionNumber must be at least 1 (or None), but is "
+                    << *max_condition_number_);
+  }
+}
 
 Hllem::Hllem(CkMigrateMessage* /*unused*/) {}
 
@@ -123,6 +135,7 @@ void Hllem::pup(PUP::er& p) {
   p | degeneracy_tolerance_;
   p | magnetic_field_magnitude_for_hydro_;
   p | light_speed_density_cutoff_;
+  p | max_condition_number_;
 }
 
 double Hllem::dg_package_data(
@@ -146,7 +159,8 @@ double Hllem::dg_package_data(
         packaged_largest_outgoing_char_speed,
     const gsl::not_null<Scalar<DataVector>*>
         packaged_largest_ingoing_char_speed,
-    const gsl::not_null<Scalar<DataVector>*> packaged_fast_outgoing_char_speed,
+    const gsl::not_null<Scalar<DataVector>*>
+        packaged_fast_outgoing_char_speed,
     const gsl::not_null<Scalar<DataVector>*> packaged_fast_ingoing_char_speed,
     const gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
         packaged_interface_unit_normal,
@@ -885,6 +899,25 @@ void Hllem::dg_boundary_terms(
         restored_wave_dropped[pt] = 1.0;
       }
     }
+    // Conditioning guard: drop the wave where the norm of its spectral
+    // projector, |l| |r| / |l.r| (the eigenvalue condition number), exceeds
+    // MaxConditionNumber. Unlike the floor on |l.r|, this is scale-invariant.
+    if (max_condition_number_.has_value()) {
+      DataVector norm_l{num_points, 0.0};
+      DataVector norm_r{num_points, 0.0};
+      for (size_t n = 0; n < 9; ++n) {
+        norm_l += square(projectors.get(wave, n));
+        norm_r += square(modes.get(wave, n));
+      }
+      for (size_t pt = 0; pt < num_points; ++pt) {
+        if (wave_ok[pt] > 0.0 and
+            not(sqrt(norm_l[pt] * norm_r[pt]) <=
+                *max_condition_number_ * std::abs(diagonal[pt]))) {
+          wave_ok[pt] = 0.0;
+          restored_wave_dropped[pt] = 1.0;
+        }
+      }
+    }
     const DataVector inv_diagonal =
         wave_ok / (diagonal + (1.0 - wave_ok));  // 1/diag where ok, else 0
     DataVector ldu{num_points, 0.0};
@@ -904,7 +937,7 @@ void Hllem::dg_boundary_terms(
     // "HLLEM == HLL" behaviour when slow modes sit on the contact). Instead,
     // restore the whole collapse-prone fluid subspace {2..6} as ONE block via
     // the complement of the well-conditioned fast/GLM waves {0,1,7,8},
-    //   P_fluid . dU = dU - sum_{k in {0,1,7,8}} r_k (l_k . dU),
+    //   P_fluid . dU = dU - sum_{k in {0,1,7,8}} r_k (l_k.dU)/(l_k.r_k),
     // carried by a single Einfeldt coefficient at the (shared) contact speed.
     // The clustered waves share that speed at a genuine collapse, so the single
     // coefficient is accurate there; applying this block only at the collapse
@@ -915,26 +948,36 @@ void Hllem::dg_boundary_terms(
     const DataVector delta_c = 1.0 -
                                min(lam_c, 0.0) / (fast_lambda_min - 1.0e-14) -
                                max(lam_c, 0.0) / (fast_lambda_max + 1.0e-14);
-    // Project du onto the fluid subspace via the complement of the
-    // well-conditioned fast waves {1,7}. The GLM/divergence-cleaning waves
-    // {0,8} travel at the light speed, are OUT OF the fluid HLL fan, and are
-    // handled by the (diffusive) HLL flux -- projecting them out here would
-    // corrupt the complement, so they are skipped per point when out of fan.
+    // Project du onto the fluid subspace via the complement of all four
+    // outer waves {0,1,7,8}, whether or not they lie inside the fan. The
+    // GLM/divergence-cleaning waves {0,8} travel at the light speed, outside
+    // the fluid fan; projecting them out leaves their part of dU on the HLL
+    // flux. (Skipping them would restore their B_n, S and tau components with
+    // the contact coefficient.) The complement is then the spectral projector
+    // of the fluid group.
+    //
+    // The analytic eigenvectors are biorthogonal but not biorthonormal, so
+    // the projection of dU onto an outer wave is r_k (l_k.dU)/(l_k.r_k).
+    // Where |l_k.r_k| < 1e-12 for an outer wave the block is not applied at
+    // that point.
     std::array<DataVector, 9> cdu = du;
+    DataVector complement_ok{num_points, 1.0};
     const std::array<size_t, 4> nondegenerate_waves{{0, 1, 7, 8}};
     for (const size_t k : nondegenerate_waves) {
-      const DataVector& lam_k = mhd_speeds.get(k);
       DataVector ldu{num_points, 0.0};
+      DataVector lr{num_points, 0.0};
       for (size_t n = 0; n < 9; ++n) {
         ldu += projectors.get(k, n) * gsl::at(du, n);
+        lr += projectors.get(k, n) * modes.get(k, n);
       }
-      for (size_t n = 0; n < 9; ++n) {
-        const DataVector contrib = ldu * modes.get(k, n);
-        for (size_t pt = 0; pt < num_points; ++pt) {
-          if (lam_k[pt] < fast_lambda_max[pt] and
-              lam_k[pt] > fast_lambda_min[pt]) {
-            gsl::at(cdu, n)[pt] -= contrib[pt];
-          }
+      for (size_t pt = 0; pt < num_points; ++pt) {
+        if (not std::isfinite(lr[pt]) or std::abs(lr[pt]) < 1.0e-12) {
+          complement_ok[pt] = 0.0;
+          continue;
+        }
+        const double strength = ldu[pt] / lr[pt];
+        for (size_t n = 0; n < 9; ++n) {
+          gsl::at(cdu, n)[pt] -= strength * modes.get(k, n)[pt];
         }
       }
     }
@@ -943,7 +986,7 @@ void Hllem::dg_boundary_terms(
     for (size_t n = 0; n < 9; ++n) {
       const DataVector block = coeff * delta_c * gsl::at(cdu, n);
       for (size_t pt = 0; pt < num_points; ++pt) {
-        if (restored_wave_dropped[pt] > 0.0) {
+        if (restored_wave_dropped[pt] > 0.0 and complement_ok[pt] > 0.0) {
           gsl::at(antidiff, n)[pt] = block[pt];
         }
       }
@@ -982,7 +1025,8 @@ bool operator==(const Hllem& lhs, const Hllem& rhs) {
          lhs.degeneracy_tolerance_ == rhs.degeneracy_tolerance_ and
          lhs.magnetic_field_magnitude_for_hydro_ ==
              rhs.magnetic_field_magnitude_for_hydro_ and
-         lhs.light_speed_density_cutoff_ == rhs.light_speed_density_cutoff_;
+         lhs.light_speed_density_cutoff_ == rhs.light_speed_density_cutoff_ and
+         lhs.max_condition_number_ == rhs.max_condition_number_;
 }
 bool operator!=(const Hllem& lhs, const Hllem& rhs) { return not(lhs == rhs); }
 
@@ -991,9 +1035,10 @@ PUP::able::PUP_ID Hllem::my_PUP_ID = 0;
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections
 
 template <>
-grmhd::ValenciaDivClean::BoundaryCorrections::HllemWaves Options::
-    create_from_yaml<grmhd::ValenciaDivClean::BoundaryCorrections::HllemWaves>::
-        create<void>(const Options::Option& options) {
+grmhd::ValenciaDivClean::BoundaryCorrections::HllemWaves
+Options::create_from_yaml<
+    grmhd::ValenciaDivClean::BoundaryCorrections::HllemWaves>::
+    create<void>(const Options::Option& options) {
   namespace bc = grmhd::ValenciaDivClean::BoundaryCorrections;
   const auto type_read = options.parse_as<std::string>();
   if (type_read == "Contact") {

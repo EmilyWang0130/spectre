@@ -540,9 +540,9 @@ bool characteristic_eigenvectors_mhd(
           v_n + B_n / (sq(W) * (B_dot_v + sqrt_rho_h_star));
       const Quad y_minus_branch =
           v_n + B_n / (sq(W) * (B_dot_v - sqrt_rho_h_star));
-      const Quad alf_sign = abs(y - y_plus_branch) <= abs(y - y_minus_branch)
-                                ? Quad{1.0}
-                                : Quad{-1.0};
+      const Quad alf_sign =
+          abs(y - y_plus_branch) <= abs(y - y_minus_branch) ? Quad{1.0}
+                                                            : Quad{-1.0};
       const Quad sqrt_rho_h_star_s = alf_sign * sqrt_rho_h_star;
       const Quad r_1_s = B_dot_v + sqrt_rho_h_star_s;
       const Quad r_4_s = B_squared + r_1_s * B_dot_v * sq(W);
@@ -553,9 +553,8 @@ bool characteristic_eigenvectors_mhd(
       const Quad r_modes_s_n =
           -Quad{2.0} * sqrt_rho_h_star_s * B_21 * (B_n + r_1_s * v_n * sq(W));
       const Quad r_modes_s_1 =
-          -sqrt_rho_h_star_s *
-          (B_n * B_32 + B_1 * B_21 +
-           r_1_s * sq(W) * (B_2 + v_1 * B_21 + v_n * B_32));
+          -sqrt_rho_h_star_s * (B_n * B_32 + B_1 * B_21 +
+                                r_1_s * sq(W) * (B_2 + v_1 * B_21 + v_n * B_32));
       const Quad r_modes_s_2 =
           sqrt_rho_h_star_s * (B_n * B_31 - B_2 * B_21 +
                                r_1_s * sq(W) * (B_1 - v_2 * B_21 + v_n * B_31));
@@ -572,16 +571,14 @@ bool characteristic_eigenvectors_mhd(
 
       // Rotate the frame components into the coordinate basis.
       for (size_t i = 0; i < 3; ++i) {
-        right[wave][i] = r_modes_s_n * s_vec[i] +
-                         r_modes_s_1 * tangent_1_up[i] +
+        right[wave][i] = r_modes_s_n * s_vec[i] + r_modes_s_1 * tangent_1_up[i] +
                          r_modes_s_2 * tangent_2_up[i];
         right[wave][3 + i] =
             r_modes_b_1 * tangent_1_up[i] + r_modes_b_2 * tangent_2_up[i];
-        left[wave][i] = l_proj_s_n * unit_normal[i] +
-                        l_proj_s_1 * tangent_1[i] + l_proj_s_2 * tangent_2[i];
+        left[wave][i] = l_proj_s_n * unit_normal[i] + l_proj_s_1 * tangent_1[i] +
+                        l_proj_s_2 * tangent_2[i];
         left[wave][3 + i] = l_proj_b_n * unit_normal[i] +
-                            l_proj_b_1 * tangent_1[i] +
-                            l_proj_b_2 * tangent_2[i];
+                            l_proj_b_1 * tangent_1[i] + l_proj_b_2 * tangent_2[i];
       }
       right[wave][6] = -rho * W * B_21;
       right[wave][7] =
@@ -714,7 +711,7 @@ std::array<std::array<Quad, 9>, 9> flux_jacobian_mhd(
   const std::array<Quad, 3>& magneticField = magnetic_field;
   const std::array<Quad, 3>& unitNormal = unit_normal;
 
-  std::array<Quad, 3> unitVector{};              // s^i = gamma^{ij} n_j
+  std::array<Quad, 3> unitVector{};             // s^i = gamma^{ij} n_j
   std::array<Quad, 3> spatialVelocityOneForm{};  // v_i
   std::array<Quad, 3> magneticFieldOneForm{};    // B_i
   for (size_t i = 0; i < 3; ++i) {
@@ -786,9 +783,9 @@ std::array<std::array<Quad, 9>, 9> flux_jacobian_mhd(
   const auto x44 = magneticFieldDotVelocity * unitVector[2];
   const auto x46 = x0 + x24;
   const auto x48 = sq(restMassDensity);
-  const auto x50 =
-      magneticFieldDotVelocity * spatialVelocity[0] * x14 *
-      (magneticFieldSquared * x10 + specificEnthalpy * x14 * x4 * x48 + x11);
+  const auto x50 = magneticFieldDotVelocity * spatialVelocity[0] * x14 *
+                   (magneticFieldSquared * x10 +
+                    specificEnthalpy * x14 * x4 * x48 + x11);
   const auto x52 =
       x26 * (magneticField[0] *
                  (Zvar * kappa - Zvar * restMassDensity -
@@ -806,9 +803,9 @@ std::array<std::array<Quad, 9>, 9> flux_jacobian_mhd(
   const auto x58 = x26 * (magneticField[0] * x55 + x50);
   const auto x59 = normalMagneticField * x17;
   const auto x62 = x1 / x14;
-  const auto x63 =
-      magneticFieldDotVelocity * spatialVelocity[1] * x14 *
-      (magneticFieldSquared * x10 + specificEnthalpy * x14 * x4 * x48 + x11);
+  const auto x63 = magneticFieldDotVelocity * spatialVelocity[1] * x14 *
+                   (magneticFieldSquared * x10 +
+                    specificEnthalpy * x14 * x4 * x48 + x11);
   const auto x64 =
       x26 * (magneticField[1] *
                  (Zvar * kappa - Zvar * restMassDensity -
@@ -816,9 +813,9 @@ std::array<std::array<Quad, 9>, 9> flux_jacobian_mhd(
                   restMassDensity * x24 * (soundSpeedSquared + one) + x8) +
              x63);
   const auto x66 = x26 * (magneticField[1] * x55 + x63);
-  const auto x68 =
-      magneticFieldDotVelocity * spatialVelocity[2] * x14 *
-      (magneticFieldSquared * x10 + specificEnthalpy * x14 * x4 * x48 + x11);
+  const auto x68 = magneticFieldDotVelocity * spatialVelocity[2] * x14 *
+                   (magneticFieldSquared * x10 +
+                    specificEnthalpy * x14 * x4 * x48 + x11);
   const auto x69 =
       x26 * (magneticField[2] *
                  (Zvar * kappa - Zvar * restMassDensity -
@@ -853,8 +850,8 @@ std::array<std::array<Quad, 9>, 9> flux_jacobian_mhd(
   const auto x141 = two * x125 + x31;
 
   std::array<std::array<Quad, 9>, 9> m{};
-  m[0][0] = x1 * (magneticFieldOneForm[0] *
-                      (spatialVelocity[0] * x3 + x13 * x27 - x2) +
+  m[0][0] = x1 * (magneticFieldOneForm[0] * (spatialVelocity[0] * x3 +
+                                             x13 * x27 - x2) +
                   spatialVelocityOneForm[0] * x29 + x13 * x26 * x35 + x37);
   m[0][1] = x1 * (magneticFieldOneForm[0] *
                       (spatialVelocity[1] * x3 + x27 * x39 - x40) +
@@ -958,23 +955,20 @@ std::array<std::array<Quad, 9>, 9> flux_jacobian_mhd(
              unitNormal[2] * x0 * (restMassDensity * x87 - x86)) /
             x87;
   m[2][8] = Quad{0.0};
-  m[3][0] =
-      x1 * (magneticFieldOneForm[0] * (-normalVelocity * x101 + unitVector[0]) +
-            normalMagneticField * (spatialVelocityOneForm[0] * x101 - one));
+  m[3][0] = x1 * (magneticFieldOneForm[0] *
+                      (-normalVelocity * x101 + unitVector[0]) +
+                  normalMagneticField * (spatialVelocityOneForm[0] * x101 - one));
   m[3][1] = x1 * (magneticFieldOneForm[0] * (unitVector[1] - x105 * x39) +
                   normalMagneticField * spatialVelocityOneForm[0] * x104);
   m[3][2] = x1 * (magneticFieldOneForm[0] * (unitVector[2] - x105 * x43) +
                   normalMagneticField * spatialVelocityOneForm[0] * x107);
-  m[3][3] =
-      x1 *
-      (magneticFieldOneForm[0] * (-normalVelocity * x52 + x2) +
-       spatialVelocityOneForm[0] * (normalMagneticField * x52 - x29) + x37);
-  m[3][4] =
-      x1 * (magneticFieldOneForm[0] * (-normalVelocity * x64 + x40) +
-            spatialVelocityOneForm[0] * (normalMagneticField * x64 - x38));
-  m[3][5] =
-      x1 * (magneticFieldOneForm[0] * (-normalVelocity * x69 + x44) +
-            spatialVelocityOneForm[0] * (normalMagneticField * x69 - x42));
+  m[3][3] = x1 * (magneticFieldOneForm[0] * (-normalVelocity * x52 + x2) +
+                  spatialVelocityOneForm[0] * (normalMagneticField * x52 - x29) +
+                  x37);
+  m[3][4] = x1 * (magneticFieldOneForm[0] * (-normalVelocity * x64 + x40) +
+                  spatialVelocityOneForm[0] * (normalMagneticField * x64 - x38));
+  m[3][5] = x1 * (magneticFieldOneForm[0] * (-normalVelocity * x69 + x44) +
+                  spatialVelocityOneForm[0] * (normalMagneticField * x69 - x42));
   m[3][6] = x116 * (Zvar * (-kappa + x9) + restMassDensity * x7 * x73) *
             (magneticFieldOneForm[0] * normalVelocity -
              normalMagneticField * spatialVelocityOneForm[0]);
@@ -982,24 +976,20 @@ std::array<std::array<Quad, 9>, 9> flux_jacobian_mhd(
             (magneticFieldOneForm[0] * normalVelocity -
              normalMagneticField * spatialVelocityOneForm[0]);
   m[3][8] = unitNormal[0];
-  m[4][0] =
-      x1 * (magneticFieldOneForm[1] * (-normalVelocity * x101 + unitVector[0]) +
-            normalMagneticField * spatialVelocityOneForm[1] * x101);
-  m[4][1] =
-      x1 * (magneticFieldOneForm[1] * (unitVector[1] - x105 * x39) +
-            normalMagneticField * (spatialVelocityOneForm[1] * x104 - one));
+  m[4][0] = x1 * (magneticFieldOneForm[1] *
+                      (-normalVelocity * x101 + unitVector[0]) +
+                  normalMagneticField * spatialVelocityOneForm[1] * x101);
+  m[4][1] = x1 * (magneticFieldOneForm[1] * (unitVector[1] - x105 * x39) +
+                  normalMagneticField * (spatialVelocityOneForm[1] * x104 - one));
   m[4][2] = x1 * (magneticFieldOneForm[1] * (unitVector[2] - x105 * x43) +
                   normalMagneticField * spatialVelocityOneForm[1] * x107);
-  m[4][3] =
-      x1 * (magneticFieldOneForm[1] * (-normalVelocity * x52 + x2) +
-            spatialVelocityOneForm[1] * (normalMagneticField * x52 - x29));
-  m[4][4] =
-      x1 *
-      (magneticFieldOneForm[1] * (-normalVelocity * x64 + x40) +
-       spatialVelocityOneForm[1] * (normalMagneticField * x64 - x38) + x37);
-  m[4][5] =
-      x1 * (magneticFieldOneForm[1] * (-normalVelocity * x69 + x44) +
-            spatialVelocityOneForm[1] * (normalMagneticField * x69 - x42));
+  m[4][3] = x1 * (magneticFieldOneForm[1] * (-normalVelocity * x52 + x2) +
+                  spatialVelocityOneForm[1] * (normalMagneticField * x52 - x29));
+  m[4][4] = x1 * (magneticFieldOneForm[1] * (-normalVelocity * x64 + x40) +
+                  spatialVelocityOneForm[1] * (normalMagneticField * x64 - x38) +
+                  x37);
+  m[4][5] = x1 * (magneticFieldOneForm[1] * (-normalVelocity * x69 + x44) +
+                  spatialVelocityOneForm[1] * (normalMagneticField * x69 - x42));
   m[4][6] = x116 * (Zvar * (-kappa + x9) + restMassDensity * x7 * x73) *
             (magneticFieldOneForm[1] * normalVelocity -
              normalMagneticField * spatialVelocityOneForm[1]);
@@ -1007,24 +997,20 @@ std::array<std::array<Quad, 9>, 9> flux_jacobian_mhd(
             (magneticFieldOneForm[1] * normalVelocity -
              normalMagneticField * spatialVelocityOneForm[1]);
   m[4][8] = unitNormal[1];
-  m[5][0] =
-      x1 * (magneticFieldOneForm[2] * (-normalVelocity * x101 + unitVector[0]) +
-            normalMagneticField * spatialVelocityOneForm[2] * x101);
+  m[5][0] = x1 * (magneticFieldOneForm[2] *
+                      (-normalVelocity * x101 + unitVector[0]) +
+                  normalMagneticField * spatialVelocityOneForm[2] * x101);
   m[5][1] = x1 * (magneticFieldOneForm[2] * (unitVector[1] - x105 * x39) +
                   normalMagneticField * spatialVelocityOneForm[2] * x104);
-  m[5][2] =
-      x1 * (magneticFieldOneForm[2] * (unitVector[2] - x105 * x43) +
-            normalMagneticField * (spatialVelocityOneForm[2] * x107 - one));
-  m[5][3] =
-      x1 * (magneticFieldOneForm[2] * (-normalVelocity * x52 + x2) +
-            spatialVelocityOneForm[2] * (normalMagneticField * x52 - x29));
-  m[5][4] =
-      x1 * (magneticFieldOneForm[2] * (-normalVelocity * x64 + x40) +
-            spatialVelocityOneForm[2] * (normalMagneticField * x64 - x38));
-  m[5][5] =
-      x1 *
-      (magneticFieldOneForm[2] * (-normalVelocity * x69 + x44) +
-       spatialVelocityOneForm[2] * (normalMagneticField * x69 - x42) + x37);
+  m[5][2] = x1 * (magneticFieldOneForm[2] * (unitVector[2] - x105 * x43) +
+                  normalMagneticField * (spatialVelocityOneForm[2] * x107 - one));
+  m[5][3] = x1 * (magneticFieldOneForm[2] * (-normalVelocity * x52 + x2) +
+                  spatialVelocityOneForm[2] * (normalMagneticField * x52 - x29));
+  m[5][4] = x1 * (magneticFieldOneForm[2] * (-normalVelocity * x64 + x40) +
+                  spatialVelocityOneForm[2] * (normalMagneticField * x64 - x38));
+  m[5][5] = x1 * (magneticFieldOneForm[2] * (-normalVelocity * x69 + x44) +
+                  spatialVelocityOneForm[2] * (normalMagneticField * x69 - x42) +
+                  x37);
   m[5][6] = x116 * (Zvar * (-kappa + x9) + restMassDensity * x7 * x73) *
             (magneticFieldOneForm[2] * normalVelocity -
              normalMagneticField * spatialVelocityOneForm[2]);
@@ -1032,24 +1018,24 @@ std::array<std::array<Quad, 9>, 9> flux_jacobian_mhd(
             (magneticFieldOneForm[2] * normalVelocity -
              normalMagneticField * spatialVelocityOneForm[2]);
   m[5][8] = unitNormal[2];
-  m[6][0] = x130 * (Zvar * unitVector[0] +
-                    magneticField[0] * normalMagneticField - x101 * x126);
-  m[6][1] = x130 * (Zvar * unitVector[1] +
-                    magneticField[1] * normalMagneticField - x104 * x126);
-  m[6][2] = x130 * (Zvar * unitVector[2] +
-                    magneticField[2] * normalMagneticField - x107 * x126);
-  m[6][3] =
-      x130 * (Zvar * normalMagneticField * spatialVelocity[0] + Zvar * x2 +
-              magneticFieldSquared * normalMagneticField * spatialVelocity[0] -
-              magneticField[0] * x141 - x125 * x58 - x31 * x58);
-  m[6][4] =
-      x130 * (Zvar * normalMagneticField * spatialVelocity[1] + Zvar * x40 +
-              magneticFieldSquared * normalMagneticField * spatialVelocity[1] -
-              magneticField[1] * x141 - x125 * x66 - x31 * x66);
-  m[6][5] =
-      x130 * (Zvar * normalMagneticField * spatialVelocity[2] + Zvar * x44 +
-              magneticFieldSquared * normalMagneticField * spatialVelocity[2] -
-              magneticField[2] * x141 - x125 * x71 - x31 * x71);
+  m[6][0] = x130 * (Zvar * unitVector[0] + magneticField[0] * normalMagneticField -
+                    x101 * x126);
+  m[6][1] = x130 * (Zvar * unitVector[1] + magneticField[1] * normalMagneticField -
+                    x104 * x126);
+  m[6][2] = x130 * (Zvar * unitVector[2] + magneticField[2] * normalMagneticField -
+                    x107 * x126);
+  m[6][3] = x130 * (Zvar * normalMagneticField * spatialVelocity[0] + Zvar * x2 +
+                    magneticFieldSquared * normalMagneticField *
+                        spatialVelocity[0] -
+                    magneticField[0] * x141 - x125 * x58 - x31 * x58);
+  m[6][4] = x130 * (Zvar * normalMagneticField * spatialVelocity[1] + Zvar * x40 +
+                    magneticFieldSquared * normalMagneticField *
+                        spatialVelocity[1] -
+                    magneticField[1] * x141 - x125 * x66 - x31 * x66);
+  m[6][5] = x130 * (Zvar * normalMagneticField * spatialVelocity[2] + Zvar * x44 +
+                    magneticFieldSquared * normalMagneticField *
+                        spatialVelocity[2] -
+                    magneticField[2] * x141 - x125 * x71 - x31 * x71);
   m[6][6] = x129 * (Dvar * x116 * x31 * x75 + x125 * (Dvar * x116 * x75 + x0));
   m[6][7] = Dvar * x126 * x19 * x7 /
             (Zvar * (Zvar * (-soundSpeedSquared / x14 + x4) -
@@ -1061,18 +1047,18 @@ std::array<std::array<Quad, 9>, 9> flux_jacobian_mhd(
                     Dvar * x104 * x126 + Zvar * unitVector[1] * (-Dvar + x0));
   m[7][2] = x129 * (-Dvar * magneticField[2] * normalMagneticField +
                     Dvar * x107 * x126 + Zvar * unitVector[2] * (-Dvar + x0));
-  m[7][3] =
-      x130 * (-Zvar * normalMagneticField * spatialVelocity[0] - Zvar * x2 -
-              magneticFieldSquared * normalMagneticField * spatialVelocity[0] +
-              magneticField[0] * x141 + x125 * x58 + x31 * x58);
-  m[7][4] =
-      x130 * (-Zvar * normalMagneticField * spatialVelocity[1] - Zvar * x40 -
-              magneticFieldSquared * normalMagneticField * spatialVelocity[1] +
-              magneticField[1] * x141 + x125 * x66 + x31 * x66);
-  m[7][5] =
-      x130 * (-Zvar * normalMagneticField * spatialVelocity[2] - Zvar * x44 -
-              magneticFieldSquared * normalMagneticField * spatialVelocity[2] +
-              magneticField[2] * x141 + x125 * x71 + x31 * x71);
+  m[7][3] = x130 * (-Zvar * normalMagneticField * spatialVelocity[0] - Zvar * x2 -
+                    magneticFieldSquared * normalMagneticField *
+                        spatialVelocity[0] +
+                    magneticField[0] * x141 + x125 * x58 + x31 * x58);
+  m[7][4] = x130 * (-Zvar * normalMagneticField * spatialVelocity[1] - Zvar * x40 -
+                    magneticFieldSquared * normalMagneticField *
+                        spatialVelocity[1] +
+                    magneticField[1] * x141 + x125 * x66 + x31 * x66);
+  m[7][5] = x130 * (-Zvar * normalMagneticField * spatialVelocity[2] - Zvar * x44 -
+                    magneticFieldSquared * normalMagneticField *
+                        spatialVelocity[2] +
+                    magneticField[2] * x141 + x125 * x71 + x31 * x71);
   m[7][6] = -x129 * (Dvar * x116 * x31 * x75 + x125 * (Dvar * x116 * x75 + x0));
   m[7][7] = -Dvar * x126 * x19 * x7 /
             (Zvar * (Zvar * (-soundSpeedSquared / x14 + x4) -
