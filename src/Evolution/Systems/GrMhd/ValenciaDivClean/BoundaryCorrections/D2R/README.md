@@ -32,12 +32,18 @@ The seven states are `U=(D,mn,mt,mb,tau,Bt,Bb)`, where `tau=E-D`, and
    finite actual C physical maps. Its slow correction is disabled.
 2. For a mixed fan, form a pressure-coherent baseline using the private v5
    fixed-bound HLLD helper. Its root refinement either succeeds or explicitly
-   falls back to HLL. Equal primitives use their physical flux exactly.
+   falls back to HLL. Equal primitives use their physical flux exactly. (The
+   batch-level round-off shortcut, `SPECTRE_D2R_ROUNDOFF_TOL`, returns this same
+   baseline since 2026-10-20.)
 3. Recover and check the **actual stored** original states. Form their numerical
    entropy model. If necessary repair the baseline along `-nu (UR-UL)` using
    the derived entropy and binary64 rounding budget. A thermodynamically
    unsupported original encoding makes the callback reject the point; the
    SpECTRE adapter retains HLL. It is not counted as a supported D2-R result.
+   The repair is bounded (2026-10-20): a repair that would move the baseline
+   by more than `C s_max |UR-UL|` (C = 2, `SPECTRE_D2R_CONSISTENCY`) rejects the
+   point as well; without it, nearly uniform pairs got baselines off by
+   1e-5..3e-4 of the flux.
 4. Use the recovered midpoint thermodynamics and averaged timelike velocity
    to form the reference. Compute the true SR magnetosonic roots and Saul's
    analytic left/right slow pairs. The complete weighted actions are
@@ -51,8 +57,10 @@ The seven states are `U=(D,mn,mt,mb,tau,Bt,Bb)`, where `tau=E-D`, and
    original and modified states. Check both actual C re-encodings. Form
    `V0=K0-(F0,L+F0,R)/2`, `Vc=Kc-(Fc,L+Fc,R)/2` and freeze
    `T=Vc-V0-beta Q/2`.
-7. Select `alpha` on the original-input entropy model and return
-   `F=Fb+alpha T`. Each final affine component is summed as an exact rational
+7. Scale `T` down to the same bound `C s_max |UR-UL|` if it exceeds it
+   (`FaceResult::consistency`; the margin is affine along the ray, so the
+   entropy condition survives the scaling). Select `alpha` on the
+   original-input entropy model and return `F=Fb+alpha T`. Each final affine component is summed as an exact rational
    before rounding once to binary64, with explicit post-checks. Unsupported
    correction steps retain the supported baseline. Exactly one-sided original
    fans retain their upwind baseline.
