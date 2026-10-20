@@ -133,7 +133,9 @@ into `hydroYe-mhd-tov` and first evolved:
 - `SPECTRE_D2R_STATS=N` prints a cost line to stderr every N batch calls: points,
   solves (equal / active / unsupported), near-equal faces, memo hits, kernel
   seconds against wall seconds, slowest face.
-- `SPECTRE_D2R_ROUNDOFF_TOL=tol` returns the native HLLD flux of the pair, with no
+- `SPECTRE_D2R_ROUNDOFF_TOL=tol` returns the baseline of the pair (since 2026-10-20 the
+  fixed-bound solve with the pair's native bounds, the same solve as the candidate; before,
+  native HLLD), with no
   slow-mode response, on faces whose states differ by at most `tol` relative in
   every component (rho and p by themselves, velocities by c, the field by |B|).
   SpECTRE's FD slab is transversely uniform only to ~1e-12, so a "1-D" tube
@@ -146,6 +148,40 @@ into `hydroYe-mhd-tov` and first evolved:
 
 Independent of these, bit-identical left and right states return their physical
 flux at once, and bit-identical faces within one batch are solved once.
+
+## Consistency bound and the near-equal baseline (2026-10-19/20)
+
+Two defects found by the transverse-symmetry investigation of the 1-D cold large-B_x tube on
+the 3-D slab (`~/spectre_runs/branch_testing/run07_pluto_d2r/sensitivity/README.md`; with
+the kernel of 2026-10-19 the 25 transverse copies of every cell, bit-identical at t = 1,
+differed by 0.1–0.3 % in ρ from t ≈ 1.7 on, while HLLD and HLLx stayed at 1e-10):
+
+- **The entropy repair was not tied to the jump.** Its coefficient divides by the pair's
+  entropy jump; on pairs differing by 2e-10 it moved the baseline by 1e-5 (transverse normal)
+  to 3e-4 (x normal) of the flux, a million times the physical jump. The kernel now enforces
+  `|F - F_candidate| <= C s_max |U_R - U_L|` with `C = SPECTRE_D2R_CONSISTENCY` (default 2,
+  0 = off): a repair beyond the bound leaves the face unsupported (the shim keeps its HLL flux,
+  which is consistent), and a response beyond it is scaled down to it, which keeps the entropy
+  condition because the margin is affine along the ray. On the relativistic tube the response
+  stays below 0.93 s_max |dU| and the repair below 4e-7 of the flux, so nothing changes there
+  (tube L1 errors identical to every printed digit). `FaceResult::consistency` records the
+  scaling; the stats line counts `consistency-capped` and `repair-bound`.
+- **The near-equal path returned native `hlld.c`, whose pressure iteration stops at 1e-5 of p,
+  while the full path's candidate is the fixed-bound solve, whose root is refined to adjacent
+  doubles.** A face crossing `SPECTRE_D2R_ROUNDOFF_TOL` therefore jumped by 1e-5 of the flux,
+  which is what broke the symmetry once the copies' pressures had drifted that far apart. The
+  near-equal path now returns the same fixed-bound solve (native bounds, when they straddle
+  zero). Near-uniform transverse pairs: error 1.2e-9 of the flux instead of 9.8e-6 (HLLD's
+  own); jitter under one-ulp nudges 4.8e-7 of the mass flux instead of 3.6e-4.
+- `SPECTRE_D2R_JUMP_FLOOR=eta` (default 0 = off) multiplies the response by
+  `min(1, (|dU| / (eta |U|))^2)`. Tested at 1e-3: neutral for the tube errors (within 0.02) and
+  for the symmetry; kept as an experiment switch only.
+
+Result (80-cell cold tube, memo at 1e-10): transverse asymmetry 1.6e-10 of ρ at t = 10
+(6.6e-3 before; HLLx 2.7e-10 of the range, HLLD 4e-12), L1 within 0.02 of before, 613 s wall.
+Iterations: jobs 79294 (bound), 79295 (+ jump floor), 79296 (+ near-equal baseline). The
+x-faces were never the problem: under round-off-sized input changes the kernel's x-flux moves
+exactly as little as HLL's (3e-11 on the mass flux for 1e-10 changes; `harness16`).
 
 ## The family-filter weight (decided 2026-10-19)
 

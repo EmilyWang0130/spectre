@@ -59,6 +59,49 @@ bool finite(const State& a) {
   return std::all_of(a.begin(), a.end(),
                      [](const double x) { return std::isfinite(x); });
 }
+double state_norm(const State& a) {
+  double s = 0.;
+  for (const double x : a) {
+    s += x * x;
+  }
+  return std::sqrt(s);
+}
+
+// SPECTRE_D2R_CONSISTENCY (unset = 2, 0 = off): the consistency bound. A
+// Riemann flux must return to the physical flux as the two states converge,
+// and no part of a slow-mode correction can legitimately exceed the largest
+// signal speed times the jump, |F - F_native| <= C s_max |U_R - U_L|. Two
+// pieces of the kernel violated this on nearly uniform pairs (2026-10-19,
+// run07_pluto_d2r/sensitivity): the entropy repair, whose coefficient divides
+// by the pair's entropy jump and moved the baseline by 1e-5..1e-4 of the flux
+// for jumps of 2e-10 (the source of the transverse noise of the 1-D cold tube
+// on the 3-D slab); and the response, whose slow projection amplifies the
+// jump up to 50x where the slow and entropy speeds nearly coincide (beta ~
+// 1e-3), reaching 23 s_max |dU|. On the relativistic tube, where the method
+// gains, the response stays below 0.93 s_max |dU| and the repair below 4e-7
+// of the flux, so C = 2 leaves that unchanged. A repair beyond the bound
+// leaves the face unsupported (the shim keeps its HLL flux, which is
+// consistent); a response beyond it is scaled down to it, which keeps the
+// entropy condition because the margin is affine along the ray.
+const double consistency_factor = [] {
+  const char* e = std::getenv("SPECTRE_D2R_CONSISTENCY");
+  return e == nullptr ? 2.0 : std::atof(e);
+}();
+
+// SPECTRE_D2R_JUMP_FLOOR (unset or 0 = off): respond only to resolved jumps.
+// At low beta the slow-mode amplitude is read from the pressure jump divided
+// by c_s^2, and the response is a small residual of two O(Q) terms, so the
+// response of a face moves by ~1e7 times a relative change of its inputs
+// (relative to the jump's flux) where c_s^2 ~ 1e-4: faces whose states differ
+// by round-off respond differently at the 1e-3 level (2026-10-19,
+// run07_pluto_d2r/sensitivity, harness14). The weight
+// min(1, (|U_R - U_L| / (eta |U|))^2) switches the response off where the
+// cell-to-cell jump is below eta of the state -- the regime in which that
+// sensitivity acts on round-off -- and leaves shocks untouched.
+const double jump_floor = [] {
+  const char* e = std::getenv("SPECTRE_D2R_JUMP_FLOOR");
+  return e == nullptr ? 0.0 : std::atof(e);
+}();
 }  // namespace
 
 FaceResult solve_face(const State& left, const State& right, const double bn,
@@ -144,6 +187,24 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   if (not repair.supported) {
     result.status = repair.reason;
     return result;
+  }
+  State jump_state{};
+  for (size_t j = 0; j < 7; ++j) {
+    jump_state[j] = base.ur[j] - base.ul[j];
+  }
+  const double consistency_scale =
+      consistency_factor *
+      std::max(std::abs(base.bounds[0]), std::abs(base.bounds[1])) *
+      state_norm(jump_state);
+  if (consistency_factor > 0.) {
+    State moved{};
+    for (size_t j = 0; j < 7; ++j) {
+      moved[j] = repair.flux[j] - candidate[j];
+    }
+    if (state_norm(moved) > consistency_scale) {
+      result.status = "repair_exceeds_consistency_bound";
+      return result;
+    }
   }
   result.supported = true;
   result.flux = result.baseline = repair.flux;
@@ -237,6 +298,29 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
                             static_cast<long double>(input_cap.beta) *
                                 slow.absolute_slow_jump[j] / 2.L);
   }
+  if (jump_floor > 0.) {
+    State mean_state{};
+    for (size_t j = 0; j < 7; ++j) {
+      mean_state[j] = 0.5 * (base.ul[j] + base.ur[j]);
+    }
+    const double resolved =
+        state_norm(jump_state) / (jump_floor * state_norm(mean_state));
+    if (resolved < 1.) {
+      result.jump_weight = resolved * resolved;
+      for (auto& x : result.direction) {
+        x *= result.jump_weight;
+      }
+    }
+  }
+  if (consistency_factor > 0.) {
+    const double response_norm = state_norm(result.direction);
+    if (response_norm > consistency_scale) {
+      result.consistency = consistency_scale / response_norm;
+      for (auto& x : result.direction) {
+        x *= result.consistency;
+      }
+    }
+  }
   const auto output = model.cap(result.baseline, result.direction);
   if (not output.supported) {
     return keep("output_line_unsupported");
@@ -258,7 +342,8 @@ thread_local PlutoD2RDiagnostics diagnostics{};
 // no flux depends on it. (2026-10-15, task 2's integration tests.)
 struct Stats {
   long calls = 0, points = 0, solves = 0, memo_hits = 0, equal = 0, active = 0,
-       unsupported = 0, near_equal = 0, near_memo = 0;
+       unsupported = 0, near_equal = 0, near_memo = 0, consistency_capped = 0,
+       repair_bound = 0, jump_damped = 0;
   double kernel_seconds = 0., max_face_seconds = 0.;
   std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
 };
@@ -399,18 +484,33 @@ int pluto_d2r_flux_impl(const int npts, const double* left,
       const State pl{l[0], l[1], l[2], l[3], l[7], l[5], l[6]};
       const State pr{r[0], r[1], r[2], r[3], r[7], r[5], r[6]};
       if (roundoff_tol > 0. and pl != pr and near_equal(l, r, roundoff_tol)) {
-        // Round-off-level jump: the baseline (native HLLD of the pair), no
-        // response. Falls through to the full path if the core call fails.
+        // Round-off-level jump: the baseline of the pair, no response. The
+        // baseline is the SAME solve as solve_face's candidate -- the
+        // fixed-bound solve with the pair's native bounds, whose root is
+        // refined to adjacent doubles -- not native hlld.c, whose pressure
+        // iteration stops at 1e-5 of p: with the native flux here, a face
+        // crossing the tolerance jumped by 1e-5 of the flux, which broke the
+        // transverse symmetry of the 1-D cold tube on the 3-D slab at t = 1.7
+        // (2026-10-19, run07_pluto_d2r/sensitivity, iteration 3). Falls
+        // through to the full path if the core calls fail.
         const auto base = core(0, pl, pr, l[4], gamma);
-        if (base.status() == 1 and finite(base.flux)) {
-          out[0] = base.flux[0];
-          out[1] = base.flux[1];
-          out[2] = base.flux[2];
-          out[3] = base.flux[3];
+        State flux = base.flux;
+        if (base.status() == 1 and base.bounds[0] < 0. and
+            base.bounds[1] > 0.) {
+          const auto refined = core(1, pl, pr, l[4], gamma, base.bounds);
+          if (refined.status() == 1 and finite(refined.flux)) {
+            flux = refined.flux;
+          }
+        }
+        if (base.status() == 1 and finite(flux)) {
+          out[0] = flux[0];
+          out[1] = flux[1];
+          out[2] = flux[2];
+          out[3] = flux[3];
           out[4] = 0.;
-          out[5] = base.flux[5];
-          out[6] = base.flux[6];
-          out[7] = base.flux[4];
+          out[5] = flux[5];
+          out[6] = flux[6];
+          out[7] = flux[4];
           pressure[k] = 0.;
           ++supported;
           ++diagnostics.supported;
@@ -431,6 +531,9 @@ int pluto_d2r_flux_impl(const int npts, const double* left,
       stats.equal += (pl == pr);
       stats.active += face.active;
       stats.unsupported += not face.supported;
+      stats.consistency_capped += face.consistency < 1.;
+      stats.repair_bound += face.status == "repair_exceeds_consistency_bound";
+      stats.jump_damped += face.jump_weight < 1.;
       diagnostics.causal_fallback += face.causal_fallback;
       if (not face.supported or not finite(face.flux)) {
         ++diagnostics.unsupported;
@@ -465,16 +568,19 @@ int pluto_d2r_flux_impl(const int npts, const double* left,
     const double wall = std::chrono::duration<double>(
                             std::chrono::steady_clock::now() - stats.start)
                             .count();
-    std::fprintf(stderr,
-                 "D2R stats [%s]: %ld calls, %ld points, %ld solves (%ld equal, "
-                 "%ld active, %ld unsupported), %ld near-equal (tol %g), "
-                 "%ld memo hits + %ld near-memo; kernel %.1f s of %.1f s "
-                 "wall, max face %.3f s\n",
-                 multiprecision_build ? "160-digit" : "double", stats.calls,
-                 stats.points, stats.solves, stats.equal,
-                 stats.active, stats.unsupported, stats.near_equal,
-                 roundoff_tol, stats.memo_hits, stats.near_memo,
-                 stats.kernel_seconds, wall, stats.max_face_seconds);
+    std::fprintf(
+        stderr,
+        "D2R stats [%s]: %ld calls, %ld points, %ld solves (%ld equal, "
+        "%ld active, %ld unsupported), %ld near-equal (tol %g), "
+        "%ld memo hits + %ld near-memo, %ld consistency-capped + "
+        "%ld repair-bound (C %g), %ld jump-damped (eta %g); kernel "
+        "%.1f s of %.1f s wall, max face %.3f s\n",
+        multiprecision_build ? "160-digit" : "double", stats.calls,
+        stats.points, stats.solves, stats.equal, stats.active,
+        stats.unsupported, stats.near_equal, roundoff_tol, stats.memo_hits,
+        stats.near_memo, stats.consistency_capped, stats.repair_bound,
+        consistency_factor, stats.jump_damped, jump_floor, stats.kernel_seconds,
+        wall, stats.max_face_seconds);
     std::fflush(stderr);
   }
   return supported;

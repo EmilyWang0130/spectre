@@ -24,6 +24,12 @@ struct FaceResult {
   std::array<double, 2> bounds{};
   double beta = 0.;
   double alpha = 0.;
+  // The consistency bound's scaling of the response direction (1 = not
+  // bound); the bound itself is C s_max |U_R - U_L|, see Flux.cpp.
+  double consistency = 1.;
+  // The resolved-jump weight min(1, (|dU| / (eta |U|))^2) applied to the
+  // response (1 = not damped; eta = SPECTRE_D2R_JUMP_FLOOR, 0 = off).
+  double jump_weight = 1.;
   int core_calls = 0;
   int native_status = 0;
   int baseline_outcome = -1;
