@@ -262,8 +262,17 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   if (not reference.success) {
     return keep("reference_unsupported");
   }
-  const auto slow =
-      slow_action(reference.primitive, bn, gamma, base.ul, base.ur);
+  // Design D8 (2026-10-21): the reference state's magnetosonic roots start
+  // from the mean of the two sides' speeds, which the core computed with
+  // PLUTO's Magnetosonic for its checks (doubles[8 ... 15]), as gaps from the
+  // reference normal velocity.
+  std::array<double, 4> root_starts{};
+  for (size_t k = 0; k < 4; ++k) {
+    root_starts[k] = 0.5 * (base.doubles[8 + k] + base.doubles[12 + k]) -
+                     reference.primitive[1];
+  }
+  const auto slow = slow_action(reference.primitive, bn, gamma, base.ul,
+                                base.ur, root_starts);
   if (not slow.supported) {
     return keep("analytic_modes_unsupported");
   }

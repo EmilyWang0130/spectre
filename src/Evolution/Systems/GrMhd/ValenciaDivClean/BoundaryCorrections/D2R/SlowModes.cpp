@@ -101,11 +101,16 @@ PhysicalState physical_state(const State& primitive, const double bn,
 // as the bisection it replaces: about 6-10 evaluations instead of ~52
 // (binary64) or ~530 (160 digits). The root differs from the bisection's in the
 // last bits.
+//
+// Design D8 (2026-10-21): the endpoint values come from the caller, which
+// evaluates each of the brackets' five distinct endpoints once (they were
+// evaluated up to three times), and the iteration starts at `start` when that
+// lies strictly inside the bracket.
 template <typename Function, typename Slope>
-bool bracketed_root(const Function& function, const Slope& slope, Real left,
-                    Real right, Real* const root) {
-  Real fleft = function(left);
-  Real fright = function(right);
+bool bracketed_root(const Function& function, const Slope& slope,
+                    const Real& left, const Real& right, const Real& fleft,
+                    const Real& fright, const double start,
+                    Real* const root) {
   if (not(finite(fleft) and finite(fright))) {
     throw std::runtime_error("nonfinite_quartic_endpoint");
   }
@@ -124,6 +129,12 @@ bool bracketed_root(const Function& function, const Slope& slope, Real left,
   Real lower = fleft < 0 ? left : right;
   Real upper = fleft < 0 ? right : left;
   Real x = half(left + right);
+  if (std::isfinite(start)) {
+    const Real s = exact_double(start);
+    if (std::min(left, right) < s and s < std::max(left, right)) {
+      x = s;
+    }
+  }
   Real step_before = magnitude(right - left);
   Real step = step_before;
   Real f = function(x);
@@ -171,7 +182,8 @@ struct Spectrum {
   const char* failure = nullptr;
 };
 
-Spectrum physical_spectrum(const PhysicalState& state) {
+Spectrum physical_spectrum(const PhysicalState& state,
+                           const std::array<double, 4>& root_starts) {
   const Real& vn = state.velocity[0];
   const Real& bn = state.magnetic[0];
   const Real H = state.rho * state.enthalpy;
@@ -228,21 +240,28 @@ Spectrum physical_spectrum(const PhysicalState& state) {
   // silently mislabel a fast/slow family. The exactly parallel factorization
   // above handles its known collisions; other zero endpoint evaluations are
   // an explicit numerical support gap, without a fitted near-gap threshold.
-  if (quartic(alfven_gap[0]) == 0 or quartic(alfven_gap[1]) == 0) {
+  const Real zero = 0;
+  // The brackets' endpoints, each evaluated once (design D8): family j lies
+  // between ends[j] and ends[j + 1].
+  const std::array<Real, 5> ends{-1 - vn, alfven_gap[0], zero, alfven_gap[1],
+                                 1 - vn};
+  std::array<Real, 5> values{};
+  values[1] = quartic(ends[1]);
+  values[3] = quartic(ends[3]);
+  if (values[1] == 0 or values[3] == 0) {
     result.failure = "nonparallel_quartic_boundary_root_unsupported";
     return result;
   }
-  const Real zero = 0;
+  values[0] = quartic(ends[0]);
+  values[2] = quartic(ends[2]);
+  values[4] = quartic(ends[4]);
   // The four families in the order of the original braced list, stopping at
   // the first unresolved bracket as the exception did.
-  const std::array<std::array<Real, 2>, 4> brackets{{{-1 - vn, alfven_gap[0]},
-                                                     {alfven_gap[0], zero},
-                                                     {zero, alfven_gap[1]},
-                                                     {alfven_gap[1], 1 - vn}}};
   std::array<Real, 4> roots{};
   for (size_t j = 0; j < 4; ++j) {
-    if (not bracketed_root(quartic, quartic_slope, brackets[j][0],
-                           brackets[j][1], &roots[j])) {
+    if (not bracketed_root(quartic, quartic_slope, ends[j], ends[j + 1],
+                           values[j], values[j + 1], root_starts[j],
+                           &roots[j])) {
       result.failure = "quartic_family_bracket_unresolved";
       return result;
     }
@@ -449,7 +468,8 @@ std::pair<MpState, MpState> analytic_pair(const PhysicalState& state,
 
 SlowAction slow_action(const State& primitive, const double bn,
                        const double gamma, const State& left_tau,
-                       const State& right_tau) {
+                       const State& right_tau,
+                       const std::array<double, 4>& root_starts) {
   SlowAction result{};
   try {
     const PhysicalState state = physical_state(primitive, bn, gamma);
@@ -461,7 +481,7 @@ SlowAction slow_action(const State& primitive, const double bn,
       result.status = "exact_Bn_zero_filter";
       return result;
     }
-    const Spectrum spectrum = physical_spectrum(state);
+    const Spectrum spectrum = physical_spectrum(state, root_starts);
     if (spectrum.failure != nullptr) {
       result.supported = false;
       result.status = spectrum.failure;

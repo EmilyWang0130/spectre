@@ -14,7 +14,7 @@ extern "C" {
  */
 #define D2R_CORE_ABI 3
 #define D2R_CORE_NI 14
-#define D2R_CORE_ND 8
+#define D2R_CORE_ND 16
 int d2r_sr_core_abi(void);
 int d2r_sr_fixed_precision(void);
 /* Mode 0 native (recomputes bounds), 1 fixed supplied bounds, 2 physical maps,
@@ -26,8 +26,10 @@ int d2r_sr_fixed_precision(void);
  * native_iterations,outcome,root_failure,root_iterations,root_attempted,
  * hll_recovery_called,hll_recovery_status,unresolved_velocity,
  * flags_before,flags_after.
- * doubles[n][8]: SL,SR,pressure_guess,pressure_returned,last_root_residual,
- * alfven_left,alfven_right,contact.
+ * doubles[n][16]: SL,SR,pressure_guess,pressure_returned,last_root_residual,
+ * alfven_left,alfven_right,contact, then the left state's magnetosonic speeds
+ * fast-,slow-,slow+,fast+ and the right state's (PLUTO's Magnetosonic, as the
+ * pair's checks compute them; NaN where they did not).
  * Native-only root quantities are unavailable (-1 / NaN); no shadow solve.
  * status: 1 usable; 0 invalid primitive; -1 nonfinite map; -2 speed failure;
  * -3 invalid bounds; -4 nonfinite numerical flux; -5 velocity rounding conflict.

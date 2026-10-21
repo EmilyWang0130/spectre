@@ -76,9 +76,10 @@ static void physical_tau(const State *s,double *u,double *f) {
 }
 
 /* cmin, cmax: each side's fast magnetosonic speeds (KFASTM, KFASTP), as
- * MaxSignalSpeed takes them for HLL_Speed. */
+ * MaxSignalSpeed takes them for HLL_Speed; speeds[2][4]: each side's four
+ * (fast-, slow-, slow+, fast+), for the caller (design D8). */
 static int prepare_pair(D2R_SR_Context *c,const double *row,double *u,double *f,
- double *cmin,double *cmax) {
+ double *cmin,double *cmax,double *speeds) {
   const double *wl=row+2,*wr=row+9;
   int left=check_w(wl,row[1],row[0]),right=check_w(wr,row[1],row[0]);
   if (left!=1 || right!=1) return left==-5||right==-5 ? -5 : 0;
@@ -99,6 +100,8 @@ static int prepare_pair(D2R_SR_Context *c,const double *row,double *u,double *f,
     if(Magnetosonic(s->v[0],s->a2[0],s->h[0],waves)) return -2;
     if(!good_bounds(waves[KFASTM],waves[KFASTP])) return -2;
     cmin[side]=waves[KFASTM];cmax[side]=waves[KFASTP];
+    speeds[4*side]=waves[KFASTM];speeds[4*side+1]=waves[KSLOWM];
+    speeds[4*side+2]=waves[KSLOWP];speeds[4*side+3]=waves[KFASTP];
   }
   return 1;
 }
@@ -130,7 +133,7 @@ int d2r_sr_core_batch(size_t n,int mode,const double *faces,const double *fixed,
     b[0]=b[1]=NAN;i[0]=0;i[1]=0;i[2]=0;i[3]=0;i[11]=0;
     D2R_SR_Context *c=&core_context[mode==1||mode==3];
     double cmin[2],cmax[2];
-    const int prepared=prepare_pair(c,faces+16*k,u,f,cmin,cmax);
+    const int prepared=prepare_pair(c,faces+16*k,u,f,cmin,cmax,d+8);
     if(prepared!=1) {i[0]=prepared;i[11]=prepared==-5;continue;}
     i[1]=1;
     int native=mode==0;
