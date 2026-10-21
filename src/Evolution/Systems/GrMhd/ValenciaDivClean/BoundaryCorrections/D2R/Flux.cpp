@@ -268,8 +268,10 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   if (input_cap.left == base.ul and input_cap.right == base.ur) {
     return keep("zero_represented_input_change");
   }
-  const auto cl = recover(input_cap.left, bn, gamma);
-  const auto cr = recover(input_cap.right, bn, gamma);
+  // The cap recovered exactly these states to accept them (2026-10-20: the
+  // same two recoveries were repeated here).
+  const auto& cl = input_cap.left_recovery;
+  const auto& cr = input_cap.right_recovery;
   if (not cl.success or not cr.success) {
     return keep("modified_recovery_unsupported");
   }

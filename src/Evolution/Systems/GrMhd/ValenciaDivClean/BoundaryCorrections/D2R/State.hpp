@@ -60,6 +60,10 @@ struct PhysicalCap {
   State right{};
   std::size_t evaluations = 0;
   bool full_supported = false;
+  // The recoveries of left and right that accepted them (set with a nonzero
+  // beta), so a caller need not repeat them.
+  Recovery left_recovery{};
+  Recovery right_recovery{};
 };
 
 struct LineResult {

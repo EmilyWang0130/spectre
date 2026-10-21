@@ -783,6 +783,7 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
     out.reason = "invalid_pair_or_shift";
     return out;
   }
+  Recovery left_recovery{}, right_recovery{};
   const auto at = [&](double beta, State* left, State* right) {
     for (std::size_t i = 0; i < 7; ++i) {
       // Match the prototype's stored long-double multiplication followed by
@@ -794,8 +795,11 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
           static_cast<double>(static_cast<long double>(ur[i]) - product);
     }
     ++out.evaluations;
-    return recover(*left, bn, gamma).success &&
-           recover(*right, bn, gamma).success;
+    left_recovery = recover(*left, bn, gamma);
+    if (!left_recovery.success)
+      return false;
+    right_recovery = recover(*right, bn, gamma);
+    return right_recovery.success;
   };
   State l{}, r{};
   if (at(1., &l, &r)) {
@@ -803,6 +807,8 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
     out.beta = 1.;
     out.left = l;
     out.right = r;
+    out.left_recovery = std::move(left_recovery);
+    out.right_recovery = std::move(right_recovery);
     out.reason = "full_supported";
     return out;
   }
@@ -826,6 +832,8 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
   out.beta = low;
   out.left = l;
   out.right = r;
+  out.left_recovery = std::move(left_recovery);
+  out.right_recovery = std::move(right_recovery);
   out.reason = "verified_numerical_coefficient";
   return out;
 }
