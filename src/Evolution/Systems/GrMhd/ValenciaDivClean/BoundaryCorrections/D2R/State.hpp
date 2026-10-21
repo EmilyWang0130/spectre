@@ -101,6 +101,11 @@ Recovery recover(const State& u, double bn, double gamma,
                  const RootHint& hint = {});
 EntropyPair entropy_pair(const State& u, double bn, double gamma,
                          const RootHint& hint = {});
+// The entropy pair of the state with these primitives, without recovering
+// them from its conserved state (design D1, 2026-10-21): the face's own
+// primitives, of which the conserved states are the encoding.
+EntropyPair entropy_pair_from_primitive(const State& p, double bn,
+                                        double gamma);
 // The energy root of the state with these primitives, x = (rho + Gamma p /
 // (Gamma - 1)) W^2 - rho W: a start for recovering its conserved state.
 RootHint primitive_hint(const State& p, double gamma);
@@ -132,12 +137,17 @@ struct EntropyModel {
 
   EntropyModel(const State& ul, const State& ur, double bn, double gamma,
                const RootHint& left_hint = {}, const RootHint& right_hint = {});
+  // The model of the conserved states ul, ur with the entropy variables of
+  // their primitives, given (design D1).
+  EntropyModel(const State& ul, const State& ur, const State& left_primitive,
+               const State& right_primitive, double bn, double gamma);
   Real margin(const State& flux) const;
   Real tolerance(const State& flux) const;
   LineResult repair(const State& candidate) const;
   LineResult cap(const State& baseline, const State& direction) const;
 
  private:
+  void complete();
   State ul_{};
   State ur_{};
 };

@@ -197,12 +197,13 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
     }
     candidate = refined.flux;
   }
-  // Each recovery's root search starts from a nearby known root: the face
-  // primitives' for the two states, then the endpoints' roots for the midpoint
-  // and the capped states (2026-10-20; a start only seeds the search).
-  const EntropyModel model(base.ul, base.ur, bn, gamma,
-                           primitive_hint(left, gamma),
-                           primitive_hint(right, gamma));
+  // Design D1 (2026-10-21): the entropy variables of the two states are those
+  // of the face's own primitives, whose encoding the conserved states are; the
+  // original recovered them from ul, ur, which reproduces the primitives to
+  // round-off at the cost of two recoveries. The response's first fixed-bound
+  // solve is then the refined solve itself. The recoveries of the midpoint and
+  // the capped states start from the face primitives' roots.
+  const EntropyModel model(base.ul, base.ur, left, right, bn, gamma);
   if (not model.supported) {
     thread_local std::string composite;
     composite = model.reason;

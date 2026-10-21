@@ -737,6 +737,32 @@ RootHint primitive_hint(const State& p, const double gamma) {
   return out;
 }
 
+namespace {
+// The entropy variables z, the entropy flux psi and the entropy eta of the
+// state with these primitives (out.recovery.high_precision_primitive).
+void entropy_variables(EntropyPair* const out, const double bn,
+                       const double gamma) {
+  const auto x = parts(out->recovery.high_precision_primitive, bn);
+  const Real gm = exact_double(gamma), s = log(x.p) - gm * log(x.rho),
+             beta = x.rho / x.p;
+  const Real d = x.rho * x.w;
+  out->eta = -d * s / (gm - 1);
+  out->z = {(gm - s) / (gm - 1) - beta * x.wm1,
+            beta * x.w * x.v[0],
+            beta * x.w * x.v[1],
+            beta * x.w * x.v[2],
+            -beta * x.w,
+            beta * (x.b[1] / x.w + x.w * x.vb * x.v[1]),
+            beta * (x.b[2] / x.w + x.w * x.vb * x.v[2])};
+  out->psi =
+      d * x.v[0] +
+      beta * x.w *
+          (half((x.b2 * (1 - x.v2) + x.vb * x.vb) * x.v[0]) - x.b[0] * x.vb);
+  out->success = true;
+  out->reason = "numerical_entropy_pair";
+}
+}  // namespace
+
 EntropyPair entropy_pair(const State& u, double bn, double gamma,
                          const RootHint& hint) {
   EntropyPair out{};
@@ -745,23 +771,25 @@ EntropyPair entropy_pair(const State& u, double bn, double gamma,
     out.reason = out.recovery.reason;
     return out;
   }
-  const auto x = parts(out.recovery.high_precision_primitive, bn);
-  const Real gm = exact_double(gamma), s = log(x.p) - gm * log(x.rho),
-             beta = x.rho / x.p;
-  const Real d = x.rho * x.w;
-  out.eta = -d * s / (gm - 1);
-  out.z = {(gm - s) / (gm - 1) - beta * x.wm1,
-           beta * x.w * x.v[0],
-           beta * x.w * x.v[1],
-           beta * x.w * x.v[2],
-           -beta * x.w,
-           beta * (x.b[1] / x.w + x.w * x.vb * x.v[1]),
-           beta * (x.b[2] / x.w + x.w * x.vb * x.v[2])};
-  out.psi = d * x.v[0] + beta * x.w *
-                             (half((x.b2 * (1 - x.v2) + x.vb * x.vb) * x.v[0]) -
-                              x.b[0] * x.vb);
-  out.success = true;
-  out.reason = "numerical_entropy_pair";
+  entropy_variables(&out, bn, gamma);
+  return out;
+}
+
+EntropyPair entropy_pair_from_primitive(const State& p, double bn,
+                                        double gamma) {
+  EntropyPair out{};
+  if (!physical_primitive(p, bn, gamma)) {
+    out.reason = "face_primitive_unphysical";
+    out.recovery.reason = out.reason;
+    return out;
+  }
+  out.recovery.success = true;
+  out.recovery.reason = "face_primitive";
+  out.recovery.primitive = p;
+  out.recovery.high_precision_primitive = imported(p);
+  out.recovery.roundtrip_checked = true;
+  out.recovery.roots = primitive_hint(p, gamma);
+  entropy_variables(&out, bn, gamma);
   return out;
 }
 
@@ -919,6 +947,21 @@ EntropyModel::EntropyModel(const State& ul, const State& ur, double bn,
       right(entropy_pair(ur, bn, gamma, right_hint)),
       ul_(ul),
       ur_(ur) {
+  complete();
+}
+EntropyModel::EntropyModel(const State& ul, const State& ur,
+                           const State& left_primitive,
+                           const State& right_primitive, double bn,
+                           double gamma)
+    : left(entropy_pair_from_primitive(left_primitive, bn, gamma)),
+      right(entropy_pair_from_primitive(right_primitive, bn, gamma)),
+      ul_(ul),
+      ur_(ur) {
+  complete();
+}
+void EntropyModel::complete() {
+  const State& ul = ul_;
+  const State& ur = ur_;
   supported = left.success && right.success;
   reason = supported ? std::string("supported")
                      : std::string("entropy_inputs_") + left.reason + "_" +
