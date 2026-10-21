@@ -94,9 +94,16 @@ PhysicalState physical_state(const State& primitive, const double bn,
 // An unresolved family bracket (both ends of one sign) is an expected outcome
 // on evolved faces (a few per cent of a jet's), so it is returned, not thrown
 // (2026-10-20): false, the root untouched. Every other failure still throws.
-template <typename Function>
-bool bracketed_root(const Function& function, Real left, Real right,
-                    Real* const root) {
+//
+// Design D2 (2026-10-21): Newton's method on the quartic with its analytic
+// slope, safeguarded by the bracket (a bisection step whenever the Newton step
+// would leave it or not halve the step before), to the same relative precision
+// as the bisection it replaces: about 6-10 evaluations instead of ~52
+// (binary64) or ~530 (160 digits). The root differs from the bisection's in the
+// last bits.
+template <typename Function, typename Slope>
+bool bracketed_root(const Function& function, const Slope& slope, Real left,
+                    Real right, Real* const root) {
   Real fleft = function(left);
   Real fright = function(right);
   if (not(finite(fleft) and finite(fright))) {
@@ -113,32 +120,44 @@ bool bracketed_root(const Function& function, Real left, Real right,
   if ((fleft < 0) == (fright < 0)) {
     return false;
   }
+  // The bracket oriented by sign: function(lower) < 0 < function(upper).
+  Real lower = fleft < 0 ? left : right;
+  Real upper = fleft < 0 ? right : left;
+  Real x = half(left + right);
+  Real step_before = magnitude(right - left);
+  Real step = step_before;
+  Real f = function(x);
   for (size_t iteration = 0; iteration < 4096; ++iteration) {
-    const Real scale = std::max(magnitude(left), magnitude(right));
-    const Real width = right - left;
-    if (width <= std::numeric_limits<Real>::epsilon() * scale) {
-      *root = magnitude(fleft) < magnitude(fright) ? left : right;
-      return true;
-    }
-    const Real middle = half(left + right);
-    if (not(middle > left and middle < right)) {
-      throw std::runtime_error("quartic_midpoint_not_strictly_inside");
-    }
-    const Real fmiddle = function(middle);
-    if (not finite(fmiddle)) {
+    if (not finite(f)) {
       throw std::runtime_error("nonfinite_quartic_evaluation");
     }
-    if (fmiddle == 0) {
-      *root = middle;
+    if (f == 0) {
+      *root = x;
       return true;
     }
-    if ((fmiddle < 0) == (fleft < 0)) {
-      left = middle;
-      fleft = fmiddle;
+    if (f < 0) {
+      lower = x;
     } else {
-      right = middle;
-      fright = fmiddle;
+      upper = x;
     }
+    const Real df = slope(x);
+    const bool newton = finite(df) and df != 0 and
+                        ((x - upper) * df - f) * ((x - lower) * df - f) < 0 and
+                        magnitude(2 * f) <= magnitude(step_before * df);
+    step_before = step;
+    if (newton) {
+      step = f / df;
+      x -= step;
+    } else {
+      step = half(upper - lower);
+      x = lower + step;
+    }
+    if (magnitude(step) <=
+        std::numeric_limits<Real>::epsilon() * magnitude(x)) {
+      *root = x;
+      return true;
+    }
+    f = function(x);
   }
   throw std::runtime_error("quartic_bisection_resource_limit");
 }
@@ -190,6 +209,20 @@ Spectrum physical_spectrum(const PhysicalState& state) {
     return aa * G * state.comoving_magnetic_squared - H * square(aa) +
            state.sound_squared * (H * aa * (aa + G) - square(Bq) * G);
   };
+  // d quartic / d gap, for the Newton steps of the root search.
+  const auto quartic_slope = [&state, &H, &vn, &bn](const Real& gap) -> Real {
+    const Real aa = square(state.lorentz * gap);
+    const Real G = 1 - square(vn + gap);
+    const Real Bq =
+        bn / state.lorentz - state.lorentz * state.magnetic_dot_velocity * gap;
+    const Real daa = 2 * square(state.lorentz) * gap;
+    const Real dG = -2 * (vn + gap);
+    const Real dBq = -state.lorentz * state.magnetic_dot_velocity;
+    return state.comoving_magnetic_squared * (daa * G + aa * dG) -
+           2 * H * aa * daa +
+           state.sound_squared * (H * (daa * (aa + G) + aa * (daa + dG)) -
+                                  2 * Bq * dBq * G - square(Bq) * dG);
+  };
   // A quartic root at an Alfven bracket endpoint need not be a DOUBLE
   // magnetosonic root. Returning it from both neighboring intervals would
   // silently mislabel a fast/slow family. The exactly parallel factorization
@@ -208,8 +241,8 @@ Spectrum physical_spectrum(const PhysicalState& state) {
                                                      {alfven_gap[1], 1 - vn}}};
   std::array<Real, 4> roots{};
   for (size_t j = 0; j < 4; ++j) {
-    if (not bracketed_root(quartic, brackets[j][0], brackets[j][1],
-                           &roots[j])) {
+    if (not bracketed_root(quartic, quartic_slope, brackets[j][0],
+                           brackets[j][1], &roots[j])) {
       result.failure = "quartic_family_bracket_unresolved";
       return result;
     }
