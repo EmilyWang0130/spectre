@@ -120,7 +120,7 @@ bool bracketed_root(const Function& function, Real left, Real right,
       *root = magnitude(fleft) < magnitude(fright) ? left : right;
       return true;
     }
-    const Real middle = (left + right) / 2;
+    const Real middle = half(left + right);
     if (not(middle > left and middle < right)) {
       throw std::runtime_error("quartic_midpoint_not_strictly_inside");
     }

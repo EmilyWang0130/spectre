@@ -254,8 +254,8 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   const auto& pr = model.right.recovery.primitive;
   const auto& left_roots = model.left.recovery.roots;
   const auto& right_roots = model.right.recovery.roots;
-  const RootHint mid_roots{(left_roots.boundary + right_roots.boundary) / 2.,
-                           (left_roots.energy + right_roots.energy) / 2.};
+  const RootHint mid_roots{(left_roots.boundary + right_roots.boundary) * 0.5,
+                           (left_roots.energy + right_roots.energy) * 0.5};
   const auto reference =
       reference_from_tau(base.ul, base.ur, pl, pr, bn, gamma, mid_roots);
   if (not reference.success) {

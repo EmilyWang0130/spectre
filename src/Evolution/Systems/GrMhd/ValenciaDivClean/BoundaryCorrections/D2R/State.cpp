@@ -216,7 +216,7 @@ MpState conserved_mp(const MpState& p, double bn, double gamma) {
           z * x.v[1] + magnetic_momentum[1],
           z * x.v[2] + magnetic_momentum[2],
           x.rho * x.w * x.wm1 + x.p * (k * x.w * x.w - 1) +
-              (x.b2 + dot(vx_b, vx_b)) / 2,
+              half(x.b2 + dot(vx_b, vx_b)),
           x.b[1],
           x.b[2]};
 }
@@ -227,7 +227,7 @@ MpState flux_mp(const MpState& p, double bn, double gamma) {
   for (std::size_t i = 0; i < 3; ++i)
     fm[i] = u[i + 1] * x.v[0] -
             exact_double(bn) * ((1 - x.v2) * x.b[i] + x.vb * x.v[i]);
-  fm[0] += x.p + (x.b2 * (1 - x.v2) + x.vb * x.vb) / 2;
+  fm[0] += x.p + half(x.b2 * (1 - x.v2) + x.vb * x.vb);
   const auto magnetic_momentum = cross(x.b, cross(x.v, x.b));
   const Real k = exact_double(gamma) / (exact_double(gamma) - 1);
   const Real ftau = (x.rho * x.w * x.wm1 + k * x.p * x.w * x.w) * x.v[0] +
@@ -267,7 +267,7 @@ bool reconstruction_budget(MpState* budget, const State& p, double bn,
                 0,
                 absolute(x.rho * x.w * x.wm1) +
                     absolute(x.p) * (k * x.w * x.w + 1) +
-                    (x.b2 + dot(cross_abs, cross_abs)) / 2,
+                    half(x.b2 + dot(cross_abs, cross_abs)),
                 ab[1],
                 ab[2]};
   const Real abs_vb = dot(av, ab);
@@ -429,7 +429,7 @@ Recovery recover(const State& original, double bn, double gamma,
     s.t = t;
     s.p = a * (x * (1 - s.v2) - d * t * s.v2 / (1 + t));
     const auto vx_b = cross(s.v, b);
-    s.f = x - s.p + (b2 + dot(vx_b, vx_b)) / 2 - tau;
+    s.f = x - s.p + half(b2 + dot(vx_b, vx_b)) - tau;
     return s;
   };
   // Bisection with foregone decisions skipped (2026-10-20). Both bisections
@@ -548,7 +548,7 @@ Recovery recover(const State& original, double bn, double gamma,
       }
       double next = c.smooth ? x - c.g / c.dg : below;
       if (!(next > below && next < above))
-        next = below + (above - below) / 2;
+        next = below + half(above - below);
       x = next;
       c = local(x, state(x), energy);
     }
@@ -612,7 +612,7 @@ Recovery recover(const State& original, double bn, double gamma,
         out.reason = "boundary_bisection_evaluation_limit";
         return out;
       }
-      const Real mid = (low + high) / 2;
+      const Real mid = half(low + high);
       if (!(low < mid && mid < high)) {
         out.reason = "boundary_noninterior_midpoint_before_declared_precision";
         return out;
@@ -623,7 +623,6 @@ Recovery recover(const State& original, double bn, double gamma,
         upper = s.causal && s.p >= 0;
       }
       ++out.boundary_bisections;
-      // Selects, not branches: the foregone decisions alternate unpredictably.
       high = upper ? mid : high;
       low = upper ? low : mid;
     }
@@ -660,7 +659,7 @@ Recovery recover(const State& original, double bn, double gamma,
       out.reason = "energy_bisection_evaluation_limit";
       return out;
     }
-    const Real mid = (left + right) / 2;
+    const Real mid = half(left + right);
     if (!(left < mid && mid < right)) {
       out.reason = "energy_noninterior_midpoint_before_declared_precision";
       return out;
@@ -759,7 +758,7 @@ EntropyPair entropy_pair(const State& u, double bn, double gamma,
            beta * (x.b[1] / x.w + x.w * x.vb * x.v[1]),
            beta * (x.b[2] / x.w + x.w * x.vb * x.v[2])};
   out.psi = d * x.v[0] + beta * x.w *
-                             ((x.b2 * (1 - x.v2) + x.vb * x.vb) * x.v[0] / 2 -
+                             (half((x.b2 * (1 - x.v2) + x.vb * x.vb) * x.v[0]) -
                               x.b[0] * x.vb);
   out.success = true;
   out.reason = "numerical_entropy_pair";
@@ -794,7 +793,7 @@ Reference reference_from_tau(const State& ul, const State& ur,
   for (std::size_t i = 0; i < 3; ++i)
     difference[i] = r.v[i] - l.v[i];
   const Real cross_term =
-      ((1 - l.v2) + (1 - r.v2) + dot(difference, difference)) / 2;
+      half((1 - l.v2) + (1 - r.v2) + dot(difference, difference));
   const Real norm2 =
       (wl * wl + wr * wr + 2 * wl * wr * l.w * r.w * cross_term) / (sum * sum);
   if (!(norm2 > 0)) {
@@ -866,7 +865,7 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
   }
   double low = 0., high = 1.;
   while (std::nextafter(low, high) < high) {
-    const double mid = low + (high - low) / 2;
+    const double mid = low + (high - low) * 0.5;
     if (at(mid, &l, &r))
       low = mid;
     else

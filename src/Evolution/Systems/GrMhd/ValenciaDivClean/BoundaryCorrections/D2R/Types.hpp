@@ -58,6 +58,7 @@ inline double to_double(const Real& x) { return x.convert_to<double>(); }
 inline Real next_up(const Real& x) { return boost::math::float_next(x); }
 inline bool finite_real(const Real& x) { return boost::math::isfinite(x); }
 inline Real abs_real(const Real& x) { return boost::multiprecision::abs(x); }
+inline Real half(const Real& x) { return x / 2; }
 constexpr bool multiprecision_build = true;
 #else
 using Real = double;
@@ -73,6 +74,10 @@ inline Real next_up(const double x) {
 }
 inline bool finite_real(const double x) { return std::isfinite(x); }
 inline Real abs_real(const double x) { return std::fabs(x); }
+// x / 2 as x * 0.5: the same exact value, rounded the same way, without the
+// division the kernel's flags (-ffp-exception-behavior=maytrap) keep
+// (2026-10-20).
+inline Real half(const double x) { return x * 0.5; }
 constexpr bool multiprecision_build = false;
 using std::log;
 using std::pow;
