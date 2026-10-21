@@ -121,7 +121,7 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
                              const RootHint& left_hint = {},
                              const RootHint& right_hint = {});
 // Design D3 (2026-10-21): the full shift (beta = 1) with the shifted states'
-// primitives from the linear update of the face primitives left, right,
+// primitives from the linear update of left, right (the primitives of ul, ur),
 // dP = (dU/dP)^-1 dU, instead of recovering them. success = false (the caller
 // then takes physical_ray_cap) when an updated primitive is unphysical or the
 // linear system singular.
