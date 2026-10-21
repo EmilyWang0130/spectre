@@ -130,8 +130,16 @@ int d2r_sr_core_batch(size_t n,int mode,const double *faces,const double *fixed,
     i[1]=1;
     if(mode==1) {
       b[0]=fixed[2*k];b[1]=fixed[2*k+1];
-    } else {
+    } else if(mode==2) {
       HLL_Speed(&c->sweep.stateL,&c->sweep.stateR,c->sweep.SL,c->sweep.SR,0,0);
+      b[0]=c->sweep.SL[0];b[1]=c->sweep.SR[0];
+    } else {
+      /* Mode 0: HLLD_Solver computes these bounds itself, by HLL_Speed on the
+       * same states, and only reads them after (hlld.c), so the HLL_Speed call
+       * this bridge made before it was a repeat (2026-10-20). The bounds check
+       * follows the solve; prepare_pair's speed checks make it pass. */
+      g_maxRiemannIter=0;
+      HLLD_Solver(&c->sweep,0,0,c->cmax,NULL);
       b[0]=c->sweep.SL[0];b[1]=c->sweep.SR[0];
     }
     d[0]=b[0];d[1]=b[1];
@@ -139,10 +147,7 @@ int d2r_sr_core_batch(size_t n,int mode,const double *faces,const double *fixed,
     i[2]=1;
     if(mode==2) {i[0]=1;continue;}
     if(mode==0) {
-      g_maxRiemannIter=0;
-      HLLD_Solver(&c->sweep,0,0,c->cmax,NULL);
       i[4]=g_maxRiemannIter;
-      b[0]=c->sweep.SL[0];b[1]=c->sweep.SR[0];d[0]=b[0];d[1]=b[1];
     } else {
       D2R_SR_Record r;
       memset(&r,0,sizeof(r));
