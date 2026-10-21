@@ -204,7 +204,9 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
                            primitive_hint(left, gamma),
                            primitive_hint(right, gamma));
   if (not model.supported) {
-    result.status = model.reason;
+    thread_local std::string composite;
+    composite = model.reason;
+    result.status = composite.c_str();
     return result;
   }
   const auto repair = model.repair(candidate);
@@ -567,7 +569,8 @@ int pluto_d2r_flux_impl(const int npts, const double* left,
       stats.active += face.active;
       stats.unsupported += not face.supported;
       stats.consistency_capped += face.consistency < 1.;
-      stats.repair_bound += face.status == "repair_exceeds_consistency_bound";
+      stats.repair_bound +=
+          std::strcmp(face.status, "repair_exceeds_consistency_bound") == 0;
       stats.jump_damped += face.jump_weight < 1.;
       diagnostics.causal_fallback += face.causal_fallback;
       if (not face.supported or not finite(face.flux)) {

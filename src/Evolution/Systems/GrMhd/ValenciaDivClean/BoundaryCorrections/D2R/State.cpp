@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -285,9 +286,29 @@ bool reconstruction_budget(MpState* budget, const State& p, double bn,
   }
   return true;
 }
-LineResult line(bool supported, const std::string& reason,
-                const State& flux = {}, const Real& coefficient = 0,
-                const Real& margin = 0) {
+// "WT17_" + an admissibility rejection, as a literal: the rejections are the
+// literals admissibility() assigns, and a recovery's reason must outlive the
+// recovery that set it (an entropy model builds its reason from two).
+const char* wt17_reason(const char* reason) {
+  static constexpr std::array<std::array<const char*, 2>, 8> prefixed{
+      {{"nonfinite_input", "WT17_nonfinite_input"},
+       {"gamma_outside_WT17_scope", "WT17_gamma_outside_WT17_scope"},
+       {"D_nonpositive", "WT17_D_nonpositive"},
+       {"q_nonpositive_or_unresolved", "WT17_q_nonpositive_or_unresolved"},
+       {"negative_Phi_radicand", "WT17_negative_Phi_radicand"},
+       {"Psi_nonpositive_or_unresolved", "WT17_Psi_nonpositive_or_unresolved"},
+       {"Psi_zero_or_precision_unresolved",
+        "WT17_Psi_zero_or_precision_unresolved"},
+       {"Psi_nonpositive", "WT17_Psi_nonpositive"}}};
+  for (const auto& entry : prefixed) {
+    if (std::strcmp(reason, entry[0]) == 0) {
+      return entry[1];
+    }
+  }
+  return "WT17_unclassified";
+}
+LineResult line(bool supported, const char* reason, const State& flux = {},
+                const Real& coefficient = 0, const Real& margin = 0) {
   return {supported, reason, flux, coefficient, margin};
 }
 }  // namespace
@@ -368,7 +389,7 @@ Recovery recover(const State& original, double bn, double gamma,
   Recovery out{};
   out.admissibility = admissibility(original, bn, gamma);
   if (!out.admissibility.admissible) {
-    out.reason = "WT17_" + out.admissibility.reason;
+    out.reason = wt17_reason(out.admissibility.reason);
     return out;
   }
   const auto u = imported(original);
@@ -762,7 +783,9 @@ Reference reference_from_tau(const State& ul, const State& ur,
     }
   const auto rec = recover(mid, bn, gamma, hint);
   if (!rec.success) {
-    out.reason = "stored_tau_midpoint_" + rec.reason;
+    thread_local std::string buffer;
+    buffer = std::string("stored_tau_midpoint_") + rec.reason;
+    out.reason = buffer.c_str();
     return out;
   }
   const auto l = parts(imported(left), bn), r = parts(imported(right), bn);
@@ -898,8 +921,9 @@ EntropyModel::EntropyModel(const State& ul, const State& ur, double bn,
       ul_(ul),
       ur_(ur) {
   supported = left.success && right.success;
-  reason = supported ? "supported"
-                     : "entropy_inputs_" + left.reason + "_" + right.reason;
+  reason = supported ? std::string("supported")
+                     : std::string("entropy_inputs_") + left.reason + "_" +
+                           right.reason;
   if (!supported)
     return;
   dpsi = right.psi - left.psi;
@@ -932,7 +956,7 @@ Real EntropyModel::tolerance(const State& flux) const {
 }
 LineResult EntropyModel::repair(const State& candidate) const {
   if (!supported)
-    return line(false, reason);
+    return line(false, reason.c_str());
   if (!finite(candidate))
     return line(false, "nonfinite_native");
   const Real m0 = margin(candidate);
@@ -968,7 +992,7 @@ LineResult EntropyModel::repair(const State& candidate) const {
 LineResult EntropyModel::cap(const State& baseline,
                              const State& direction) const {
   if (!supported)
-    return line(false, reason);
+    return line(false, reason.c_str());
   if (!finite(baseline))
     return line(false, "nonfinite_baseline");
   if (!finite(direction))

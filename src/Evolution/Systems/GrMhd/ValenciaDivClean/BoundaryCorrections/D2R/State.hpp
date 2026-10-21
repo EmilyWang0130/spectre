@@ -14,9 +14,12 @@ namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE {
 // Gamma-law, fixed common Bn, c=1. P=(rho,vn,vt,vb,p,Bt,Bb),
 // U/F=(D,mn,mt,mb,tau,Bt,Bb). Numerical high-precision support only:
 // no outward intervals, general EOS, CT/GLM/RK, or thermal-relative proof.
+// Statuses and reasons are string literals (2026-10-20: std::string members
+// cost several heap allocations per face); EntropyModel keeps its composite
+// reason as a std::string, built only when a model is unsupported.
 struct Admissibility {
   bool admissible = false;
-  std::string reason{};
+  const char* reason = "";
   Real q = 0;
   Real psi = 0;
 };
@@ -32,14 +35,14 @@ struct RootHint {
 
 struct Recovery {
   bool success = false;
-  std::string reason{};
+  const char* reason = "";
   State primitive{};
   MpState high_precision_primitive{};
   std::size_t iterations = 0;
   std::size_t boundary_bisections = 0;
   std::size_t energy_bisections = 0;
-  std::string boundary_termination{};
-  std::string energy_termination{};
+  const char* boundary_termination = "";
+  const char* energy_termination = "";
   bool roundtrip_checked = false;
   double reconstruction_error = 0.;
   double thermal_relative_error = 0.;
@@ -51,7 +54,7 @@ struct Recovery {
 
 struct EntropyPair {
   bool success = false;
-  std::string reason{};
+  const char* reason = "";
   Recovery recovery{};
   MpState z{};
   Real psi = 0;
@@ -60,14 +63,16 @@ struct EntropyPair {
 
 struct Reference {
   bool success = false;
-  std::string reason{};
+  // A literal, or for an unsupported midpoint "stored_tau_midpoint_" + its
+  // recovery's reason in this thread's buffer (valid until the next such one).
+  const char* reason = "";
   State primitive{};
   std::array<Real, 4> four_velocity{};
 };
 
 struct PhysicalCap {
   bool success = false;
-  std::string reason{};
+  const char* reason = "";
   double beta = 0.;
   State left{};
   State right{};
@@ -81,7 +86,7 @@ struct PhysicalCap {
 
 struct LineResult {
   bool supported = false;
-  std::string reason{};
+  const char* reason = "";
   State flux{};
   Real coefficient = 0;
   Real margin = 0;

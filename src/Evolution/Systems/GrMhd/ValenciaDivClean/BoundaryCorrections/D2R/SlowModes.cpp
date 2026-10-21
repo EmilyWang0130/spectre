@@ -484,8 +484,10 @@ SlowAction slow_action(const State& primitive, const double bn,
     result.supported = true;
     result.status = "analytic_high_precision_pairs";
   } catch (const std::exception& error) {
+    thread_local std::string message;
+    message = error.what();
     result.supported = false;
-    result.status = error.what();
+    result.status = message.c_str();
   }
   return result;
 }

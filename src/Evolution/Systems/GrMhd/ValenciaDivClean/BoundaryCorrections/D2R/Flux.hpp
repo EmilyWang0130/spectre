@@ -15,7 +15,9 @@ struct FaceResult {
   bool supported = false;
   bool active = false;
   bool causal_fallback = false;
-  std::string status{};
+  // A literal, or (an unsupported entropy model's composite reason) this
+  // thread's buffer, valid until the next such face in the thread.
+  const char* status = "";
   State flux{};
   State baseline{};
   State direction{};
