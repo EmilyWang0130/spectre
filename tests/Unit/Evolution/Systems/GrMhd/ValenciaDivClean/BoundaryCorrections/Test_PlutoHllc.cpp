@@ -257,6 +257,9 @@ void test_end_to_end(const bc::PlutoHllcVariant variant) {
       Scalar<DataVector> fast_in{DataVector{1_st, 0.0}};
       tnsr::i<DataVector, 3, Frame::Inertial> normal{1_st, 0.0};
       Scalar<DataVector> flatness{DataVector{1_st, 0.0}};
+      Scalar<DataVector> iface_lapse{DataVector{1_st, 1.0}};
+      Scalar<DataVector> iface_shift_n{DataVector{1_st, 0.0}};
+      tnsr::ii<DataVector, 3, Frame::Inertial> iface_metric{1_st, 0.0};
       Scalar<DataVector> rho{DataVector{1_st, 0.0}};
       tnsr::I<DataVector, 3, Frame::Inertial> velocity{1_st, 0.0};
       Scalar<DataVector> pressure{DataVector{1_st, 0.0}};
@@ -297,6 +300,10 @@ void test_end_to_end(const bc::PlutoHllcVariant variant) {
       get<0>(normal_vector) = normal_sign;
       const Scalar<DataVector> lapse{DataVector{1_st, 1.0}};
       const tnsr::I<DataVector, 3, Frame::Inertial> shift{1_st, 0.0};
+      tnsr::ii<DataVector, 3, Frame::Inertial> flat_metric{1_st, 0.0};
+      for (size_t i = 0; i < 3; ++i) {
+        flat_metric.get(i, i) = 1.0;
+      }
       const Scalar<DataVector> zero_scalar{DataVector{1_st, 0.0}};
       const tnsr::i<DataVector, 3, Frame::Inertial> zero_covector{1_st, 0.0};
       const tnsr::I<DataVector, 3, Frame::Inertial> zero_vector{1_st, 0.0};
@@ -312,12 +319,14 @@ void test_end_to_end(const bc::PlutoHllcVariant variant) {
           make_not_null(&out.largest_out), make_not_null(&out.largest_in),
           make_not_null(&out.fast_out), make_not_null(&out.fast_in),
           make_not_null(&out.normal), make_not_null(&out.flatness),
-          make_not_null(&out.rho), make_not_null(&out.velocity),
-          make_not_null(&out.pressure), make_not_null(&out.lorentz_factor),
-          make_not_null(&out.eps), zero_scalar, zero_scalar, zero_scalar,
-          zero_covector, magnetic_field, zero_scalar, zero_vector, zero_vector,
-          zero_vector, zero_flux_s, zero_flux_b, zero_vector, lapse, shift,
-          velocity_one_form, rest_mass_density, electron_fraction, temperature,
+          make_not_null(&out.iface_lapse), make_not_null(&out.iface_shift_n),
+          make_not_null(&out.iface_metric), make_not_null(&out.rho),
+          make_not_null(&out.velocity), make_not_null(&out.pressure),
+          make_not_null(&out.lorentz_factor), make_not_null(&out.eps),
+          zero_scalar, zero_scalar, zero_scalar, zero_covector, magnetic_field,
+          zero_scalar, zero_vector, zero_vector, zero_vector, zero_flux_s,
+          zero_flux_b, zero_vector, lapse, shift, velocity_one_form,
+          flat_metric, rest_mass_density, electron_fraction, temperature,
           spatial_velocity, specific_internal_energy, pressure_scalar,
           lorentz_factor, normal_covector, normal_vector, std::nullopt,
           std::nullopt, *eos);
@@ -340,14 +349,17 @@ void test_end_to_end(const bc::PlutoHllcVariant variant) {
         interior.nf_tilde_d, interior.nf_tilde_ye, interior.nf_tilde_tau,
         interior.nf_tilde_s, interior.nf_tilde_b, interior.nf_tilde_phi,
         interior.largest_out, interior.largest_in, interior.fast_out,
-        interior.fast_in, interior.normal, interior.flatness, interior.rho,
-        interior.velocity, interior.pressure, interior.lorentz_factor,
-        interior.eps, exterior.tilde_d, exterior.tilde_ye, exterior.tilde_tau,
-        exterior.tilde_s, exterior.tilde_b, exterior.tilde_phi,
-        exterior.nf_tilde_d, exterior.nf_tilde_ye, exterior.nf_tilde_tau,
-        exterior.nf_tilde_s, exterior.nf_tilde_b, exterior.nf_tilde_phi,
-        exterior.largest_out, exterior.largest_in, exterior.fast_out,
-        exterior.fast_in, exterior.normal, exterior.flatness, exterior.rho,
+        interior.fast_in, interior.normal, interior.flatness,
+        interior.iface_lapse, interior.iface_shift_n, interior.iface_metric,
+        interior.rho, interior.velocity, interior.pressure,
+        interior.lorentz_factor, interior.eps, exterior.tilde_d,
+        exterior.tilde_ye, exterior.tilde_tau, exterior.tilde_s,
+        exterior.tilde_b, exterior.tilde_phi, exterior.nf_tilde_d,
+        exterior.nf_tilde_ye, exterior.nf_tilde_tau, exterior.nf_tilde_s,
+        exterior.nf_tilde_b, exterior.nf_tilde_phi, exterior.largest_out,
+        exterior.largest_in, exterior.fast_out, exterior.fast_in,
+        exterior.normal, exterior.flatness, exterior.iface_lapse,
+        exterior.iface_shift_n, exterior.iface_metric, exterior.rho,
         exterior.velocity, exterior.pressure, exterior.lorentz_factor,
         exterior.eps, dg::Formulation::WeakInertial);
 
@@ -394,10 +406,20 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.PlutoHllc",
 
     // Conservation: the numerical flux must be single valued across the
     // interface.
+    // The helper fills every packaged input with independent random values: its
+    // conserved variables and normal fluxes are not those of its primitives.
+    // Since the GR face frame its curved faces (random lapse and shift) are
+    // solved by PLUTO from the primitives alone, so a face with the same random
+    // state on both sides does not return the packaged flux, and the helper's
+    // "zero correction for a smooth solution" check cannot hold; it held before
+    // only because every curved face fell back to HLL. Conservation and the
+    // weak/strong relation are still checked here; the uniform-state property
+    // is checked with consistent states in Test_PlutoFaceFrame.cpp.
     TestHelpers::evolution::dg::test_boundary_correction_conservation<system>(
         make_not_null(&gen), bc::PlutoHllc{variant, 1.0e-30, 1.0e-8},
         Mesh<2>{5, Spectral::Basis::Legendre, Spectral::Quadrature::Gauss},
-        volume_data, ranges);
+        volume_data, ranges,
+        TestHelpers::evolution::dg::ZeroOnSmoothSolution::No);
 
     // Factory creation + round trip through a base-class pointer.
     const auto pluto_hllc =
@@ -414,7 +436,8 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.PlutoHllc",
     TestHelpers::evolution::dg::test_boundary_correction_conservation<system>(
         make_not_null(&gen), dynamic_cast<const bc::PlutoHllc&>(*pluto_hllc),
         Mesh<2>{5, Spectral::Basis::Legendre, Spectral::Quadrature::Gauss},
-        volume_data, ranges);
+        volume_data, ranges,
+        TestHelpers::evolution::dg::ZeroOnSmoothSolution::No);
   }
 
   using Variant = bc::PlutoHllcVariant;

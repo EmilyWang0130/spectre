@@ -45,10 +45,13 @@ namespace grmhd::ValenciaDivClean::BoundaryCorrections {
  * input ray and the original-face entropy budget. It has no reference-data
  * dependency. The implementation and its scope are documented in D2R/README.md.
  *
- * Supported faces are Cartesian Minkowski, ideal Gamma-law EOS with
- * 1 < Gamma <= 2, and zero normal mesh speed. Other faces retain a conservative
- * light-bound HLL flux. The full spatial metric is checked; this is not a GR
- * extension. A moving-face D2-R fan has not been derived, so ALE uses HLL.
+ * Supported faces have an ideal Gamma-law EOS with 1 < Gamma <= 2 and zero
+ * normal mesh speed. Other faces retain a conservative light-bound HLL flux.
+ * On a curved background the shared adapter solves the face in its face frame
+ * (PlutoFaceFrame.hpp), but D2-R's kernel samples only the ray x/t = 0: curved
+ * points whose face moves through the normal observer's frame (normal shift
+ * beta^n != 0) keep the adapter's HLL baseline. A moving-face D2-R fan has not
+ * been derived, so ALE uses HLL.
  *
  * The shared PLUTO adapter rotates into the normal frame, uses a common GLM
  * normal-field state and restores the GLM normal-field/Phi fluxes. Electron
@@ -66,6 +69,9 @@ class PlutoD2R final : public evolution::BoundaryCorrection {
   using FastIngoingCharSpeed = PlutoHlld::FastIngoingCharSpeed;
   using InterfaceUnitNormal = PlutoHlld::InterfaceUnitNormal;
   using MetricFlatness = PlutoHlld::MetricFlatness;
+  using InterfaceLapse = PlutoHlld::InterfaceLapse;
+  using InterfaceShiftDotNormal = PlutoHlld::InterfaceShiftDotNormal;
+  using InterfaceSpatialMetric = PlutoHlld::InterfaceSpatialMetric;
 
   struct MagneticFieldMagnitudeForHydro {
     static constexpr Options::String help = {
@@ -84,10 +90,11 @@ class PlutoD2R final : public evolution::BoundaryCorrection {
       tmpl::list<MagneticFieldMagnitudeForHydro, LightSpeedDensityCutoff>;
   static constexpr Options::String help = {
       "Experimental SR D2-R: analytical slow-mode response on refined PLUTO "
-      "HLLD, with physical-input and original-face entropy checks. Cartesian "
-      "Minkowski, ideal Gamma-law EOS (1 < Gamma <= 2), stationary normal "
-      "faces only; otherwise conservative HLL. Common GLM Bn and GLM energy "
-      "pairing are enabled."};
+      "HLLD, with physical-input and original-face entropy checks. Ideal "
+      "Gamma-law EOS (1 < Gamma <= 2) and a static mesh only; on a curved "
+      "background only faces with zero normal shift (elsewhere HLL); "
+      "otherwise conservative HLL. Common GLM Bn and GLM energy pairing are "
+      "enabled."};
 
   PlutoD2R() = default;
   PlutoD2R(const PlutoD2R&) = default;
@@ -119,7 +126,8 @@ class PlutoD2R final : public evolution::BoundaryCorrection {
       ::Tags::NormalDotFlux<Tags::TildeB<Frame::Inertial>>,
       ::Tags::NormalDotFlux<Tags::TildePhi>, LargestOutgoingCharSpeed,
       LargestIngoingCharSpeed, FastOutgoingCharSpeed, FastIngoingCharSpeed,
-      InterfaceUnitNormal, MetricFlatness,
+      InterfaceUnitNormal, MetricFlatness, InterfaceLapse,
+      InterfaceShiftDotNormal, InterfaceSpatialMetric,
       hydro::Tags::RestMassDensity<DataVector>,
       hydro::Tags::SpatialVelocity<DataVector, 3>,
       hydro::Tags::Pressure<DataVector>, hydro::Tags::LorentzFactor<DataVector>,
@@ -164,6 +172,10 @@ class PlutoD2R final : public evolution::BoundaryCorrection {
       gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
           packaged_interface_unit_normal,
       gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
+      gsl::not_null<Scalar<DataVector>*> packaged_interface_lapse,
+      gsl::not_null<Scalar<DataVector>*> packaged_interface_shift_dot_normal,
+      gsl::not_null<tnsr::ii<DataVector, 3, Frame::Inertial>*>
+          packaged_interface_spatial_metric,
       gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
       gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
           packaged_spatial_velocity,
@@ -234,6 +246,10 @@ class PlutoD2R final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& fast_ingoing_char_speed_int,
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
       const Scalar<DataVector>& metric_flatness_int,
+      const Scalar<DataVector>& interface_lapse_int,
+      const Scalar<DataVector>& interface_shift_dot_normal_int,
+      const tnsr::ii<DataVector, 3, Frame::Inertial>&
+          interface_spatial_metric_int,
       const Scalar<DataVector>& rest_mass_density_int,
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
       const Scalar<DataVector>& pressure_int,
@@ -259,6 +275,10 @@ class PlutoD2R final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& fast_ingoing_char_speed_ext,
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_ext,
       const Scalar<DataVector>& metric_flatness_ext,
+      const Scalar<DataVector>& interface_lapse_ext,
+      const Scalar<DataVector>& interface_shift_dot_normal_ext,
+      const tnsr::ii<DataVector, 3, Frame::Inertial>&
+          interface_spatial_metric_ext,
       const Scalar<DataVector>& rest_mass_density_ext,
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
       const Scalar<DataVector>& pressure_ext,

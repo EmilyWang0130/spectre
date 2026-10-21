@@ -50,6 +50,30 @@ int pluto_hllc_kb_flux(int npts, const double* vL, const double* vR,
 int pluto_hllx_flux(int npts, const double* vL, const double* vR, double gamma,
                     double* flux_out, double* press_out);
 
+/* The same four solvers with the fan sampled on a moving interface (the SpECTRE
+ * GR adapter, PlutoFaceFrame.hpp):
+ *  face_speed [in]  npts, the speed w of each interface in the frame the states
+ *                   are given in (the normal observer's orthonormal frame:
+ *                   w = (beta^n + n.v_mesh)/alpha).
+ *  flux_out   [out] the flux through the moving interface, F_sel - w U_sel, in
+ *                   the same layout as above (ENG reduced, U_sel's energy too);
+ *  press_out  [out] the normal total pressure, as above (unchanged by w).
+ * With every face_speed 0 these reproduce the static entry points bit for bit
+ * (Test_PlutoFaceFrame.cpp). Thread-safe on the same terms: the face speeds
+ * ride in the calling thread's Sweep. */
+int pluto_hlld_flux_moving(int npts, const double* vL, const double* vR,
+                           double gamma, const double* face_speed,
+                           double* flux_out, double* press_out);
+int pluto_hllc_mb_flux_moving(int npts, const double* vL, const double* vR,
+                              double gamma, const double* face_speed,
+                              double* flux_out, double* press_out);
+int pluto_hllc_kb_flux_moving(int npts, const double* vL, const double* vR,
+                              double gamma, const double* face_speed,
+                              double* flux_out, double* press_out);
+int pluto_hllx_flux_moving(int npts, const double* vL, const double* vR,
+                           double gamma, const double* face_speed,
+                           double* flux_out, double* press_out);
+
 #ifdef __cplusplus
 }
 #endif

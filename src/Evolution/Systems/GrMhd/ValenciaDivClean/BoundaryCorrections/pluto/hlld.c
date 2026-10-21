@@ -33,6 +33,7 @@
 */
 /* ///////////////////////////////////////////////////////////////////// */
 #include"pluto.h"
+#include "spectre_face_speed.h"   /* SPECTRE-MOD */
 
 #ifndef HLLD_MAX_ITER 
   #define HLLD_MAX_ITER  20
@@ -62,7 +63,8 @@ static double HLLD_Fstar (Riemann_State *, Riemann_State *, double);
 
 static int  HLLD_GetRiemannState (Riemann_State *, double, int);
 static void HLLD_GetAState (Riemann_State *,  double p);
-static void HLLD_GetCState (Riemann_State *, Riemann_State *, double, double *);
+static void HLLD_GetCState (Riemann_State *, Riemann_State *, double, double *,
+                            double);   /* SPECTRE-MOD: + face speed */
 
 static double HLLD_TotalPressure  (double *);
 
@@ -166,21 +168,25 @@ void HLLD_Solver (const Sweep *sweep, int beg, int end,
 
     vL = stateL->v[i]; uL = stateL->u[i]; fL = stateL->flux[i];
     vR = stateR->v[i]; uR = stateR->u[i]; fR = stateR->flux[i];
+    /* SPECTRE-MOD: the fan is sampled on the ray of the (moving) face; 0 for PLUTO's own calls. */
+    const double wf = SpectreFaceSpeed (sweep, i);
 
   /* --------------------------------------------
      3a. Handle different cases 
      -------------------------------------------- */
   
  
-    if (SL[i] >= 0.0){   /* -- Supersonic case: SL > 0 -- */
+    if (SL[i] >= wf){   /* -- Supersonic case: SL > 0 -- */   /* SPECTRE-MOD: 0 -> wf */
 
       NFLX_LOOP(nv) sweep->flux[i][nv] = fL[nv];
       sweep->press[i] = pL[i];
+      if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, uL);   /* SPECTRE-MOD */
 
-    }else if (SR[i] <= 0.0){   /* -- Supersonic right case: SR < 0 -- */
+    }else if (SR[i] <= wf){   /* -- Supersonic right case: SR < 0 -- */   /* SPECTRE-MOD */
 
       NFLX_LOOP(nv) sweep->flux[i][nv] = fR[nv];
       sweep->press[i] = pR[i];
+      if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, uR);   /* SPECTRE-MOD */
 
     }else{
 
@@ -315,6 +321,8 @@ void HLLD_Solver (const Sweep *sweep, int beg, int end,
 
         NFLX_LOOP(nv) sweep->flux[i][nv] = Fhll[i][nv];
         sweep->press[i]  = (SR[i]*pL[i] - SL[i]*pR[i])*dS_1;
+        if (wf != 0.0) SpectreMovingFaceHll (sweep->flux[i], wf, uL, uR, fL, fR,   /* SPECTRE-MOD */
+                                             pL[i], pR[i], SL[i], SR[i]);
         continue;
       }
 
@@ -327,7 +335,7 @@ void HLLD_Solver (const Sweep *sweep, int beg, int end,
       PaL.u[PSI_GLM] = PaR.u[PSI_GLM] = Uc[PSI_GLM] = uL[PSI_GLM];
       #endif
 
-      if (PaL.Sa >= -1.e-6){      
+      if (PaL.Sa >= wf - 1.e-6){      /* SPECTRE-MOD: 0 -> wf */
 
         HLLD_GetAState (&PaL, p);
         #if RMHD_REDUCED_ENERGY == YES
@@ -337,8 +345,9 @@ void HLLD_Solver (const Sweep *sweep, int beg, int end,
           sweep->flux[i][nv] = fL[nv] + SL[i]*(PaL.u[nv] - uL[nv]);
         }
         sweep->press[i] = pL[i];
+        if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, PaL.u);   /* SPECTRE-MOD */
 
-      }else if (PaR.Sa <= 1.e-6){
+      }else if (PaR.Sa <= wf + 1.e-6){   /* SPECTRE-MOD: 0 -> wf */
 
         HLLD_GetAState (&PaR, p);
         #if RMHD_REDUCED_ENERGY == YES
@@ -348,11 +357,12 @@ void HLLD_Solver (const Sweep *sweep, int beg, int end,
           sweep->flux[i][nv] = fR[nv] + SR[i]*(PaR.u[nv] - uR[nv]);
         }
         sweep->press[i] = pR[i];
+        if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, PaR.u);   /* SPECTRE-MOD */
 
       }else{
 
-        HLLD_GetCState (&PaL, &PaR, p, Uc);
-        if (Sc > 0.0){
+        HLLD_GetCState (&PaL, &PaR, p, Uc, wf);   /* SPECTRE-MOD: + wf */
+        if (Sc > wf){   /* SPECTRE-MOD: 0 -> wf */
           #if RMHD_REDUCED_ENERGY == YES
            PaL.u[ENG] -= PaL.u[RHO];
            Uc[ENG]    -= Uc[RHO];
@@ -362,6 +372,7 @@ void HLLD_Solver (const Sweep *sweep, int beg, int end,
                                         + PaL.Sa*(Uc[nv] - PaL.u[nv]);
           }
           sweep->press[i] = pL[i];
+          if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, Uc);   /* SPECTRE-MOD */
 
         }else{
           #if RMHD_REDUCED_ENERGY == YES
@@ -373,6 +384,7 @@ void HLLD_Solver (const Sweep *sweep, int beg, int end,
                                         + PaR.Sa*(Uc[nv] - PaR.u[nv]);
           }
           sweep->press[i] = pR[i];
+          if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, Uc);   /* SPECTRE-MOD */
         }  
       }
     } /* --- end if on SL, SR -- */
@@ -589,7 +601,7 @@ void HLLD_GetAState (Riemann_State *Pa,  double p)
 
 /* ********************************************************************* */
 void HLLD_GetCState (Riemann_State *PaL, Riemann_State *PaR, double p,
-                     double *Uc)
+                     double *Uc, double wf)   /* SPECTRE-MOD: + wf, the face speed */
 /*!
  *  Compute states cL and cR across contact mode.
  *
@@ -643,7 +655,7 @@ void HLLD_GetCState (Riemann_State *PaL, Riemann_State *PaR, double p,
   vyc = 0.5*(vycL + vycR);
   vzc = 0.5*(vzcL + vzcR);
 
-  if (vxc > 0.0) {
+  if (vxc > wf) {   /* SPECTRE-MOD: 0 -> wf (the face is left of the contact) */
     HLLD_GetAState (PaL, p);
     ua  = PaL->u;
     Sa  = PaL->Sa;

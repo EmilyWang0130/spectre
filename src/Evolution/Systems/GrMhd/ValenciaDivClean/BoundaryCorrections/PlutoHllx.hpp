@@ -79,6 +79,9 @@ class PlutoHllx final : public evolution::BoundaryCorrection {
   using FastIngoingCharSpeed = PlutoHlld::FastIngoingCharSpeed;
   using InterfaceUnitNormal = PlutoHlld::InterfaceUnitNormal;
   using MetricFlatness = PlutoHlld::MetricFlatness;
+  using InterfaceLapse = PlutoHlld::InterfaceLapse;
+  using InterfaceShiftDotNormal = PlutoHlld::InterfaceShiftDotNormal;
+  using InterfaceSpatialMetric = PlutoHlld::InterfaceSpatialMetric;
 
   struct MagneticFieldMagnitudeForHydro {
     static constexpr Options::String help = {
@@ -133,14 +136,16 @@ class PlutoHllx final : public evolution::BoundaryCorrection {
       ::Tags::NormalDotFlux<Tags::TildeB<Frame::Inertial>>,
       ::Tags::NormalDotFlux<Tags::TildePhi>, LargestOutgoingCharSpeed,
       LargestIngoingCharSpeed, FastOutgoingCharSpeed, FastIngoingCharSpeed,
-      InterfaceUnitNormal, MetricFlatness,
+      InterfaceUnitNormal, MetricFlatness, InterfaceLapse,
+      InterfaceShiftDotNormal, InterfaceSpatialMetric,
       hydro::Tags::RestMassDensity<DataVector>,
       hydro::Tags::SpatialVelocity<DataVector, 3>,
       hydro::Tags::Pressure<DataVector>, hydro::Tags::LorentzFactor<DataVector>,
       hydro::Tags::SpecificInternalEnergy<DataVector>>;
   using dg_package_data_temporary_tags = tmpl::list<
       gr::Tags::Lapse<DataVector>, gr::Tags::Shift<DataVector, 3>,
-      hydro::Tags::SpatialVelocityOneForm<DataVector, 3, Frame::Inertial>>;
+      hydro::Tags::SpatialVelocityOneForm<DataVector, 3, Frame::Inertial>,
+      gr::Tags::SpatialMetric<DataVector, 3, Frame::Inertial>>;
   using dg_package_data_primitive_tags =
       tmpl::list<hydro::Tags::RestMassDensity<DataVector>,
                  hydro::Tags::ElectronFraction<DataVector>,
@@ -177,6 +182,10 @@ class PlutoHllx final : public evolution::BoundaryCorrection {
       gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
           packaged_interface_unit_normal,
       gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
+      gsl::not_null<Scalar<DataVector>*> packaged_interface_lapse,
+      gsl::not_null<Scalar<DataVector>*> packaged_interface_shift_dot_normal,
+      gsl::not_null<tnsr::ii<DataVector, 3, Frame::Inertial>*>
+          packaged_interface_spatial_metric,
       gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
       gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
           packaged_spatial_velocity,
@@ -200,6 +209,7 @@ class PlutoHllx final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& lapse,
       const tnsr::I<DataVector, 3, Frame::Inertial>& shift,
       const tnsr::i<DataVector, 3, Frame::Inertial>& spatial_velocity_one_form,
+      const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
 
       const Scalar<DataVector>& rest_mass_density,
       const Scalar<DataVector>& electron_fraction,
@@ -246,6 +256,10 @@ class PlutoHllx final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& fast_ingoing_char_speed_int,
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
       const Scalar<DataVector>& metric_flatness_int,
+      const Scalar<DataVector>& interface_lapse_int,
+      const Scalar<DataVector>& interface_shift_dot_normal_int,
+      const tnsr::ii<DataVector, 3, Frame::Inertial>&
+          interface_spatial_metric_int,
       const Scalar<DataVector>& rest_mass_density_int,
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
       const Scalar<DataVector>& pressure_int,
@@ -271,6 +285,10 @@ class PlutoHllx final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& fast_ingoing_char_speed_ext,
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_ext,
       const Scalar<DataVector>& metric_flatness_ext,
+      const Scalar<DataVector>& interface_lapse_ext,
+      const Scalar<DataVector>& interface_shift_dot_normal_ext,
+      const tnsr::ii<DataVector, 3, Frame::Inertial>&
+          interface_spatial_metric_ext,
       const Scalar<DataVector>& rest_mass_density_ext,
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
       const Scalar<DataVector>& pressure_ext,

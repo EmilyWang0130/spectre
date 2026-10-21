@@ -19,6 +19,7 @@ spectre_target_sources(
   HllemHydroYe.cpp
   Marquina.cpp
   PlutoD2R.cpp
+  PlutoFaceFrame.cpp
   PlutoHllc.cpp
   PlutoHlld.cpp
   PlutoHllx.cpp
@@ -44,6 +45,7 @@ spectre_target_headers(
   HllemHydroYe.hpp
   Marquina.hpp
   PlutoD2R.hpp
+  PlutoFaceFrame.hpp
   PlutoHllc.hpp
   PlutoHlld.hpp
   PlutoHllx.hpp

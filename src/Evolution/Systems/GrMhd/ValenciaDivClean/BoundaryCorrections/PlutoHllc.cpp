@@ -79,6 +79,11 @@ double PlutoHllc::dg_package_data(
     const gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
         packaged_interface_unit_normal,
     const gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
+    const gsl::not_null<Scalar<DataVector>*> packaged_interface_lapse,
+    const gsl::not_null<Scalar<DataVector>*>
+        packaged_interface_shift_dot_normal,
+    const gsl::not_null<tnsr::ii<DataVector, 3, Frame::Inertial>*>
+        packaged_interface_spatial_metric,
     const gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
     const gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
         packaged_spatial_velocity,
@@ -102,6 +107,7 @@ double PlutoHllc::dg_package_data(
     const Scalar<DataVector>& lapse,
     const tnsr::I<DataVector, 3, Frame::Inertial>& shift,
     const tnsr::i<DataVector, 3, Frame::Inertial>& spatial_velocity_one_form,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
 
     const Scalar<DataVector>& rest_mass_density,
     const Scalar<DataVector>& electron_fraction,
@@ -128,12 +134,13 @@ double PlutoHllc::dg_package_data(
           packaged_largest_ingoing_char_speed,
           packaged_fast_outgoing_char_speed, packaged_fast_ingoing_char_speed,
           packaged_interface_unit_normal, packaged_metric_flatness,
-          packaged_rest_mass_density, packaged_spatial_velocity,
-          packaged_pressure, packaged_lorentz_factor,
+          packaged_interface_lapse, packaged_interface_shift_dot_normal,
+          packaged_interface_spatial_metric, packaged_rest_mass_density,
+          packaged_spatial_velocity, packaged_pressure, packaged_lorentz_factor,
           packaged_specific_internal_energy, tilde_d, tilde_ye, tilde_tau,
           tilde_s, tilde_b, tilde_phi, flux_tilde_d, flux_tilde_ye,
           flux_tilde_tau, flux_tilde_s, flux_tilde_b, flux_tilde_phi, lapse,
-          shift, spatial_velocity_one_form, rest_mass_density,
+          shift, spatial_velocity_one_form, spatial_metric, rest_mass_density,
           electron_fraction, temperature, spatial_velocity,
           specific_internal_energy, pressure, lorentz_factor, normal_covector,
           normal_vector, mesh_velocity, normal_dot_mesh_velocity,
@@ -168,6 +175,10 @@ void PlutoHllc::dg_boundary_terms(
     const Scalar<DataVector>& fast_ingoing_char_speed_int,
     const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
     const Scalar<DataVector>& metric_flatness_int,
+    const Scalar<DataVector>& interface_lapse_int,
+    const Scalar<DataVector>& interface_shift_dot_normal_int,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>&
+        interface_spatial_metric_int,
     const Scalar<DataVector>& rest_mass_density_int,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
     const Scalar<DataVector>& pressure_int,
@@ -191,6 +202,10 @@ void PlutoHllc::dg_boundary_terms(
     const Scalar<DataVector>& fast_ingoing_char_speed_ext,
     const tnsr::i<DataVector, 3, Frame::Inertial>& iface_normal_ext,
     const Scalar<DataVector>& metric_flatness_ext,
+    const Scalar<DataVector>& interface_lapse_ext,
+    const Scalar<DataVector>& interface_shift_dot_normal_ext,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>&
+        interface_spatial_metric_ext,
     const Scalar<DataVector>& rest_mass_density_ext,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
     const Scalar<DataVector>& pressure_ext,
@@ -200,6 +215,8 @@ void PlutoHllc::dg_boundary_terms(
   detail::pluto_dg_boundary_terms(
       variant_ == PlutoHllcVariant::MignoneBodo ? &pluto_hllc_mb_flux
                                                 : &pluto_hllc_kb_flux,
+      variant_ == PlutoHllcVariant::MignoneBodo ? &pluto_hllc_mb_flux_moving
+                                                : &pluto_hllc_kb_flux_moving,
       boundary_correction_tilde_d, boundary_correction_tilde_ye,
       boundary_correction_tilde_tau, boundary_correction_tilde_s,
       boundary_correction_tilde_b, boundary_correction_tilde_phi, tilde_d_int,
@@ -209,15 +226,18 @@ void PlutoHllc::dg_boundary_terms(
       normal_dot_flux_tilde_b_int, normal_dot_flux_tilde_phi_int,
       largest_outgoing_char_speed_int, largest_ingoing_char_speed_int,
       fast_outgoing_char_speed_int, fast_ingoing_char_speed_int,
-      interface_unit_normal_int, metric_flatness_int, rest_mass_density_int,
-      spatial_velocity_int, pressure_int, lorentz_factor_int,
-      specific_internal_energy_int, tilde_d_ext, tilde_ye_ext, tilde_tau_ext,
-      tilde_s_ext, tilde_b_ext, tilde_phi_ext, normal_dot_flux_tilde_d_ext,
-      normal_dot_flux_tilde_ye_ext, normal_dot_flux_tilde_tau_ext,
-      normal_dot_flux_tilde_s_ext, normal_dot_flux_tilde_b_ext,
-      normal_dot_flux_tilde_phi_ext, largest_outgoing_char_speed_ext,
-      largest_ingoing_char_speed_ext, fast_outgoing_char_speed_ext,
-      fast_ingoing_char_speed_ext, iface_normal_ext, metric_flatness_ext,
+      interface_unit_normal_int, metric_flatness_int, interface_lapse_int,
+      interface_shift_dot_normal_int, interface_spatial_metric_int,
+      rest_mass_density_int, spatial_velocity_int, pressure_int,
+      lorentz_factor_int, specific_internal_energy_int, tilde_d_ext,
+      tilde_ye_ext, tilde_tau_ext, tilde_s_ext, tilde_b_ext, tilde_phi_ext,
+      normal_dot_flux_tilde_d_ext, normal_dot_flux_tilde_ye_ext,
+      normal_dot_flux_tilde_tau_ext, normal_dot_flux_tilde_s_ext,
+      normal_dot_flux_tilde_b_ext, normal_dot_flux_tilde_phi_ext,
+      largest_outgoing_char_speed_ext, largest_ingoing_char_speed_ext,
+      fast_outgoing_char_speed_ext, fast_ingoing_char_speed_ext,
+      iface_normal_ext, metric_flatness_ext, interface_lapse_ext,
+      interface_shift_dot_normal_ext, interface_spatial_metric_ext,
       rest_mass_density_ext, spatial_velocity_ext, pressure_ext,
       lorentz_factor_ext, specific_internal_energy_ext, dg_formulation);
 }
