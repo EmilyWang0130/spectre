@@ -4,6 +4,18 @@
 complete face calculation is C++/C; it does not invoke Python or use HLLx,
 an exact solution, or tabulated reference fluxes at runtime.
 
+**Reviewed optimized variant, 2026-10-21:** developed on `d2r-review`, based on
+`d2r-design` at `9f0cdfdc5`. It retains the faster response construction but
+restores entropy evaluation from the actual stored conservative states,
+checks admissibility of the intended conservative shifts, and makes the
+remaining wave-speed/allocation diagnostics thread-local. Release build and
+regression job 79415 and benchmark job 79416 completed; the independent entropy
+audit retains one strictly negative, inherited double-precision case (details
+below). The earlier optimization tables are historical measurements; the
+review validation section gives measurements of this corrected tree.
+Research record:
+`spectre_runs/branch_testing/run09_d2r_review_20261021/README.md`.
+
 Select it in the usual boundary-correction option:
 
 ```yaml
@@ -27,7 +39,9 @@ The seven states are `U=(D,mn,mt,mb,tau,Bt,Bb)`, where `tau=E-D`, and
 `P=(rho,vn,vt,vb,p,Bt,Bb)` with one separate common normal field `Bn`.
 
 1. Obtain the actual stored conservative states, physical fluxes and original
-   fan bounds from PLUTO's C mapper/native HLLD. A native magnetosonic-speed
+   fan bounds from PLUTO's C mapper and magnetosonic speeds. The combined
+   core mode 3 also supplies the fixed-bound candidate on a mixed fan,
+   avoiding a native HLLD solve whose flux would be discarded. A magnetosonic-speed
    failure may instead use explicitly labelled HLL(-1,+1), assembled from
    finite actual C physical maps. Its slow correction is disabled.
 2. For a mixed fan, form a pressure-coherent baseline using the private v5
@@ -35,12 +49,13 @@ The seven states are `U=(D,mn,mt,mb,tau,Bt,Bb)`, where `tau=E-D`, and
    falls back to HLL. Equal primitives use their physical flux exactly. (The
    batch-level round-off shortcut, `SPECTRE_D2R_ROUNDOFF_TOL`, returns this same
    baseline since 2026-10-20.)
-3. Form the numerical entropy model of the **actual stored** original states
-   with the entropy variables of the face's primitives, of which they are the
-   encoding (design D1, 2026-10-21; originally recovered from the stored
-   states). A state whose stored encoding does not resolve its thermal energy
-   (below 2^-32 of the recovery's energy terms: a cold, fast state) is recovered
-   and checked as originally (D1b). If necessary repair the baseline along
+3. Recover both **actual stored** original states and form the numerical
+   entropy model at those recovered primitives. The supplied face primitives
+   seed the recovery root searches; they do not replace recovery. The earlier
+   D1/D1b shortcut and its `2^-32` thermal-resolution dispatch are not used in
+   this review variant. Thus a physical supplied primitive cannot certify an
+   independently rounded encoding whose thermal state is unresolved.
+   If necessary repair the baseline along
    `-nu (UR-UL)` using the derived entropy and binary64 rounding budget. A
    thermodynamically unsupported original encoding makes the callback reject
    the point; the SpECTRE adapter retains HLL. It is not counted as a supported
@@ -49,30 +64,41 @@ The seven states are `U=(D,mn,mt,mb,tau,Bt,Bb)`, where `tau=E-D`, and
    by more than `C s_max |UR-UL|` (C = 2, `SPECTRE_D2R_CONSISTENCY`) rejects the
    point as well; without it, nearly uniform pairs got baselines off by
    1e-5..3e-4 of the flux.
-4. Use the averaged primitive density and pressure (D4; originally the
+4. Use the averaged recovered endpoint density and pressure (D4; originally the
    recovered stored midpoint's) and the averaged timelike velocity to form the
    reference. Compute the true SR magnetosonic roots (bracket-safeguarded Newton
    from the mean of PLUTO's speeds of the two sides, D2 and D8) and Saul's
    analytic left/right slow pairs. The complete weighted actions are
    `G=Ws(UR-UL)` and `Q=|A|Ws(UR-UL)`. No characteristic matrix inverse or
    fitted condition-number cutoff is used.
-5. Select a numerically supported physical input coefficient `beta` for
-   `UL,c=UL+beta G/2`, `UR,c=UR-beta G/2`. Their primitives are the face
-   primitives plus the linear update `(dU/dP)^-1 dU` at `beta = 1` (D3); where
-   an updated primitive is unphysical or the system singular, recover these
-   states with the original `beta` search. If stored or recovered inputs do not
-   change, retain the baseline before restoring a formal slow contribution.
+5. Form the intended conservative shifts `UL,c=UL+beta G/2`,
+   `UR,c=UR-beta G/2`. At `beta = 1`, check both shifted encodings with the
+   numerical admissibility conditions. Predict auxiliary helper primitives
+   from the recovered endpoints by `Paux=P+(dU/dP)^-1 dU` (D3), requiring
+   positive density/pressure and causal velocity. These are first-order
+   predictions, not recoveries: their re-encodings differ locally from the
+   intended shifts by `O(|shift|^2)`, as well as encoding round-off. The fast
+   path therefore approximates slow-jump removal; it does not claim an exact
+   inverse or a successful round-trip check. `PhysicalCap::primitive_prediction`
+   records this distinction and `roundtrip_checked` remains false. An
+   inadmissible intended shift, singular system, or unphysical prediction
+   takes the original recovery-based `beta` ray search instead. If stored or
+   helper primitive inputs do not change, retain the baseline before restoring
+   a formal slow contribution.
 6. With the **same original bounds**, call the same fixed helper on the
    original and modified states (the native bounds and the original states'
    fixed-bound solve come from one C call, D6; the helper refines its pressure
    root by Illinois regula falsi, D5). Check both actual C re-encodings. Form
    `V0=K0-(F0,L+F0,R)/2`, `Vc=Kc-(Fc,L+Fc,R)/2` and freeze
-   `T=Vc-V0-beta Q/2`.
+   `T=Vc-V0-beta Q/2`. The helper sees physical primitives with the specified
+   EOS; the nominal shifted conserved arrays are not silently substituted for
+   its actual encodings.
 7. Scale `T` down to the same bound `C s_max |UR-UL|` if it exceeds it
    (`FaceResult::consistency`; the margin is affine along the ray, so the
    entropy condition survives the scaling). Select `alpha` on the
-   original-input entropy model and return `F=Fb+alpha T`. Each final affine component is summed as an exact rational
-   before rounding once to binary64, with explicit post-checks. Unsupported
+   original-input entropy model and return `F=Fb+alpha T`. Final affine
+   components use exact rational bookkeeping in the multiprecision build and
+   long-double accumulation in the double build, with explicit post-checks. Unsupported
    correction steps retain the supported baseline. Exactly one-sided original
    fans retain their upwind baseline.
 
@@ -112,9 +138,10 @@ qualifications above.
 
 ### The double kernel's cost, before and after the optimization of 2026-10-20
 
-Branch `d2r-opt`; every change is bit-identical to the unchanged kernel
-(per-face dumps of 69 000 stored faces and 14 evolution arms, element by
-element), so the agreement with the 160-digit oracle is the unchanged kernel's:
+Historical branch `d2r-opt` at `8da20a513`; the changes were bit-identical to
+the unchanged kernel on the measured campaign (per-face dumps of 69 000 stored
+faces and 14 evolution arms, element by element), so the measured agreement
+with the 160-digit oracle is the unchanged kernel's:
 worst relative flux difference 2.0e-15 and 3.3e-14 on the two tube face sets,
 1.08e-12 on the jet sets. Measured in one job on one node, one pinned core,
 median of 7 repetitions (`spectre_runs/branch_testing/run09_d2r_optimization`,
@@ -128,8 +155,9 @@ job 79354):
 | 44 × 88 jet to t = 3, 1 worker (wall, 2 runs) | 27.9 s | 19.1–19.2 s | 11.8 s | 16.0 s |
 | 44 × 88 jet to t = 3, 16 workers | 20.2–20.3 s | 8.2 s | 2.0 s | 3.7 s |
 
-What changed (one commit each): the double build takes no lock (its C core keeps
-all scratch `_Thread_local`); `recover()` evaluates only the bisection midpoints
+What changed (one commit each): the double build takes no lock (the reviewed
+tree additionally fixes the shared diagnostic counters to TLS); `recover()`
+evaluates only the bisection midpoints
 inside a window bounded by a safeguarded Newton search and rounding-margin
 probes, starting from nearby known roots, and reuses the physical-ray cap's
 recoveries (5 instead of 7 per active face); the response's first fixed-bound
@@ -138,7 +166,9 @@ computations in the C bridge are dropped; `sqrt` is the instruction and `x / 2`
 is `x * 0.5` (the flags' `-ffp-exception-behavior=maytrap` otherwise keeps a
 libm call and a division on every bisection step); statuses are string literals
 (no heap allocation per face); the expected unsupported spectra are returned
-rather than thrown.
+rather than thrown. The recovery-window signs use numerical rounding-error
+estimates, not outward interval bounds; measured bit identity is not a proof
+of arithmetic equivalence on every input.
 
 Where the time goes now (flat profile on jet faces): primitive recovery ~45 %
 (about 115 bisection steps per recovery, kept to stay bit-identical); the C core
@@ -149,11 +179,14 @@ solves.
 
 ### Design changes of 2026-10-21 (branch `d2r-design`)
 
-Not bit-identical: each change keeps the method (HLLD bounds and candidate,
+This is the historical, uncorrected `d2r-design` stack, not the corrected
+`d2r-review` method described above. Not bit-identical: each change keeps the method (HLLD bounds and candidate,
 entropy repair, consistency bound, slow-mode response, entropy cap) and changes
 how one ingredient is computed, in both builds, so the 160-digit build stays the
-oracle of the same design. After D4 no primitive recovery is left on the common
-path; the active path makes two C core calls.
+oracle of the same design. On that branch after D4 no primitive recovery was
+left on the common path; its active path made two C core calls. In this review
+variant both original states are recovered for the entropy model, and the
+linear-prediction path avoids only the midpoint and shifted-state recoveries.
 
 | step | what changes | flux change against the step before |
 |---|---|---|
@@ -194,13 +227,76 @@ Original cold/high-Lorentz-factor C encodings can fail admissibility even if
 the intended primitive state was physical. A fallback is not a certificate
 of positivity for a complete finite-volume or DG update.
 
-The active path normally makes four C core calls and several high-precision
-recoveries (on `d2r-design`, 2026-10-21: two core calls and no recovery on the
-common path). Calls are serialized in this initial kernel; it is not a
-production-speed implementation. Private contexts and root scratch are
-thread-local, with capacity at least 1026 to remain compatible with legacy
-PLUTO batches. Concurrent initialization alongside unprotected legacy
-PLUTO allocation accounting has not been certified.
+The reviewed active path recovers the two stored original states. Its linear
+auxiliary prediction avoids recovering a conservative midpoint or the two
+shifted states on the common path; the original ray-recovery fallback remains.
+It makes two C core calls when the original fixed-bound solve can be reused,
+otherwise three. The double kernel runs concurrently; the 160-digit oracle
+retains its mutex. Private contexts, scratch, `g_maxMach` and `g_usedMemory`
+are thread-local, with scratch capacity at least 1026 to remain compatible
+with legacy PLUTO batches. The counters describe the calling worker, not a
+process-wide sum/max. Review job 79415 passed the 16-thread concurrent
+first-use, TLS-isolation and serial bitwise-agreement check (1288 calls).
+This is not a substitute for a race detector.
+
+The private bridge is **ABI 4**, `D2R_CORE_ND=16` (14 integer diagnostics).
+Design D8 added eight endpoint wave speeds to the old eight-double output.
+Clients must check `d2r_sr_core_abi()` before calling and allocate arrays from
+the matching header. ABI-3 clients with eight-double buffers are incompatible;
+rebuild harnesses rather than mixing them with the new library.
+
+### Review validation (2026-10-21)
+
+Release build job 79415 completed. All 12 CTest cases and the multiprecision
+D2-R case passed, including the new actual-stored entropy-input and shifted
+state physicality regressions. These checks establish the tested behavior,
+not an interval certificate or a full-update positivity/entropy proof.
+
+An independent higher-precision entropy audit checked 579 double-kernel
+cases: 573 were supported, of which 572 had nonnegative strict margin. The
+remaining case, jet t=10 sample face 15, has margin `-3.20056e-30`. Its flux
+bits are identical to saved `step5d`, so this is an inherited numerical
+limitation, not a new error introduced by the reviewed approximation. The
+estimated `32 epsilon` formation scale is `4.48e-27`; that explains why a
+double calculation can accept it, but is a diagnostic estimate, not a proof
+that its strict margin is nonnegative. Six cases were unsupported.
+
+The multiprecision audit checked 21 cases: 20 supported, all with nonnegative
+strict margins, and one unsupported. The original strict audit's exit code 2
+is preserved. A separate assessment permits only the identified inherited
+case; the strict test tolerance was not loosened. Thus the review does not
+claim that every supported double flux has a certified nonnegative margin.
+
+Benchmark job 79416 completed with exit 0. The following are same-job,
+single-core microbenchmark measurements in microseconds per active face:
+
+| face set | saved coding optimization (`step5d`) | original fast design | reviewed variant |
+|---|---:|---:|---:|
+| cold large-Bx tube | 16.910 | 2.970 | 6.660 |
+| warm relativistic tube | 16.925 | 3.080 | 6.755 |
+| 44 × 88 jet series, t=0.5…3.5 | 19.765 | 3.725 | 7.890 |
+| jet t=35 sample | 21.895 | 3.785 | 8.305 |
+
+The reviewed active solve is about 2.5 times faster than the saved coding
+optimization, and about 2.2 times slower than the original fast design. It
+retains two actual-state entropy recoveries. Averaging over **all** faces of
+the jet series gives 4.520 / 1.070 / 2.175 microseconds respectively; inactive
+faces make that a different comparison from the active-face table.
+
+In the same job, the corrected 44 × 88 jet to t=3 took 13.989 / 14.040 seconds
+on one worker; HLLD took 11.836 / 11.836 and HLLx 15.993 / 15.893 seconds.
+On 16 workers the corresponding pairs were 6.829 / 6.578, 5.676 / 4.274, and
+7.079 / 6.277 seconds. The multiworker samples have substantial contention
+and co-tenant variability; do not infer a precise parallel speedup or compare
+them as controlled timings against another job's historical wall times.
+
+The 160-cell warm-tube normalized L1 percentages agree with the original fast
+design to six decimals in every reported column: rho 4.719476, p 3.682547,
+vx 1.947186, vy 1.940427, By 3.457823, Bz 2.433025. Saved `step5d` has rho
+4.729763. All 13 evolutions exited 0 with no error banner. This is encouraging
+evidence for the tested tube and short jet, not validation of all strong-jump
+or multidimensional regimes; the inherited strict entropy limitation above
+remains.
 
 Factory registration, serialization and face tests are necessary preflight.
 Evolved SR shocktubes, multidimensional evolution, GR, general/tabulated EOS,

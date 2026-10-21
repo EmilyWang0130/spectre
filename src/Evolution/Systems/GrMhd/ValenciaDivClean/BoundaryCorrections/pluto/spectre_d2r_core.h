@@ -8,11 +8,13 @@ extern "C" {
  * primitive = [rho,vn,vt,vb,p,Bt,Bb]
  * conserved = [D,mn,mt,mb,tau,Bt,Bb], tau=E-D.
  * All returned momentum fluxes INCLUDE normal pressure.
- * Grid/context and solver scratch are thread-local. Vendor diagnostics and
- * allocation accounting still share some process globals: callers serialize
- * this bridge with the other PLUTO entrypoints when first allocating scratch.
+ * Grid/context, solver scratch, maximum-Mach diagnostic and allocation
+ * accounting are thread-local. Independent workers may call this bridge
+ * concurrently, including their first scratch allocation.
  */
-#define D2R_CORE_ABI 3
+/* ABI 4: the diagnostics output grew from 8 to 16 doubles in design D8.
+ * Reject old ABI-3 clients before they allocate an undersized output buffer. */
+#define D2R_CORE_ABI 4
 #define D2R_CORE_NI 14
 #define D2R_CORE_ND 16
 int d2r_sr_core_abi(void);

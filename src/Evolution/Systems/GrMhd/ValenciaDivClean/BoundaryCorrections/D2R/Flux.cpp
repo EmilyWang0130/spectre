@@ -119,10 +119,10 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   // calls keeps its grid, contexts and every PLUTO scratch array in
   // _Thread_local storage and initializes them on each thread's first call
   // (spectre_d2r_core.c core_setup, hlld.c, d2r_hlld_fixed.c, arrays.c,
-  // hll_speed.c, mappers.c); the process globals that path still writes
-  // (g_maxMach, g_usedMemory, g_maxRootIter) are diagnostics nothing reads.
-  // That is the threading contract of the legacy PLUTO solvers, which call
-  // the same HLL_Speed/Magnetosonic/HLLD_Solver from every worker unlocked.
+  // hll_speed.c, mappers.c). The wave-speed and allocation diagnostics
+  // (g_maxMach and g_usedMemory) are also TLS: even diagnostic-only shared
+  // read-modify-writes would be C data races. The generic Brent/Ridder
+  // g_maxRootIter updates are not on this core's call path.
   FaceResult result;
   result.status = "invalid_primitive";
   if (not physical_primitive(left, bn, gamma) or
@@ -199,12 +199,9 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
     refined = base;
     have_refined = true;
   }
-  // Design D1 (2026-10-21): the entropy variables of the two states are those
-  // of the face's own primitives, whose encoding the conserved states are; the
-  // original recovered them from ul, ur, which reproduces the primitives to
-  // round-off at the cost of two recoveries. The response's first fixed-bound
-  // solve is then the refined solve itself. The fallback recoveries of the
-  // capped states start from the face primitives' roots.
+  // Entropy is evaluated on primitives recovered from the actual stored
+  // conservative states. Supplied face primitives seed those recoveries;
+  // they do not replace them or introduce a thermal-resolution threshold.
   const EntropyModel model(base.ul, base.ur, left, right, bn, gamma);
   if (not model.supported) {
     thread_local std::string composite;
@@ -287,13 +284,11 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   for (auto& x : shift) {
     x /= 2.;
   }
-  // Design D3 (2026-10-21): the shifted states' primitives by the linear update
-  // of the model's primitives pl, pr (dU/dP solve) when both come out physical,
-  // which is nearly every face; otherwise the original recoveries and their
-  // beta search. The update differs from the recovery at second order in the
-  // shift. (pl, pr are the face primitives except on a side recovered under
-  // D1b; the update is about them, so that both fixed-bound solves of the
-  // response start from the same states.)
+  // The fast path predicts auxiliary primitives with the linear dU/dP solve,
+  // after checking admissibility of the intended conservative shifts. It is
+  // a first-order primitive predictor, not a recovery or round-trip claim:
+  // re-encoding it differs from the intended shift by O(|shift|^2) locally.
+  // Unusable shifts/predictions take the original recovery and beta search.
   auto input_cap = linear_ray_cap(base.ul, base.ur, pl, pr, shift, bn, gamma);
   if (not input_cap.success) {
     input_cap = physical_ray_cap(base.ul, base.ur, shift, bn, gamma, left_roots,
@@ -306,8 +301,9 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   if (input_cap.left == base.ul and input_cap.right == base.ur) {
     return keep("zero_represented_input_change");
   }
-  // The cap recovered exactly these states to accept them (2026-10-20: the
-  // same two recoveries were repeated here).
+  // These are either checked recoveries or physical auxiliary predictions,
+  // as recorded by input_cap.primitive_prediction. Both helper re-encodings
+  // are checked below; a prediction has no inverse/round-trip certificate.
   const auto& cl = input_cap.left_recovery;
   const auto& cr = input_cap.right_recovery;
   if (not cl.success or not cr.success) {

@@ -787,7 +787,6 @@ EntropyPair entropy_pair_from_primitive(const State& p, double bn,
   out.recovery.reason = "face_primitive";
   out.recovery.primitive = p;
   out.recovery.high_precision_primitive = imported(p);
-  out.recovery.roundtrip_checked = true;
   out.recovery.roots = primitive_hint(p, gamma);
   entropy_variables(&out, bn, gamma);
   return out;
@@ -998,6 +997,15 @@ PhysicalCap linear_ray_cap(const State& ul, const State& ur, const State& left,
     dl[i] = static_cast<double>(static_cast<long double>(l[i]) - ul[i]);
     dr[i] = static_cast<double>(static_cast<long double>(r[i]) - ur[i]);
   }
+  // Physicality of the primitive prediction does not certify the intended
+  // conserved shift. Check both shifted encodings independently before using
+  // the fast predictor; an unsupported state takes the recovery/beta fallback.
+  const auto left_admissibility = admissibility(l, bn, gamma);
+  const auto right_admissibility = admissibility(r, bn, gamma);
+  if (!left_admissibility.admissible || !right_admissibility.admissible) {
+    out.reason = "linear_shifted_encoding_unsupported";
+    return out;
+  }
   MpState dpl{}, dpr{};
   if (!primitive_change(&dpl, left, dl, bn, gamma) ||
       !primitive_change(&dpr, right, dr, bn, gamma)) {
@@ -1017,15 +1025,17 @@ PhysicalCap linear_ray_cap(const State& ul, const State& ur, const State& left,
     return out;
   }
   out.success = out.full_supported = true;
+  out.primitive_prediction = true;
   out.beta = 1.;
   out.left = l;
   out.right = r;
   out.evaluations = 1;
   for (auto* recovery : {&out.left_recovery, &out.right_recovery}) {
     recovery->success = true;
-    recovery->roundtrip_checked = true;
-    recovery->reason = "linear_update";
+    recovery->reason = "linear_primitive_prediction";
   }
+  out.left_recovery.admissibility = left_admissibility;
+  out.right_recovery.admissibility = right_admissibility;
   out.left_recovery.primitive = left_new;
   out.left_recovery.high_precision_primitive = pl;
   out.right_recovery.primitive = right_new;
@@ -1070,41 +1080,12 @@ EntropyModel::EntropyModel(const State& ul, const State& ur, double bn,
       ur_(ur) {
   complete();
 }
-namespace {
-// Whether the stored conserved state u resolves the thermal energy of its
-// primitive p (design D1b, 2026-10-21): the lab-frame thermal energy
-// p (Gamma / (Gamma - 1) W^2 - 1) against 2^-32 of the magnitude of the
-// energy residual's terms (|tau|, B^2 and the unknown x = rho h W^2 - rho W),
-// a dispatch level far above their rounding. Below it the encoding may not
-// carry the pressure at all -- a cold, fast state, whose recovery then fails at
-// the pressure-zero energy margin and rejects the face (the adapter keeps its
-// HLL flux) -- so such a state takes the original recovery; above it the
-// recovery succeeds and reproduces the primitive to within the encoding's
-// rounding.
-bool thermal_energy_resolved(const State& u, const State& p, const double bn,
-                             const double gamma) {
-  const auto x = parts(imported(p), bn);
-  const Real gm = exact_double(gamma);
-  const Real h = 1 + gm / (gm - 1) * x.p / x.rho;
-  const Real thermal = x.p * (gm / (gm - 1) * x.w * x.w - 1);
-  const Real scale = abs_real(exact_double(u[4])) + x.b2 +
-                     x.rho * x.w * (h * x.w - 1);
-  return thermal > scale * Real(std::ldexp(1., -32));
-}
-EntropyPair entropy_pair_of_side(const State& u, const State& p,
-                                 const double bn, const double gamma) {
-  return thermal_energy_resolved(u, p, bn, gamma)
-             ? entropy_pair_from_primitive(p, bn, gamma)
-             : entropy_pair(u, bn, gamma, primitive_hint(p, gamma));
-}
-}  // namespace
-
 EntropyModel::EntropyModel(const State& ul, const State& ur,
                            const State& left_primitive,
                            const State& right_primitive, double bn,
                            double gamma)
-    : left(entropy_pair_of_side(ul, left_primitive, bn, gamma)),
-      right(entropy_pair_of_side(ur, right_primitive, bn, gamma)),
+    : left(entropy_pair(ul, bn, gamma, primitive_hint(left_primitive, gamma))),
+      right(entropy_pair(ur, bn, gamma, primitive_hint(right_primitive, gamma))),
       ul_(ul),
       ur_(ur) {
   complete();

@@ -76,8 +76,13 @@ struct PhysicalCap {
   State right{};
   std::size_t evaluations = 0;
   bool full_supported = false;
-  // The recoveries of left and right that accepted them (set with a nonzero
-  // beta), so a caller need not repeat them.
+  // True when the helper primitives below are linear predictions rather than
+  // recoveries of left/right. The predicted primitives are physical, and
+  // left/right pass admissibility, but their encoding differs from left/right
+  // at second order in the shift. No round-trip check is claimed in this case.
+  bool primitive_prediction = false;
+  // Recoveries of left/right, or physical primitive predictions when
+  // primitive_prediction is true, so the caller need not recompute them.
   Recovery left_recovery{};
   Recovery right_recovery{};
 };
@@ -99,9 +104,9 @@ Recovery recover(const State& u, double bn, double gamma,
                  const RootHint& hint = {});
 EntropyPair entropy_pair(const State& u, double bn, double gamma,
                          const RootHint& hint = {});
-// The entropy pair of the state with these primitives, without recovering
-// them from its conserved state (design D1, 2026-10-21): the face's own
-// primitives, of which the conserved states are the encoding.
+// The entropy pair evaluated directly at these primitives. This does not
+// recover or verify any independently stored conserved encoding, and is not
+// the entropy model used to certify an actual stored-state pair.
 EntropyPair entropy_pair_from_primitive(const State& p, double bn,
                                         double gamma);
 // The energy root of the state with these primitives, x = (rho + Gamma p /
@@ -120,11 +125,13 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
                              const State& shift, double bn, double gamma,
                              const RootHint& left_hint = {},
                              const RootHint& right_hint = {});
-// Design D3 (2026-10-21): the full shift (beta = 1) with the shifted states'
-// primitives from the linear update of left, right (the primitives of ul, ur),
-// dP = (dU/dP)^-1 dU, instead of recovering them. success = false (the caller
-// then takes physical_ray_cap) when an updated primitive is unphysical or the
-// linear system singular.
+// Design D3 (2026-10-21): try the full shift (beta = 1), requiring the intended
+// conserved states ul+shift, ur-shift to pass admissibility. Form separate
+// physical helper primitives with dP = (dU/dP)^-1 dU at left/right; these are
+// predictions, not recoveries of the shifted states, and their encodings
+// differ from the intended shifts at second order. success = false (the caller
+// then takes physical_ray_cap) for unsupported shifted states, an unphysical
+// primitive prediction, or a singular linear system.
 PhysicalCap linear_ray_cap(const State& ul, const State& ur, const State& left,
                            const State& right, const State& shift, double bn,
                            double gamma);
@@ -149,9 +156,10 @@ struct EntropyModel {
 
   EntropyModel(const State& ul, const State& ur, double bn, double gamma,
                const RootHint& left_hint = {}, const RootHint& right_hint = {});
-  // The model of the conserved states ul, ur with the entropy variables of
-  // their primitives, given (design D1); a state whose encoding does not
-  // resolve its thermal energy is recovered as before (design D1b).
+  // Recover the actual stored states ul, ur before forming their entropy
+  // model. Supplied primitives only provide starting hints for the recovery;
+  // no thermal-energy threshold substitutes their entropy variables for the
+  // recovered ones.
   EntropyModel(const State& ul, const State& ur, const State& left_primitive,
                const State& right_primitive, double bn, double gamma);
   Real margin(const State& flux) const;
