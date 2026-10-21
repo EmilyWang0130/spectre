@@ -278,8 +278,16 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   for (auto& x : shift) {
     x /= 2.;
   }
-  const auto input_cap = physical_ray_cap(base.ul, base.ur, shift, bn, gamma,
-                                          left_roots, right_roots);
+  // Design D3 (2026-10-21): the shifted states' primitives by the linear update
+  // of the face primitives (dU/dP solve) when both come out physical, which is
+  // nearly every face; otherwise the original recoveries and their beta search.
+  // The update differs from the recovery at second order in the shift.
+  auto input_cap =
+      linear_ray_cap(base.ul, base.ur, left, right, shift, bn, gamma);
+  if (not input_cap.success) {
+    input_cap = physical_ray_cap(base.ul, base.ur, shift, bn, gamma, left_roots,
+                                 right_roots);
+  }
   result.beta = input_cap.beta;
   if (not input_cap.success or input_cap.beta == 0.) {
     return keep("input_ray_baseline");

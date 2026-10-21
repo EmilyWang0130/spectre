@@ -913,6 +913,129 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
   return out;
 }
 
+namespace {
+// The primitive change dp with (dU/dP)(p) dp = du at fixed Bn: the field rows
+// are the identity, the other five by Gaussian elimination with partial
+// pivoting. False if the system is singular or the result nonfinite.
+bool primitive_change(MpState* const dp, const State& p, const State& du,
+                      const double bn, const double gamma) {
+  const auto x = parts(imported(p), bn);
+  const Real gm = exact_double(gamma), k = gm / (gm - 1);
+  const Real hr = x.rho + k * x.p, w2 = x.w * x.w, w3 = w2 * x.w, w4 = w2 * w2,
+             z = hr * w2;
+  const MpState d = imported(du);
+  const Real db_t = d[5], db_b = d[6];
+  std::array<std::array<Real, 6>, 5> a{};
+  // Columns rho, v_n, v_t, v_b, p; the last column is the right-hand side.
+  a[0][0] = x.w;
+  for (std::size_t i = 0; i < 3; ++i)
+    a[0][1 + i] = x.rho * w3 * x.v[i];
+  a[0][5] = d[0];
+  for (std::size_t j = 0; j < 3; ++j) {
+    a[1 + j][0] = w2 * x.v[j];
+    for (std::size_t i = 0; i < 3; ++i)
+      a[1 + j][1 + i] = 2 * hr * w4 * x.v[i] * x.v[j] +
+                        (i == j ? z + x.b2 : Real(0)) - x.b[i] * x.b[j];
+    a[1 + j][4] = k * w2 * x.v[j];
+    Real field = 0;
+    for (std::size_t c = 1; c < 3; ++c)
+      field +=
+          (2 * x.b[c] * x.v[j] - x.v[c] * x.b[j] - (j == c ? x.vb : Real(0))) *
+          (c == 1 ? db_t : db_b);
+    a[1 + j][5] = d[1 + j] - field;
+  }
+  a[4][0] = w2 - x.w;
+  for (std::size_t i = 0; i < 3; ++i)
+    a[4][1 + i] = 2 * hr * w4 * x.v[i] - x.rho * w3 * x.v[i] + x.v[i] * x.b2 -
+                  x.vb * x.b[i];
+  a[4][4] = k * w2 - 1;
+  a[4][5] = d[4] - ((x.b[1] * (1 + x.v2) - x.vb * x.v[1]) * db_t +
+                    (x.b[2] * (1 + x.v2) - x.vb * x.v[2]) * db_b);
+  for (std::size_t c = 0; c < 5; ++c) {
+    std::size_t pivot = c;
+    for (std::size_t r = c + 1; r < 5; ++r)
+      if (absolute(a[r][c]) > absolute(a[pivot][c]))
+        pivot = r;
+    if (!(absolute(a[pivot][c]) > 0) || !finite(a[pivot][c]))
+      return false;
+    std::swap(a[c], a[pivot]);
+    for (std::size_t r = c + 1; r < 5; ++r) {
+      const Real factor = a[r][c] / a[c][c];
+      for (std::size_t col = c; col < 6; ++col)
+        a[r][col] -= factor * a[c][col];
+    }
+  }
+  std::array<Real, 5> solution{};
+  for (std::size_t c = 5; c-- > 0;) {
+    Real sum = a[c][5];
+    for (std::size_t col = c + 1; col < 5; ++col)
+      sum -= a[c][col] * solution[col];
+    solution[c] = sum / a[c][c];
+    if (!finite(solution[c]))
+      return false;
+  }
+  *dp = {solution[0], solution[1], solution[2], solution[3],
+         solution[4], db_t,        db_b};
+  return true;
+}
+}  // namespace
+
+PhysicalCap linear_ray_cap(const State& ul, const State& ur, const State& left,
+                           const State& right, const State& shift,
+                           const double bn, const double gamma) {
+  PhysicalCap out{};
+  out.left = ul;
+  out.right = ur;
+  if (!finite(ul) || !finite(ur) || !finite(shift)) {
+    out.reason = "invalid_pair_or_shift";
+    return out;
+  }
+  // The shifted conserved states exactly as physical_ray_cap forms them at
+  // beta = 1.
+  State l{}, r{}, dl{}, dr{};
+  for (std::size_t i = 0; i < 7; ++i) {
+    volatile long double product = static_cast<long double>(1.) * shift[i];
+    l[i] = static_cast<double>(static_cast<long double>(ul[i]) + product);
+    r[i] = static_cast<double>(static_cast<long double>(ur[i]) - product);
+    dl[i] = static_cast<double>(static_cast<long double>(l[i]) - ul[i]);
+    dr[i] = static_cast<double>(static_cast<long double>(r[i]) - ur[i]);
+  }
+  MpState dpl{}, dpr{};
+  if (!primitive_change(&dpl, left, dl, bn, gamma) ||
+      !primitive_change(&dpr, right, dr, bn, gamma)) {
+    out.reason = "linear_update_singular";
+    return out;
+  }
+  MpState pl = imported(left), pr = imported(right);
+  for (std::size_t i = 0; i < 7; ++i) {
+    pl[i] += dpl[i];
+    pr[i] += dpr[i];
+  }
+  State left_new{}, right_new{};
+  if (!rounded_state(&left_new, pl) || !rounded_state(&right_new, pr) ||
+      !physical_primitive(left_new, bn, gamma) ||
+      !physical_primitive(right_new, bn, gamma)) {
+    out.reason = "linear_update_unphysical";
+    return out;
+  }
+  out.success = out.full_supported = true;
+  out.beta = 1.;
+  out.left = l;
+  out.right = r;
+  out.evaluations = 1;
+  for (auto* recovery : {&out.left_recovery, &out.right_recovery}) {
+    recovery->success = true;
+    recovery->roundtrip_checked = true;
+    recovery->reason = "linear_update";
+  }
+  out.left_recovery.primitive = left_new;
+  out.left_recovery.high_precision_primitive = pl;
+  out.right_recovery.primitive = right_new;
+  out.right_recovery.high_precision_primitive = pr;
+  out.reason = "linear_full_supported";
+  return out;
+}
+
 bool rounded_ray(State* out, const State& base, const State& direction,
                  const Real& coefficient) {
   if (!finite(base) || !finite(direction) || !finite(coefficient))

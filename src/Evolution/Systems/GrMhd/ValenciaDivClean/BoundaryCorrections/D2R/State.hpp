@@ -116,6 +116,14 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
                              const State& shift, double bn, double gamma,
                              const RootHint& left_hint = {},
                              const RootHint& right_hint = {});
+// Design D3 (2026-10-21): the full shift (beta = 1) with the shifted states'
+// primitives from the linear update of the face primitives left, right,
+// dP = (dU/dP)^-1 dU, instead of recovering them. success = false (the caller
+// then takes physical_ray_cap) when an updated primitive is unphysical or the
+// linear system singular.
+PhysicalCap linear_ray_cap(const State& ul, const State& ur, const State& left,
+                           const State& right, const State& shift, double bn,
+                           double gamma);
 
 // Exact represented affine arithmetic, rounded once, ties to even. Return
 // false for nonfinite input/output. coefficient is its represented decimal
