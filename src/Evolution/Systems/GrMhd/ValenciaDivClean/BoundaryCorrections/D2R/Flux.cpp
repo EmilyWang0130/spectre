@@ -129,7 +129,15 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
       not physical_primitive(right, bn, gamma)) {
     return result;
   }
-  auto base = core(0, left, right, bn, gamma);
+  // Design D6 (2026-10-21): one core call (mode 3) gives the native bounds
+  // and, when they straddle the face, the fixed-bound solve with them -- the
+  // candidate. The original called the native solver for the bounds and then
+  // the fixed-bound solve, discarding the native flux. Equal states need the
+  // bounds alone (mode 2).
+  const bool equal = left == right;
+  auto base = core(equal ? 2 : 3, left, right, bn, gamma);
+  const bool fixed_solve = not equal and base.integers[2] == 1 and
+                           base.bounds[0] < 0. and base.bounds[1] > 0.;
   result.core_calls = 1;
   result.native_status = base.status();
   if (base.status() == -2) {
@@ -155,8 +163,11 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
     base.integers[0] = 1;
     result.causal_fallback = true;
   }
+  if (fixed_solve) {
+    result.baseline_outcome = base.integers[5];
+  }
   if (base.status() != 1) {
-    result.status = "native_unusable";
+    result.status = fixed_solve ? "refined_core_unusable" : "native_unusable";
     return result;
   }
   result.left_tau = base.ul;
@@ -168,7 +179,6 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   // whenever the recovered primitives equal the inputs bit for bit.
   CoreResult refined{};
   bool have_refined = false;
-  const bool equal = left == right;
   if (equal) {
     candidate = base.fl;
     // Identical primitives: the flux is this state's physical flux and the
@@ -185,17 +195,9 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
       result.status = "equal_state_physical_flux";
       return result;
     }
-  } else if (not result.causal_fallback and base.bounds[0] < 0. and
-             base.bounds[1] > 0.) {
-    refined = core(1, left, right, bn, gamma, base.bounds);
+  } else if (fixed_solve) {
+    refined = base;
     have_refined = true;
-    ++result.core_calls;
-    result.baseline_outcome = refined.integers[5];
-    if (refined.status() != 1) {
-      result.status = "refined_core_unusable";
-      return result;
-    }
-    candidate = refined.flux;
   }
   // Design D1 (2026-10-21): the entropy variables of the two states are those
   // of the face's own primitives, whose encoding the conserved states are; the
@@ -537,15 +539,14 @@ int pluto_d2r_flux_impl(const int npts, const double* left,
         // transverse symmetry of the 1-D cold tube on the 3-D slab at t = 1.7
         // (2026-10-19, run07_pluto_d2r/sensitivity, iteration 3). Falls
         // through to the full path if the core calls fail.
-        const auto base = core(0, pl, pr, l[4], gamma);
-        State flux = base.flux;
-        if (base.status() == 1 and base.bounds[0] < 0. and
-            base.bounds[1] > 0.) {
-          const auto refined = core(1, pl, pr, l[4], gamma, base.bounds);
-          if (refined.status() == 1 and finite(refined.flux)) {
-            flux = refined.flux;
-          }
+        // (Design D6: mode 3 is that solve when the bounds straddle the face,
+        // the native one otherwise; the native flux when the solve fails.)
+        auto base = core(3, pl, pr, l[4], gamma);
+        if (base.status() != 1 and base.integers[2] == 1 and
+            base.bounds[0] < 0. and base.bounds[1] > 0.) {
+          base = core(0, pl, pr, l[4], gamma);
         }
+        const State flux = base.flux;
         if (base.status() == 1 and finite(flux)) {
           out[0] = flux[0];
           out[1] = flux[1];

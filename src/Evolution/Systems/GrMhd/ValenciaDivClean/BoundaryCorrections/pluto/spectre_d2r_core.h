@@ -17,7 +17,9 @@ extern "C" {
 #define D2R_CORE_ND 8
 int d2r_sr_core_abi(void);
 int d2r_sr_fixed_precision(void);
-/* Mode 0 native (recomputes bounds), 1 fixed supplied bounds, 2 physical maps.
+/* Mode 0 native (recomputes bounds), 1 fixed supplied bounds, 2 physical maps,
+ * 3 mode 0's bounds and with them, when they straddle the face (SL < 0 < SR),
+ * mode 1's solve, otherwise mode 0's.
  * faces[n][16]=[gamma,Bn,wl[7],wr[7]], fixed[n][2].
  * numerical[n][7], states[n][2][7], physical[n][2][7], used_bounds[n][2].
  * integers[n][14]: status,input_valid,bounds_valid,finite_flux,
