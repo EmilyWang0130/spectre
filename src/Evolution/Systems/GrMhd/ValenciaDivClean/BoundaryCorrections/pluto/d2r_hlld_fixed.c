@@ -138,11 +138,27 @@ static int D2R_RefreshAndRefine(D2R_Riemann_State *l,D2R_Riemann_State *r,
   if(low>high) {
     double t=low;low=high;high=t;t=flow;flow=fhigh;fhigh=t;
   }
-  /* Each accepted midpoint strictly shrinks a finite positive binary64
-   * bracket. Termination uses adjacency or an exact represented zero, with
-   * no problem-dependent residual or relative-pressure tolerance. */
+  /* Design D5 (2026-10-21): the bracket shrinks by regula falsi with the
+   * Illinois modification (the end kept twice in a row has its residual
+   * halved for the next step), bisecting after two steps that did not halve
+   * it; the original bisected alone (17-25 residuals per refinement on the
+   * jet face sets, now 1.5-2.1). Each accepted point strictly shrinks a
+   * finite positive binary64 bracket. Termination uses adjacency or an exact
+   * represented zero, with no problem-dependent residual or relative-pressure
+   * tolerance, and the returned end is chosen as before; where the residual's
+   * sign changes more than once within the last few doubles, the two
+   * searches can stop at different changes (fluxes differ by round-off). */
+  double wlow=flow,whigh=fhigh,checkpoint=high-low;
+  int last_side=0,slow_steps=0;
   while(nextafter(low,high)<high) {
-    const double mid=low+.5*(high-low);
+    double mid;
+    if(slow_steps>=2) mid=low+.5*(high-low);
+    else {
+      const double t=fabs(wlow)/(fabs(wlow)+fabs(whigh));
+      mid=low+t*(high-low);
+      if(!(mid>low)) mid=nextafter(low,high);
+      else if(!(mid<high)) mid=nextafter(high,low);
+    }
     if(!(mid>low && mid<high)) {
       rec->root_failure|=D2R_REFINE_UNUSABLE;return 0;
     }
@@ -155,8 +171,17 @@ static int D2R_RefreshAndRefine(D2R_Riemann_State *l,D2R_Riemann_State *r,
       return 0;
     }
     if(fm==0.) {*pressure=mid;return 1;}
-    if(signbit(fm)==signbit(flow)) {low=mid;flow=fm;}
-    else {high=mid;fhigh=fm;}
+    if(signbit(fm)==signbit(flow)) {
+      low=mid;flow=fm;wlow=fm;
+      if(last_side<0) whigh*=.5;
+      last_side=-1;
+    } else {
+      high=mid;fhigh=fm;whigh=fm;
+      if(last_side>0) wlow*=.5;
+      last_side=1;
+    }
+    if(high-low<=.5*checkpoint) {checkpoint=high-low;slow_steps=0;}
+    else ++slow_steps;
   }
   p=fabs(flow)<=fabs(fhigh)?low:high;
   f=D2R_HLLD_Fstar(l,r,p);++*calls;
