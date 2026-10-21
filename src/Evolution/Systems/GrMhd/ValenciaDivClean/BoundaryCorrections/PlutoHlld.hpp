@@ -132,7 +132,8 @@ class PlutoHlld final : public evolution::BoundaryCorrection {
   struct LightSpeedDensityCutoff {
     static constexpr Options::String help = {
         "When the density is below this value we just use the light speed for "
-        "the characteristic speeds."};
+        "the characteristic speeds. On curved faces, points with a side at or "
+        "below it also keep the HLL flux."};
     using type = double;
   };
   using options =
@@ -370,10 +371,11 @@ using PlutoMovingFaceFluxFunction = int (*)(int, const double*, const double*,
 /// keeps the HLL flux where it does.
 ///
 /// `light_speed_density_cutoff` is the correction's `LightSpeedDensityCutoff`.
-/// With `SPECTRE_PLUTO_DENSITY_CUTOFF_HLL=1` in the environment (an experiment,
-/// off by default), points where either side's density is at or below it keep
-/// the HLL flux, whose bounds the packaging set to the light speeds there --
-/// what `Hll` and `HllcGr` do in an atmosphere.
+/// Curved points where either side's density is at or below it keep the HLL
+/// flux, whose bounds the packaging set to the light speeds there -- what
+/// `Hll` and `HllcGr` do in an atmosphere; flat points do not.
+/// With `SPECTRE_PLUTO_FORCE_HLL=1` in the environment every point keeps the
+/// HLL flux (the HLLE arm of a solver comparison).
 void pluto_dg_boundary_terms(
     PlutoFluxFunction pluto_solver,
     PlutoMovingFaceFluxFunction moving_face_solver,

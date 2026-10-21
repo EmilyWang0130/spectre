@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <optional>
 #include <random>
@@ -1105,6 +1106,111 @@ void test_d2r_lapse_only(const Eos& eos) {
   }
   check_close(scaled, g_flat, 1.0e-9, "D2-R lapse");
 }
+
+// ---------------------------------------------------------------------------
+// 10. The two triggers of the HLL baseline. On a curved face a side at or
+//     below LightSpeedDensityCutoff keeps the HLL flux: the same for every
+//     solver, conservative, and bit for bit the flux SPECTRE_PLUTO_FORCE_HLL=1
+//     gives. Just above the cutoff the fans are solved; flat faces never
+//     consult it. The switch keeps the HLL flux at every point, flat or curved.
+// ---------------------------------------------------------------------------
+void test_density_cutoff_and_forced_hll(const gsl::not_null<std::mt19937*> gen,
+                                        const Eos& eos) {
+  const double cutoff = 1.0e-8;  // the solvers' LightSpeedDensityCutoff
+  const auto all_solvers = [&eos](const Primitive& left, const Primitive& right,
+                                  const Geometry& geometry,
+                                  const std::array<double, 3>& normal) {
+    std::vector<Correction> result{};
+    for_each_solver([&](const auto& solver, const std::string& /*name*/) {
+      result.push_back(solve_face(solver, left, right, geometry, normal, eos));
+    });
+    return result;
+  };
+  const auto all_equal = [](const std::vector<Correction>& g) {
+    return std::all_of(g.begin(), g.end(), [&g](const Correction& c) {
+      return std::memcmp(c.data(), g.front().data(), sizeof(Correction)) == 0;
+    });
+  };
+  std::uniform_real_distribution<double> unit(0.0, 1.0);
+  for (size_t trial = 0; trial < 20; ++trial) {
+    CAPTURE(trial);
+    Geometry curved{};
+    curved.metric = random_metric(gen, 0.3);
+    curved.lapse = 0.4 + unit(*gen);
+    for (double& shift_component : curved.shift) {
+      shift_component = 0.3 * (2.0 * unit(*gen) - 1.0);
+    }
+    const Geometry flat{};
+    const auto direction = random_direction(gen);
+    const auto normal = unit_normal(curved, direction);
+    const auto flat_normal = unit_normal(flat, direction);
+    const auto left = random_primitive(gen, curved.metric, 0.7, 0.6);
+    auto thin = random_primitive(gen, curved.metric, 0.7, 0.6);
+    thin.rho = 0.5 * cutoff;
+    thin.pressure = 0.5 * cutoff;
+    auto above = thin;
+    above.rho = 2.0 * cutoff;
+    // States for the flat face, subluminal in the flat metric.
+    const auto flat_left = random_primitive(gen, flat.metric, 0.7, 0.6);
+    const auto flat_dense = random_primitive(gen, flat.metric, 0.7, 0.6);
+    auto flat_thin = random_primitive(gen, flat.metric, 0.7, 0.6);
+    flat_thin.rho = 0.5 * cutoff;
+    flat_thin.pressure = 0.5 * cutoff;
+
+    bc::detail::reset_face_frame_counts();
+    const auto g_thin = all_solvers(left, thin, curved, normal);
+    auto counts = bc::detail::face_frame_counts();
+    CHECK(counts.density_cutoff == 4);
+    CHECK(counts.curved_solved == 0);
+    CHECK(all_equal(g_thin));
+    {
+      const std::array<double, 3> minus{{-normal[0], -normal[1], -normal[2]}};
+      const auto l = package(hlld, left, curved, normal, eos);
+      const auto r = package(hlld, thin, curved, minus, eos);
+      const auto g_int = boundary(hlld, l, r, dg::Formulation::WeakInertial);
+      const auto g_ext = boundary(hlld, r, l, dg::Formulation::WeakInertial);
+      Correction minus_ext{};
+      for (size_t k = 0; k < minus_ext.size(); ++k) {
+        gsl::at(minus_ext, k) = -gsl::at(g_ext, k);
+      }
+      check_close(g_int, minus_ext, 1.0e-10, "cutoff conservation");
+    }
+
+    bc::detail::reset_face_frame_counts();
+    (void)all_solvers(left, above, curved, normal);
+    counts = bc::detail::face_frame_counts();
+    CHECK(counts.density_cutoff == 0);
+    CHECK(counts.curved_solved + counts.fallback_solver == 4);
+
+    bc::detail::reset_face_frame_counts();
+    (void)all_solvers(flat_left, flat_thin, flat, flat_normal);
+    counts = bc::detail::face_frame_counts();
+    CHECK(counts.flat_points == 4);
+    CHECK(counts.density_cutoff == 0);
+
+    setenv("SPECTRE_PLUTO_FORCE_HLL", "1", 1);
+    bc::detail::reset_face_frame_counts();
+    const auto forced_thin = all_solvers(left, thin, curved, normal);
+    const auto forced_above = all_solvers(left, above, curved, normal);
+    const auto forced_flat =
+        all_solvers(flat_left, flat_dense, flat, flat_normal);
+    counts = bc::detail::face_frame_counts();
+    unsetenv("SPECTRE_PLUTO_FORCE_HLL");
+    CHECK(counts.forced_hll == 12);
+    CHECK(counts.curved_solved == 0);
+    CHECK(counts.density_cutoff == 0);
+    CHECK(all_equal(forced_thin));
+    CHECK(all_equal(forced_above));
+    CHECK(all_equal(forced_flat));
+    CHECK(std::memcmp(forced_thin.front().data(), g_thin.front().data(),
+                      sizeof(Correction)) == 0);
+    // Unset again, the fans are solved.
+    bc::detail::reset_face_frame_counts();
+    (void)all_solvers(left, above, curved, normal);
+    CHECK(bc::detail::face_frame_counts().forced_hll == 0);
+    CHECK(bc::detail::face_frame_counts().density_cutoff == 0);
+  }
+}
 }  // namespace
 
 // [[TimeOut, 60]]
@@ -1124,4 +1230,5 @@ SPECTRE_TEST_CASE(
   test_shift_and_mesh_velocity(make_not_null(&gen), *eos);
   test_kerr_schild_conservation(make_not_null(&gen), *eos);
   test_d2r_lapse_only(*eos);
+  test_density_cutoff_and_forced_hll(make_not_null(&gen), *eos);
 }

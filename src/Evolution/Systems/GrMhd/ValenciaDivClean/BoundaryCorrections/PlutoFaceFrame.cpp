@@ -4,6 +4,7 @@
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/PlutoFaceFrame.hpp"
 
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdlib>
@@ -186,16 +187,25 @@ void add_face_frame_counts(const FaceFrameCounts& increment) {
   counts.fallback_solver += increment.fallback_solver;
   counts.unsupported_points += increment.unsupported_points;
   counts.density_cutoff += increment.density_cutoff;
+  counts.forced_hll += increment.forced_hll;
+  // The forced-HLL switch announces itself once per process, whatever the
+  // stats cadence, so a run's log shows that its HLLE arm was HLLE.
+  static std::atomic<bool> forced_hll_announced{false};
+  if (increment.forced_hll > 0 and not forced_hll_announced.exchange(true)) {
+    Parallel::printf(
+        "PLUTO-backed corrections: SPECTRE_PLUTO_FORCE_HLL is set; every face "
+        "keeps the HLL flux.\n");
+  }
   if (report_every > 0 and increment.calls > 0 and
       counts.calls % report_every == 0) {
     Parallel::printf(
         "GR tetrad stats after %zu calls (this thread): flat %zu, curved %zu "
         "(solved %zu, |w|>=1 %zu; HLL kept: frame %zu, state %zu, ray %zu, "
-        "solver %zu), unsupported %zu, density cutoff %zu\n",
+        "solver %zu), unsupported %zu, density cutoff %zu, forced HLL %zu\n",
         counts.calls, counts.flat_points, counts.curved_points,
         counts.curved_solved, counts.outside_light_cone, counts.fallback_frame,
         counts.fallback_state, counts.fallback_ray, counts.fallback_solver,
-        counts.unsupported_points, counts.density_cutoff);
+        counts.unsupported_points, counts.density_cutoff, counts.forced_hll);
   }
 }
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::detail

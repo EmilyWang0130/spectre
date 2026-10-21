@@ -93,7 +93,8 @@ class PlutoHllx final : public evolution::BoundaryCorrection {
   struct LightSpeedDensityCutoff {
     static constexpr Options::String help = {
         "When the density is below this value we just use the light speed for "
-        "the characteristic speeds."};
+        "the characteristic speeds. On curved faces, points with a side at or "
+        "below it also keep the HLL flux."};
     using type = double;
   };
   using options =

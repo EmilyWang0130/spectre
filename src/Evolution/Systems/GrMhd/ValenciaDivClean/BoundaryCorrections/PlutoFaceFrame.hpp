@@ -109,10 +109,13 @@ struct FaceFrameCounts {
   size_t fallback_solver = 0;
   /// Points the packaging marked as unsupported (infinite flatness): HLL.
   size_t unsupported_points = 0;
-  /// Points (flat or curved) kept on the HLL flux because a side's density is
-  /// at or below `LightSpeedDensityCutoff`, with
-  /// `SPECTRE_PLUTO_DENSITY_CUTOFF_HLL=1` only.
+  /// Curved points kept on the HLL flux because a side's density is at or
+  /// below `LightSpeedDensityCutoff` (the light-speed bounds there, as `Hll`
+  /// and `HllcGr` use in an atmosphere).
   size_t density_cutoff = 0;
+  /// Points (flat or curved) kept on the HLL flux because
+  /// `SPECTRE_PLUTO_FORCE_HLL=1` is set: the HLLE arm of a solver comparison.
+  size_t forced_hll = 0;
 };
 
 /// This thread's counts since the last reset.

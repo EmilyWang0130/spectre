@@ -540,19 +540,24 @@ void pluto_dg_boundary_terms(
   std::vector<std::optional<FaceFrame>> frames(num_points);
   FaceFrameCounts tally{};
   tally.calls = 1;
-  // An experiment, off by default: honour LightSpeedDensityCutoff in the PLUTO
-  // path as Hll and HllcGr do in an atmosphere (their bounds there are the
-  // light speeds), by keeping the HLL flux wherever a side's density is at or
-  // below it. Read once.
-  static const bool honor_density_cutoff = [] {
-    const char* e = std::getenv("SPECTRE_PLUTO_DENSITY_CUTOFF_HLL");
+  // A curved point keeps the HLL flux wherever a side's density is at or below
+  // LightSpeedDensityCutoff, whose bounds dg_package_data set to the light
+  // speeds there: Hll's and HllcGr's treatment of an atmosphere. With the
+  // kernels' own cold-gas speeds instead, a static TOV star's surface cells
+  // next to the atmosphere grew over 100 M (tov/run46_gr_tetrad_null). Flat
+  // points keep the kernels everywhere, as before the GR face frame.
+  const auto below_density_cutoff = [&](const size_t pt) {
+    return get(rest_mass_density_int)[pt] <= light_speed_density_cutoff or
+           get(rest_mass_density_ext)[pt] <= light_speed_density_cutoff;
+  };
+  // SPECTRE_PLUTO_FORCE_HLL=1 keeps the HLL flux at every point, flat or
+  // curved -- the fast bounds for the MHD variables, the light cone for the
+  // GLM pair: the HLLE arm of a solver comparison. Read on every call (one
+  // lookup per face), so that a test can set it.
+  const bool force_hll = [] {
+    const char* e = std::getenv("SPECTRE_PLUTO_FORCE_HLL");
     return e != nullptr and std::atoi(e) != 0;
   }();
-  const auto below_density_cutoff = [&](const size_t pt) {
-    return honor_density_cutoff and
-           (get(rest_mass_density_int)[pt] <= light_speed_density_cutoff or
-            get(rest_mass_density_ext)[pt] <= light_speed_density_cutoff);
-  };
   const auto symmetric_components =
       [](const tnsr::ii<DataVector, 3, Frame::Inertial>& metric,
          const size_t pt) {
@@ -828,6 +833,10 @@ void pluto_dg_boundary_terms(
         continue;
       }
       const FaceFrame& frame = *frames[pt];
+      if (force_hll) {
+        ++tally.forced_hll;
+        continue;
+      }
       // Both sides are checked, and the adiabatic index is the two sides'
       // mean, so that swapping interior and exterior gives the mirror image
       // of the same problem (conservation across the face). On a flat face
@@ -846,7 +855,7 @@ void pluto_dg_boundary_terms(
       }
       if (below_density_cutoff(pt)) {
         ++tally.density_cutoff;
-        continue;  // the experiment: keep the light-speed HLL flux
+        continue;  // keep the light-speed HLL flux
       }
       if (moving_face_solver == nullptr and frame.face_speed != 0.0) {
         ++tally.fallback_ray;
@@ -1036,7 +1045,7 @@ void pluto_dg_boundary_terms(
   // Gather the interfaces PLUTO can handle; the rest keep the HLL flux that has
   // already been written above.
   std::vector<size_t> pt_index;
-  size_t flat_density_cutoff = 0;
+  size_t flat_forced_hll = 0;
   std::vector<std::array<double, 3>> triad_n, triad_t1, triad_t2;
   std::vector<double> pluto_vl, pluto_vr, pt_gamma;
   pt_index.reserve(num_points);
@@ -1051,9 +1060,9 @@ void pluto_dg_boundary_terms(
     if (path[i] != PointPath::Flat) {
       continue;  // solved in the face frame above, or kept on HLL
     }
-    if (below_density_cutoff(i)) {
-      ++flat_density_cutoff;
-      continue;  // the experiment: keep the light-speed HLL flux
+    if (force_hll) {
+      ++flat_forced_hll;
+      continue;
     }
     const double rho_i = get(rest_mass_density_int)[i];
     const double eps_i = get(specific_internal_energy_int)[i];
@@ -1119,9 +1128,9 @@ void pluto_dg_boundary_terms(
     pt_gamma.push_back(1.0 + p_i / (rho_i * eps_i));
   }
 
-  if (flat_density_cutoff > 0) {
+  if (flat_forced_hll > 0) {
     FaceFrameCounts flat_tally{};
-    flat_tally.density_cutoff = flat_density_cutoff;
+    flat_tally.forced_hll = flat_forced_hll;
     add_face_frame_counts(flat_tally);
   }
   if (pt_index.empty()) {
