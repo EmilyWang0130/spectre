@@ -390,7 +390,7 @@ Recovery recover(const State& original, double bn, double gamma) {
   constexpr std::size_t maximum_evaluations = 16384;
   struct RootState {
     Triple v{};
-    Real v2 = 0, p = 0, f = 0;
+    Real v2 = 0, t = 0, p = 0, f = 0;
     bool causal = false;
   };
   const auto state = [&](const Real& x) {
@@ -404,11 +404,152 @@ Recovery recover(const State& original, double bn, double gamma) {
     if (!s.causal)
       return s;
     const Real t = sqrt(1 - s.v2);
+    s.t = t;
     s.p = a * (x * (1 - s.v2) - d * t * s.v2 / (1 + t));
     const auto vx_b = cross(s.v, b);
     s.f = x - s.p + (b2 + dot(vx_b, vx_b)) / 2 - tau;
     return s;
   };
+  // Bisection with foregone decisions skipped (2026-10-20). Both bisections
+  // below run to adjacent binary64 values, about 55 evaluations each, and
+  // almost all of their decisions lie far from the crossing, where the sign of
+  // the predicate is that of the exact function: the pressure is negative from
+  // the causal limit up to the pressure-zero boundary and positive beyond it,
+  // and the energy residual increases through its root. In the double build a
+  // safeguarded Newton iteration locates the crossing, and probes on either
+  // side of it whose value exceeds four times an estimate of its rounding
+  // error bound a window: a midpoint at or below the window's low end takes
+  // the lower decision and one at or above its high end the upper decision,
+  // as the exact function and so the evaluation would give them; the
+  // midpoints inside are evaluated as before. The bisection keeps its
+  // midpoints, its termination and its final bracket, so its result. The
+  // 160-digit build evaluates every midpoint (its window is the bracket).
+  struct Window {
+    Real low, high;
+  };
+#ifdef D2R_MULTIPRECISION
+  const auto trusted_window = [](const Real& lower, const Real& upper,
+                                 const RootState& /*at_upper*/,
+                                 const bool /*energy*/) {
+    return Window{lower, upper};
+  };
+#else
+  const double eps = std::numeric_limits<double>::epsilon();
+  const double b_norm = std::sqrt(b2), m_norm = std::sqrt(dot(m, m));
+  struct Local {
+    bool upper = false, safe = false, smooth = false;
+    double g = 0., dg = 0., margin = 0.;
+  };
+  // The bisection's predicate at x (from its own state(x), so the decision a
+  // midpoint at x would get), the value whose sign it tests, the derivative
+  // for a Newton step and the rounding allowance: four times an estimate of
+  // the error of that value, from the magnitudes of the terms it is made of
+  // and the error of v^2 propagated through d/dv^2.
+  const auto local = [&](const double x, const RootState& rs,
+                         const bool energy) {
+    Local r{};
+    r.upper = energy ? rs.f >= 0 : (rs.causal && rs.p >= 0);
+    if (!rs.causal) {
+      // Below the causal limit the pressure predicate is false: p -> -a d t
+      // < 0 as t -> 0. (The energy bracket starts above the boundary.)
+      r.safe = !energy;
+      return r;
+    }
+    const double z = d + x, zb = z + b2, v2 = rs.v2, t = rs.t;
+    const double c = mb / (z * z * zb);
+    Triple dv{};
+    for (std::size_t i = 0; i < 3; ++i)
+      dv[i] = -c * b[i] - rs.v[i] / zb;
+    const double dv2 = 2 * dot(rs.v, dv), dt = -dv2 / (2 * t);
+    const double t1 = x * (1 - v2), t2 = d * t * v2 / (1 + t);
+    const double dp = a * ((1 - v2) - x * dv2 - d * (1 - 2 * t) * dt);
+    const double v_terms = (m_norm + std::abs(mb) * b_norm / z) / zb;
+    const double v2_error = eps * (8 * std::sqrt(v2) * v_terms + 2 * v2);
+    const double inner_error =
+        4 * eps * (std::abs(t1) + std::abs(t2) + std::abs(t1 - t2)) +
+        v2_error * (std::abs(x) + d * std::abs(1 - 2 * t) / (2 * t));
+    if (energy) {
+      const auto vx_b = cross(rs.v, b), dvx_b = cross(dv, b);
+      const double vxb2 = dot(vx_b, vx_b);
+      r.g = rs.f;
+      r.dg = 1 - dp + dot(vx_b, dvx_b);
+      r.margin =
+          4 * (4 * eps *
+                   (std::abs(x) + std::abs(rs.p) + b2 / 2 + vxb2 / 2 +
+                    std::abs(tau)) +
+               a * inner_error + 8 * eps * std::sqrt(vxb2) * b_norm * v_terms);
+    } else {
+      r.g = rs.p;
+      r.dg = dp;
+      r.margin = 4 * a * inner_error;
+    }
+    r.smooth = std::isfinite(r.g) && std::isfinite(r.dg) && r.dg > 0 &&
+               std::isfinite(r.margin);
+    r.safe = r.smooth && (r.upper ? r.g > r.margin : r.g < -r.margin);
+    return r;
+  };
+  // The window for a bracket [lower, upper] whose upper end's state is known.
+  // Only probes whose decision is safe narrow it, so a poor Newton iterate can
+  // cost evaluations but never a decision.
+  const auto trusted_window = [&](const double lower, const double upper,
+                                  const RootState& at_upper,
+                                  const bool energy) {
+    Window w{lower, upper};
+    double below = lower, above = upper, x = upper, slope = 0., margin = 0.;
+    bool located = false;
+    Local c = local(x, at_upper, energy);
+    for (int k = 0; k < 64; ++k) {
+      if (c.upper) {
+        above = x;
+        if (c.safe)
+          w.high = std::min(w.high, x);
+      } else {
+        below = x;
+        if (c.safe)
+          w.low = std::max(w.low, x);
+      }
+      if (c.smooth) {
+        slope = c.dg;
+        margin = c.margin;
+      }
+      if (!c.safe || !(std::nextafter(below, above) < above)) {
+        located = slope > 0;
+        break;
+      }
+      double next = c.smooth ? x - c.g / c.dg : below;
+      if (!(next > below && next < above))
+        next = below + (above - below) / 2;
+      x = next;
+      c = local(x, state(x), energy);
+    }
+    if (!located)
+      return w;
+    const double ulp =
+        std::nextafter(x, std::numeric_limits<double>::infinity()) - x;
+    const double first = std::max(4 * margin / slope, 4 * ulp);
+    double delta = first;
+    for (int k = 0; k < 4 && x - delta > w.low; ++k, delta *= 8) {
+      const auto probe = local(x - delta, state(x - delta), energy);
+      if (probe.upper)
+        break;
+      if (probe.safe) {
+        w.low = x - delta;
+        break;
+      }
+    }
+    delta = first;
+    for (int k = 0; k < 4 && x + delta < w.high; ++k, delta *= 8) {
+      const auto probe = local(x + delta, state(x + delta), energy);
+      if (!probe.upper)
+        break;
+      if (probe.safe) {
+        w.high = x + delta;
+        break;
+      }
+    }
+    return w;
+  };
+#endif
   Real low = 0, boundary;
   auto s = state(low);
   if (s.causal && s.p >= 0) {
@@ -431,6 +572,7 @@ Recovery recover(const State& original, double bn, double gamma) {
         return out;
       }
     }
+    const Window window = trusted_window(low, high, s, false);
     while (true) {
       if (resolved(low, high)) {
         out.boundary_termination = "declared_decimal_precision";
@@ -445,12 +587,15 @@ Recovery recover(const State& original, double bn, double gamma) {
         out.reason = "boundary_noninterior_midpoint_before_declared_precision";
         return out;
       }
-      s = state(mid);
+      bool upper = mid >= window.high;
+      if (window.low < mid && mid < window.high) {
+        s = state(mid);
+        upper = s.causal && s.p >= 0;
+      }
       ++out.boundary_bisections;
-      if (s.causal && s.p >= 0)
-        high = mid;
-      else
-        low = mid;
+      // Selects, not branches: the foregone decisions alternate unpredictably.
+      high = upper ? mid : high;
+      low = upper ? low : mid;
     }
     boundary = high;
   }
@@ -475,6 +620,7 @@ Recovery recover(const State& original, double bn, double gamma) {
       return out;
     }
   }
+  const Window window = trusted_window(left, right, s, true);
   while (true) {
     if (resolved(left, right)) {
       out.energy_termination = "declared_decimal_precision";
@@ -489,12 +635,14 @@ Recovery recover(const State& original, double bn, double gamma) {
       out.reason = "energy_noninterior_midpoint_before_declared_precision";
       return out;
     }
-    s = state(mid);
+    bool upper = mid >= window.high;
+    if (window.low < mid && mid < window.high) {
+      s = state(mid);
+      upper = s.f >= 0;
+    }
     ++out.energy_bisections;
-    if (s.f >= 0)
-      right = mid;
-    else
-      left = mid;
+    right = upper ? mid : right;
+    left = upper ? left : mid;
   }
   bool found = false;
   Real best_error = 0;
