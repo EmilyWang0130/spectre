@@ -230,14 +230,10 @@ void D2R_HLLD_Fixed_Solver (const Sweep *sweep, int beg, int end,
 #endif
 
 /* --------------------------------------------------------
-   2. Compute sound speed & fluxes at zone interfaces
+   2. Sound speed & fluxes at zone interfaces: computed by the only caller,
+      spectre_d2r_core.c's prepare_pair, for exactly these states just before
+      this call; recomputing them here repeated that work (2026-10-20).
    -------------------------------------------------------- */
-
-  SoundSpeed2 (stateL, beg, end, FACE_CENTER, grid);
-  SoundSpeed2 (stateR, beg, end, FACE_CENTER, grid);
-
-  Flux (stateL, beg, end);
-  Flux (stateR, beg, end);
 
 /* -- compute speeds -- */
 
