@@ -477,7 +477,7 @@ void test_interface_bounds_are_two_sided(
     tnsr::i<DataVector, 3, Frame::Inertial> g_s{1_st, 0.0};
     tnsr::I<DataVector, 3, Frame::Inertial> g_b{1_st, 0.0};
     Scalar<DataVector> g_phi{DataVector{1_st, 0.0}};
-    grmhd::ValenciaDivClean::BoundaryCorrections::PlutoHlld::dg_boundary_terms(
+    solver.dg_boundary_terms(
         make_not_null(&g_d), make_not_null(&g_ye), make_not_null(&g_tau),
         make_not_null(&g_s), make_not_null(&g_b), make_not_null(&g_phi),
         interior.tilde_d, interior.tilde_ye, interior.tilde_tau,

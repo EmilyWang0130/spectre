@@ -263,7 +263,7 @@ class PlutoHlld final : public evolution::BoundaryCorrection {
       const EquationsOfState::EquationOfState<true, 3>& equation_of_state)
       const;
 
-  static void dg_boundary_terms(
+  void dg_boundary_terms(
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_tau,
@@ -330,7 +330,7 @@ class PlutoHlld final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& pressure_ext,
       const Scalar<DataVector>& lorentz_factor_ext,
       const Scalar<DataVector>& specific_internal_energy_ext,
-      dg::Formulation dg_formulation);
+      dg::Formulation dg_formulation) const;
 
  private:
   friend bool operator==(const PlutoHlld& lhs, const PlutoHlld& rhs);
@@ -368,6 +368,12 @@ using PlutoMovingFaceFluxFunction = int (*)(int, const double*, const double*,
 /// `moving_face_solver`; a solver without one (`nullptr`, D2-R) solves the
 /// curved points whose face does not move (w = 0) through `pluto_solver` and
 /// keeps the HLL flux where it does.
+///
+/// `light_speed_density_cutoff` is the correction's `LightSpeedDensityCutoff`.
+/// With `SPECTRE_PLUTO_DENSITY_CUTOFF_HLL=1` in the environment (an experiment,
+/// off by default), points where either side's density is at or below it keep
+/// the HLL flux, whose bounds the packaging set to the light speeds there --
+/// what `Hll` and `HllcGr` do in an atmosphere.
 void pluto_dg_boundary_terms(
     PlutoFluxFunction pluto_solver,
     PlutoMovingFaceFluxFunction moving_face_solver,
@@ -433,7 +439,8 @@ void pluto_dg_boundary_terms(
     const Scalar<DataVector>& pressure_ext,
     const Scalar<DataVector>& /*lorentz_factor_ext*/,
     const Scalar<DataVector>& specific_internal_energy_ext,
-    dg::Formulation dg_formulation, bool force_common_normal_field = false,
-    bool force_glm_energy_pair = false, bool force_mass_consistent_ye = false);
+    dg::Formulation dg_formulation, double light_speed_density_cutoff,
+    bool force_common_normal_field = false, bool force_glm_energy_pair = false,
+    bool force_mass_consistent_ye = false);
 }  // namespace detail
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections

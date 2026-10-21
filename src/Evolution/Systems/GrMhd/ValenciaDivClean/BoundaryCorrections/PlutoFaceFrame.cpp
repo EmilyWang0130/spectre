@@ -185,16 +185,17 @@ void add_face_frame_counts(const FaceFrameCounts& increment) {
   counts.fallback_ray += increment.fallback_ray;
   counts.fallback_solver += increment.fallback_solver;
   counts.unsupported_points += increment.unsupported_points;
+  counts.density_cutoff += increment.density_cutoff;
   if (report_every > 0 and increment.calls > 0 and
       counts.calls % report_every == 0) {
     Parallel::printf(
         "GR tetrad stats after %zu calls (this thread): flat %zu, curved %zu "
         "(solved %zu, |w|>=1 %zu; HLL kept: frame %zu, state %zu, ray %zu, "
-        "solver %zu), unsupported %zu\n",
+        "solver %zu), unsupported %zu, density cutoff %zu\n",
         counts.calls, counts.flat_points, counts.curved_points,
         counts.curved_solved, counts.outside_light_cone, counts.fallback_frame,
         counts.fallback_state, counts.fallback_ray, counts.fallback_solver,
-        counts.unsupported_points);
+        counts.unsupported_points, counts.density_cutoff);
   }
 }
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::detail

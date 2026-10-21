@@ -326,8 +326,8 @@ void PlutoD2R::dg_boundary_terms(
       iface_normal_ext, metric_flatness_ext, interface_lapse_ext,
       interface_shift_dot_normal_ext, interface_spatial_metric_ext,
       rest_mass_density_ext, spatial_velocity_ext, pressure_ext,
-      lorentz_factor_ext, specific_internal_energy_ext, dg_formulation, true,
-      true, true);
+      lorentz_factor_ext, specific_internal_energy_ext, dg_formulation,
+      light_speed_density_cutoff_, true, true, true);
 }
 
 bool operator==(const PlutoD2R& lhs, const PlutoD2R& rhs) {

@@ -477,8 +477,10 @@ void pluto_dg_boundary_terms(
     const Scalar<DataVector>& pressure_ext,
     const Scalar<DataVector>& /*lorentz_factor_ext*/,
     const Scalar<DataVector>& specific_internal_energy_ext,
-    const dg::Formulation dg_formulation, const bool force_common_normal_field,
-    const bool force_glm_energy_pair, const bool force_mass_consistent_ye) {
+    const dg::Formulation dg_formulation,
+    const double light_speed_density_cutoff,
+    const bool force_common_normal_field, const bool force_glm_energy_pair,
+    const bool force_mass_consistent_ye) {
   const size_t num_points = get(tilde_d_int).size();
   const bool weak = dg_formulation == dg::Formulation::WeakInertial;
 
@@ -538,6 +540,19 @@ void pluto_dg_boundary_terms(
   std::vector<std::optional<FaceFrame>> frames(num_points);
   FaceFrameCounts tally{};
   tally.calls = 1;
+  // An experiment, off by default: honour LightSpeedDensityCutoff in the PLUTO
+  // path as Hll and HllcGr do in an atmosphere (their bounds there are the
+  // light speeds), by keeping the HLL flux wherever a side's density is at or
+  // below it. Read once.
+  static const bool honor_density_cutoff = [] {
+    const char* e = std::getenv("SPECTRE_PLUTO_DENSITY_CUTOFF_HLL");
+    return e != nullptr and std::atoi(e) != 0;
+  }();
+  const auto below_density_cutoff = [&](const size_t pt) {
+    return honor_density_cutoff and
+           (get(rest_mass_density_int)[pt] <= light_speed_density_cutoff or
+            get(rest_mass_density_ext)[pt] <= light_speed_density_cutoff);
+  };
   const auto symmetric_components =
       [](const tnsr::ii<DataVector, 3, Frame::Inertial>& metric,
          const size_t pt) {
@@ -829,6 +844,10 @@ void pluto_dg_boundary_terms(
         ++tally.fallback_state;
         continue;  // keep HLL where the ideal-gas relation is undefined
       }
+      if (below_density_cutoff(pt)) {
+        ++tally.density_cutoff;
+        continue;  // the experiment: keep the light-speed HLL flux
+      }
       if (moving_face_solver == nullptr and frame.face_speed != 0.0) {
         ++tally.fallback_ray;
         continue;  // a ray-0 kernel cannot sample a moving face
@@ -1017,6 +1036,7 @@ void pluto_dg_boundary_terms(
   // Gather the interfaces PLUTO can handle; the rest keep the HLL flux that has
   // already been written above.
   std::vector<size_t> pt_index;
+  size_t flat_density_cutoff = 0;
   std::vector<std::array<double, 3>> triad_n, triad_t1, triad_t2;
   std::vector<double> pluto_vl, pluto_vr, pt_gamma;
   pt_index.reserve(num_points);
@@ -1030,6 +1050,10 @@ void pluto_dg_boundary_terms(
   for (size_t i = 0; i < num_points; ++i) {
     if (path[i] != PointPath::Flat) {
       continue;  // solved in the face frame above, or kept on HLL
+    }
+    if (below_density_cutoff(i)) {
+      ++flat_density_cutoff;
+      continue;  // the experiment: keep the light-speed HLL flux
     }
     const double rho_i = get(rest_mass_density_int)[i];
     const double eps_i = get(specific_internal_energy_int)[i];
@@ -1095,6 +1119,11 @@ void pluto_dg_boundary_terms(
     pt_gamma.push_back(1.0 + p_i / (rho_i * eps_i));
   }
 
+  if (flat_density_cutoff > 0) {
+    FaceFrameCounts flat_tally{};
+    flat_tally.density_cutoff = flat_density_cutoff;
+    add_face_frame_counts(flat_tally);
+  }
   if (pt_index.empty()) {
     return;
   }
@@ -1309,7 +1338,7 @@ void PlutoHlld::dg_boundary_terms(
     const Scalar<DataVector>& pressure_ext,
     const Scalar<DataVector>& lorentz_factor_ext,
     const Scalar<DataVector>& specific_internal_energy_ext,
-    const dg::Formulation dg_formulation) {
+    const dg::Formulation dg_formulation) const {
   detail::pluto_dg_boundary_terms(
       &pluto_hlld_flux, &pluto_hlld_flux_moving, boundary_correction_tilde_d,
       boundary_correction_tilde_ye, boundary_correction_tilde_tau,
@@ -1333,7 +1362,8 @@ void PlutoHlld::dg_boundary_terms(
       iface_normal_ext, metric_flatness_ext, interface_lapse_ext,
       interface_shift_dot_normal_ext, interface_spatial_metric_ext,
       rest_mass_density_ext, spatial_velocity_ext, pressure_ext,
-      lorentz_factor_ext, specific_internal_energy_ext, dg_formulation);
+      lorentz_factor_ext, specific_internal_energy_ext, dg_formulation,
+      light_speed_density_cutoff_);
 }
 
 bool operator==(const PlutoHlld& lhs, const PlutoHlld& rhs) {
