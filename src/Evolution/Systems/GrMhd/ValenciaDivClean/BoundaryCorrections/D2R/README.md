@@ -35,26 +35,37 @@ The seven states are `U=(D,mn,mt,mb,tau,Bt,Bb)`, where `tau=E-D`, and
    falls back to HLL. Equal primitives use their physical flux exactly. (The
    batch-level round-off shortcut, `SPECTRE_D2R_ROUNDOFF_TOL`, returns this same
    baseline since 2026-10-20.)
-3. Recover and check the **actual stored** original states. Form their numerical
-   entropy model. If necessary repair the baseline along `-nu (UR-UL)` using
-   the derived entropy and binary64 rounding budget. A thermodynamically
-   unsupported original encoding makes the callback reject the point; the
-   SpECTRE adapter retains HLL. It is not counted as a supported D2-R result.
+3. Form the numerical entropy model of the **actual stored** original states
+   with the entropy variables of the face's primitives, of which they are the
+   encoding (design D1, 2026-10-21; originally recovered from the stored
+   states). A state whose stored encoding does not resolve its thermal energy
+   (below 2^-32 of the recovery's energy terms: a cold, fast state) is recovered
+   and checked as originally (D1b). If necessary repair the baseline along
+   `-nu (UR-UL)` using the derived entropy and binary64 rounding budget. A
+   thermodynamically unsupported original encoding makes the callback reject
+   the point; the SpECTRE adapter retains HLL. It is not counted as a supported
+   D2-R result.
    The repair is bounded (2026-10-20): a repair that would move the baseline
    by more than `C s_max |UR-UL|` (C = 2, `SPECTRE_D2R_CONSISTENCY`) rejects the
    point as well; without it, nearly uniform pairs got baselines off by
    1e-5..3e-4 of the flux.
-4. Use the recovered midpoint thermodynamics and averaged timelike velocity
-   to form the reference. Compute the true SR magnetosonic roots and Saul's
+4. Use the averaged primitive density and pressure (D4; originally the
+   recovered stored midpoint's) and the averaged timelike velocity to form the
+   reference. Compute the true SR magnetosonic roots (bracket-safeguarded Newton
+   from the mean of PLUTO's speeds of the two sides, D2 and D8) and Saul's
    analytic left/right slow pairs. The complete weighted actions are
    `G=Ws(UR-UL)` and `Q=|A|Ws(UR-UL)`. No characteristic matrix inverse or
    fitted condition-number cutoff is used.
 5. Select a numerically supported physical input coefficient `beta` for
-   `UL,c=UL+beta G/2`, `UR,c=UR-beta G/2`. Recover these states. If stored or
-   recovered inputs do not change, retain the baseline before restoring a
-   formal slow contribution.
-6. With the **same original bounds**, call the same fixed helper on recovered
-   original and modified states. Check both actual C re-encodings. Form
+   `UL,c=UL+beta G/2`, `UR,c=UR-beta G/2`. Their primitives are the face
+   primitives plus the linear update `(dU/dP)^-1 dU` at `beta = 1` (D3); where
+   an updated primitive is unphysical or the system singular, recover these
+   states with the original `beta` search. If stored or recovered inputs do not
+   change, retain the baseline before restoring a formal slow contribution.
+6. With the **same original bounds**, call the same fixed helper on the
+   original and modified states (the native bounds and the original states'
+   fixed-bound solve come from one C call, D6; the helper refines its pressure
+   root by Illinois regula falsi, D5). Check both actual C re-encodings. Form
    `V0=K0-(F0,L+F0,R)/2`, `Vc=Kc-(Fc,L+Fc,R)/2` and freeze
    `T=Vc-V0-beta Q/2`.
 7. Scale `T` down to the same bound `C s_max |UR-UL|` if it exceeds it
@@ -136,6 +147,32 @@ evaluations per solve on jet faces); the quartic roots ~10 %. On 16 workers the
 jet is limited by its element distribution: one worker carries ~60 % of the D2-R
 solves.
 
+### Design changes of 2026-10-21 (branch `d2r-design`)
+
+Not bit-identical: each change keeps the method (HLLD bounds and candidate,
+entropy repair, consistency bound, slow-mode response, entropy cap) and changes
+how one ingredient is computed, in both builds, so the 160-digit build stays the
+oracle of the same design. After D4 no primitive recovery is left on the common
+path; the active path makes two C core calls.
+
+| step | what changes | flux change against the step before |
+|---|---|---|
+| D1 | entropy variables of the face's primitives, not recovered from the stored states | 1.5e-12 |
+| D1b | ... except a state whose encoding does not resolve its thermal energy, recovered as before | none on the face sets; restores the unit test's rejection |
+| D2 | quartic roots by bracket-safeguarded Newton, not bisection | 3.4e-14 |
+| D3 | shifted states' primitives by the linear update `(dU/dP)^-1 dU`, recovery only as fallback | second order in the jump: tubes 5e-6, jet t = 3 3e-8, one strong-jump face 1.6e-3 |
+| D4 | reference density and pressure from the face primitives, not the recovered midpoint | second order: tubes 1.5e-6, jet 2.4e-5, one strong-jump face 1.4e-3 |
+| D5 | fixed-bound root refined by Illinois regula falsi (same termination) | round-off (4e-14) |
+| D6 | native bounds and the first fixed-bound solve in one C call, no native solve | bit-identical |
+| D8 | root searches start from PLUTO's speeds of the two sides; shared endpoints evaluated once | round-off (1.5e-14) |
+
+Over all 61 472 stored faces, saved kernel → D8: 8911 faces change, 153 by more
+than 1e-6 relative, 5 by more than 1e-4 (worst 2.4e-3, a 95 % density jump of
+the t = 35 jet); no support changes. Agreement with the 160-digit build of the
+same design: 1.6e-15 / 6.5e-14 on the tube sets, 2.6e-13 on the 22 × 44 jet set.
+Measurements, gates and the tube L1 tables against the exact solutions:
+`spectre_runs/branch_testing/run09_d2r_optimization` (README, design round).
+
 ## Precision, support and cost
 
 This first compiled correctness backend uses fixed 160-digit decimal
@@ -158,7 +195,8 @@ the intended primitive state was physical. A fallback is not a certificate
 of positivity for a complete finite-volume or DG update.
 
 The active path normally makes four C core calls and several high-precision
-recoveries. Calls are serialized in this initial kernel; it is not a
+recoveries (on `d2r-design`, 2026-10-21: two core calls and no recovery on the
+common path). Calls are serialized in this initial kernel; it is not a
 production-speed implementation. Private contexts and root scratch are
 thread-local, with capacity at least 1026 to remain compatible with legacy
 PLUTO batches. Concurrent initialization alongside unprotected legacy
