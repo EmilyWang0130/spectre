@@ -242,7 +242,7 @@ MpState flux_mp(const MpState& p, double bn, double gamma) {
 bool reconstruction_budget(MpState* budget, const State& p, double bn,
                            double gamma) {
   const auto x = parts(imported(p), bn);
-  const Real eps = pow(Real(2), -53);
+  static const Real eps = pow(Real(2), -53);
   const Real g5 = 5 * eps / (1 - 5 * eps), g96 = 96 * eps / (1 - 96 * eps);
   const Real c = 1 - x.v2, dc = g5 * x.v2 + eps * (1 + x.v2);
   if (!(c > dc))
@@ -437,7 +437,7 @@ Recovery recover(const State& original, double bn, double gamma,
   static_cast<void>(hint);
 #else
   const double eps = std::numeric_limits<double>::epsilon();
-  const double b_norm = std::sqrt(b2), m_norm = std::sqrt(dot(m, m));
+  const double b_norm = sqrt(b2), m_norm = sqrt(dot(m, m));
   struct Local {
     bool upper = false, safe = false, smooth = false;
     double g = 0., dg = 0., margin = 0.;
@@ -466,7 +466,7 @@ Recovery recover(const State& original, double bn, double gamma,
     const double t1 = x * (1 - v2), t2 = d * t * v2 / (1 + t);
     const double dp = a * ((1 - v2) - x * dv2 - d * (1 - 2 * t) * dt);
     const double v_terms = (m_norm + std::abs(mb) * b_norm / z) / zb;
-    const double v2_error = eps * (8 * std::sqrt(v2) * v_terms + 2 * v2);
+    const double v2_error = eps * (8 * sqrt(v2) * v_terms + 2 * v2);
     const double inner_error =
         4 * eps * (std::abs(t1) + std::abs(t2) + std::abs(t1 - t2)) +
         v2_error * (std::abs(x) + d * std::abs(1 - 2 * t) / (2 * t));
@@ -479,7 +479,7 @@ Recovery recover(const State& original, double bn, double gamma,
           4 * (4 * eps *
                    (std::abs(x) + std::abs(rs.p) + b2 / 2 + vxb2 / 2 +
                     std::abs(tau)) +
-               a * inner_error + 8 * eps * std::sqrt(vxb2) * b_norm * v_terms);
+               a * inner_error + 8 * eps * sqrt(vxb2) * b_norm * v_terms);
     } else {
       r.g = rs.p;
       r.dg = dp;
@@ -711,7 +711,7 @@ RootHint primitive_hint(const State& p, const double gamma) {
   const double v2 = p[1] * p[1] + p[2] * p[2] + p[3] * p[3];
   if (!(v2 < 1) || !(p[0] > 0) || !std::isfinite(p[4]))
     return out;
-  const double w = 1 / std::sqrt(1 - v2);
+  const double w = 1 / sqrt(1 - v2);
   out.energy = (p[0] + gamma / (gamma - 1) * p[4]) * w * w - p[0] * w;
   out.boundary = out.energy;
   return out;
@@ -940,7 +940,7 @@ LineResult EntropyModel::repair(const State& candidate) const {
     return line(true, "native_entropy_supported", candidate, 0, m0);
   if (!(h > 0))
     return line(false, "nonpositive_entropy_jump");
-  const Real u = pow(Real(2), -53), sigma = pow(Real(2), -1075);
+  static const Real u = pow(Real(2), -53), sigma = pow(Real(2), -1075);
   Real a = 0, b = 0, c = 0;
   for (std::size_t i = 0; i < 7; ++i) {
     const Real z = absolute(dz[i]);
@@ -985,7 +985,7 @@ LineResult EntropyModel::cap(const State& baseline,
     if (m >= -tolerance(full))
       return line(true, "full_response", full, 1, m);
   }
-  const Real u = pow(Real(2), -53), sigma = pow(Real(2), -1075);
+  static const Real u = pow(Real(2), -53), sigma = pow(Real(2), -1075);
   Real a = 0, b = 0, c = 0, slope = 0;
   for (std::size_t i = 0; i < 7; ++i) {
     const Real z = absolute(dz[i]), t = exact_double(direction[i]);

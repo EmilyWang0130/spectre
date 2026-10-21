@@ -64,7 +64,7 @@ double state_norm(const State& a) {
   for (const double x : a) {
     s += x * x;
   }
-  return std::sqrt(s);
+  return sqrt(s);
 }
 
 // SPECTRE_D2R_CONSISTENCY (unset = 2, 0 = off): the consistency bound. A
@@ -410,8 +410,8 @@ const double roundoff_tol = [] {
 bool near_inputs(const double* lA, const double* rA, const double* lB,
                  const double* rB, const double tol) {
   const double b_scale =
-      std::max(std::sqrt(lA[4] * lA[4] + lA[5] * lA[5] + lA[6] * lA[6]),
-               std::sqrt(rA[4] * rA[4] + rA[5] * rA[5] + rA[6] * rA[6]));
+      std::max(sqrt(lA[4] * lA[4] + lA[5] * lA[5] + lA[6] * lA[6]),
+               sqrt(rA[4] * rA[4] + rA[5] * rA[5] + rA[6] * rA[6]));
   const std::array<double, 8> scale{
       std::max(std::abs(lA[0]), std::abs(rA[0])), 1., 1., 1., b_scale,
       b_scale, b_scale, std::max(std::abs(lA[7]), std::abs(rA[7]))};
@@ -427,8 +427,8 @@ bool near_inputs(const double* lA, const double* rA, const double* lB,
 bool near_equal(const double* l, const double* r, const double tol) {
   // P = (rho, vn, vt, vb, Bn, Bt, Bb, p)
   const double b_scale =
-      std::max(std::sqrt(l[4] * l[4] + l[5] * l[5] + l[6] * l[6]),
-               std::sqrt(r[4] * r[4] + r[5] * r[5] + r[6] * r[6]));
+      std::max(sqrt(l[4] * l[4] + l[5] * l[5] + l[6] * l[6]),
+               sqrt(r[4] * r[4] + r[5] * r[5] + r[6] * r[6]));
   const std::array<double, 8> scale{std::max(std::abs(l[0]), std::abs(r[0])),
                                     1., 1., 1., b_scale, b_scale, b_scale,
                                     std::max(std::abs(l[7]), std::abs(r[7]))};

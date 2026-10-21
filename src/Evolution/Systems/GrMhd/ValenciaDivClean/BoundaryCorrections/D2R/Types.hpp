@@ -5,6 +5,9 @@
 
 #include <array>
 #include <cmath>
+#if !defined(D2R_MULTIPRECISION) && defined(__SSE2__)
+#include <immintrin.h>
+#endif
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -73,7 +76,17 @@ inline Real abs_real(const double x) { return std::fabs(x); }
 constexpr bool multiprecision_build = false;
 using std::log;
 using std::pow;
-using std::sqrt;
+// The IEEE square root as the instruction (2026-10-20). The kernel's flags
+// (-ffp-exception-behavior=maytrap) make std::sqrt an out-of-line libm call on
+// every evaluation of the recovery's root function; sqrtsd is the same
+// correctly rounded operation that glibc's sqrt performs.
+inline double sqrt(const double x) {
+#if defined(__SSE2__)
+  return _mm_cvtsd_f64(_mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(x)));
+#else
+  return std::sqrt(x);
+#endif
+}
 #endif
 
 using State = std::array<double, 7>;
