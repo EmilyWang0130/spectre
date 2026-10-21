@@ -64,7 +64,7 @@ double state_norm(const State& a) {
   for (const double x : a) {
     s += x * x;
   }
-  return std::sqrt(s);
+  return sqrt(s);
 }
 
 // SPECTRE_D2R_CONSISTENCY (unset = 2, 0 = off): the consistency bound. A
@@ -106,17 +106,38 @@ const double jump_floor = [] {
 
 FaceResult solve_face(const State& left, const State& right, const double bn,
                       const double gamma) {
-  // Serialize this first correctness embedding, including lazy PLUTO scratch
-  // allocation. Legacy PLUTO methods retain their existing threading contract.
+#ifdef D2R_MULTIPRECISION
+  // The 160-digit oracle stays serialized, as the first correctness embedding
+  // was: it is a test backend, and Boost's lazily initialized multiprecision
+  // constants have not been audited for concurrent first use.
   static std::mutex kernel_mutex;
   const std::lock_guard<std::mutex> guard(kernel_mutex);
+#endif
+  // The double kernel runs unlocked on every worker (2026-10-20). Its own
+  // state is per call (the memo is per batch, stats and diagnostics are
+  // thread_local, the switches are constants set before main). The C core it
+  // calls keeps its grid, contexts and every PLUTO scratch array in
+  // _Thread_local storage and initializes them on each thread's first call
+  // (spectre_d2r_core.c core_setup, hlld.c, d2r_hlld_fixed.c, arrays.c,
+  // hll_speed.c, mappers.c). The wave-speed and allocation diagnostics
+  // (g_maxMach and g_usedMemory) are also TLS: even diagnostic-only shared
+  // read-modify-writes would be C data races. The generic Brent/Ridder
+  // g_maxRootIter updates are not on this core's call path.
   FaceResult result;
   result.status = "invalid_primitive";
   if (not physical_primitive(left, bn, gamma) or
       not physical_primitive(right, bn, gamma)) {
     return result;
   }
-  auto base = core(0, left, right, bn, gamma);
+  // Design D6 (2026-10-21): one core call (mode 3) gives the native bounds
+  // and, when they straddle the face, the fixed-bound solve with them -- the
+  // candidate. The original called the native solver for the bounds and then
+  // the fixed-bound solve, discarding the native flux. Equal states need the
+  // bounds alone (mode 2).
+  const bool equal = left == right;
+  auto base = core(equal ? 2 : 3, left, right, bn, gamma);
+  const bool fixed_solve = not equal and base.integers[2] == 1 and
+                           base.bounds[0] < 0. and base.bounds[1] > 0.;
   result.core_calls = 1;
   result.native_status = base.status();
   if (base.status() == -2) {
@@ -142,15 +163,22 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
     base.integers[0] = 1;
     result.causal_fallback = true;
   }
+  if (fixed_solve) {
+    result.baseline_outcome = base.integers[5];
+  }
   if (base.status() != 1) {
-    result.status = "native_unusable";
+    result.status = fixed_solve ? "refined_core_unusable" : "native_unusable";
     return result;
   }
   result.left_tau = base.ul;
   result.right_tau = base.ur;
   result.bounds = base.bounds;
   State candidate = base.flux;
-  const bool equal = left == right;
+  // The fixed-bound solve of the input pair with the native bounds (the
+  // candidate), kept: the response's first fixed-bound solve is the same call
+  // whenever the recovered primitives equal the inputs bit for bit.
+  CoreResult refined{};
+  bool have_refined = false;
   if (equal) {
     candidate = base.fl;
     // Identical primitives: the flux is this state's physical flux and the
@@ -167,20 +195,18 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
       result.status = "equal_state_physical_flux";
       return result;
     }
-  } else if (not result.causal_fallback and base.bounds[0] < 0. and
-             base.bounds[1] > 0.) {
-    const auto refined = core(1, left, right, bn, gamma, base.bounds);
-    ++result.core_calls;
-    result.baseline_outcome = refined.integers[5];
-    if (refined.status() != 1) {
-      result.status = "refined_core_unusable";
-      return result;
-    }
-    candidate = refined.flux;
+  } else if (fixed_solve) {
+    refined = base;
+    have_refined = true;
   }
-  const EntropyModel model(base.ul, base.ur, bn, gamma);
+  // Entropy is evaluated on primitives recovered from the actual stored
+  // conservative states. Supplied face primitives seed those recoveries;
+  // they do not replace them or introduce a thermal-resolution threshold.
+  const EntropyModel model(base.ul, base.ur, left, right, bn, gamma);
   if (not model.supported) {
-    result.status = model.reason;
+    thread_local std::string composite;
+    composite = model.reason;
+    result.status = composite.c_str();
     return result;
   }
   const auto repair = model.repair(candidate);
@@ -226,13 +252,24 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   }
   const auto& pl = model.left.recovery.primitive;
   const auto& pr = model.right.recovery.primitive;
+  const auto& left_roots = model.left.recovery.roots;
+  const auto& right_roots = model.right.recovery.roots;
   const auto reference =
-      reference_from_tau(base.ul, base.ur, pl, pr, bn, gamma);
+      reference_from_primitives(base.ul, base.ur, pl, pr, bn, gamma);
   if (not reference.success) {
     return keep("reference_unsupported");
   }
-  const auto slow =
-      slow_action(reference.primitive, bn, gamma, base.ul, base.ur);
+  // Design D8 (2026-10-21): the reference state's magnetosonic roots start
+  // from the mean of the two sides' speeds, which the core computed with
+  // PLUTO's Magnetosonic for its checks (doubles[8 ... 15]), as gaps from the
+  // reference normal velocity.
+  std::array<double, 4> root_starts{};
+  for (size_t k = 0; k < 4; ++k) {
+    root_starts[k] = 0.5 * (base.doubles[8 + k] + base.doubles[12 + k]) -
+                     reference.primitive[1];
+  }
+  const auto slow = slow_action(reference.primitive, bn, gamma, base.ul,
+                                base.ur, root_starts);
   if (not slow.supported) {
     return keep("analytic_modes_unsupported");
   }
@@ -247,7 +284,16 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   for (auto& x : shift) {
     x /= 2.;
   }
-  const auto input_cap = physical_ray_cap(base.ul, base.ur, shift, bn, gamma);
+  // The fast path predicts auxiliary primitives with the linear dU/dP solve,
+  // after checking admissibility of the intended conservative shifts. It is
+  // a first-order primitive predictor, not a recovery or round-trip claim:
+  // re-encoding it differs from the intended shift by O(|shift|^2) locally.
+  // Unusable shifts/predictions take the original recovery and beta search.
+  auto input_cap = linear_ray_cap(base.ul, base.ur, pl, pr, shift, bn, gamma);
+  if (not input_cap.success) {
+    input_cap = physical_ray_cap(base.ul, base.ur, shift, bn, gamma, left_roots,
+                                 right_roots);
+  }
   result.beta = input_cap.beta;
   if (not input_cap.success or input_cap.beta == 0.) {
     return keep("input_ray_baseline");
@@ -255,17 +301,24 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   if (input_cap.left == base.ul and input_cap.right == base.ur) {
     return keep("zero_represented_input_change");
   }
-  const auto cl = recover(input_cap.left, bn, gamma);
-  const auto cr = recover(input_cap.right, bn, gamma);
+  // These are either checked recoveries or physical auxiliary predictions,
+  // as recorded by input_cap.primitive_prediction. Both helper re-encodings
+  // are checked below; a prediction has no inverse/round-trip certificate.
+  const auto& cl = input_cap.left_recovery;
+  const auto& cr = input_cap.right_recovery;
   if (not cl.success or not cr.success) {
     return keep("modified_recovery_unsupported");
   }
   if (cl.primitive == pl and cr.primitive == pr) {
     return keep("zero_represented_primitive_change");
   }
-  const auto k0 = core(1, pl, pr, bn, gamma, base.bounds);
+  // The C core is deterministic and keeps no state between calls that its
+  // result depends on, so an identical call is not repeated (2026-10-20).
+  const bool repeat_of_refined = have_refined and pl == left and pr == right;
+  const auto k0 =
+      repeat_of_refined ? refined : core(1, pl, pr, bn, gamma, base.bounds);
   const auto kc = core(1, cl.primitive, cr.primitive, bn, gamma, base.bounds);
-  result.core_calls += 2;
+  result.core_calls += repeat_of_refined ? 1 : 2;
   if (k0.status() != 1 or kc.status() != 1) {
     return keep("fixed_core_unusable");
   }
@@ -375,8 +428,8 @@ const double roundoff_tol = [] {
 bool near_inputs(const double* lA, const double* rA, const double* lB,
                  const double* rB, const double tol) {
   const double b_scale =
-      std::max(std::sqrt(lA[4] * lA[4] + lA[5] * lA[5] + lA[6] * lA[6]),
-               std::sqrt(rA[4] * rA[4] + rA[5] * rA[5] + rA[6] * rA[6]));
+      std::max(sqrt(lA[4] * lA[4] + lA[5] * lA[5] + lA[6] * lA[6]),
+               sqrt(rA[4] * rA[4] + rA[5] * rA[5] + rA[6] * rA[6]));
   const std::array<double, 8> scale{
       std::max(std::abs(lA[0]), std::abs(rA[0])), 1., 1., 1., b_scale,
       b_scale, b_scale, std::max(std::abs(lA[7]), std::abs(rA[7]))};
@@ -392,8 +445,8 @@ bool near_inputs(const double* lA, const double* rA, const double* lB,
 bool near_equal(const double* l, const double* r, const double tol) {
   // P = (rho, vn, vt, vb, Bn, Bt, Bb, p)
   const double b_scale =
-      std::max(std::sqrt(l[4] * l[4] + l[5] * l[5] + l[6] * l[6]),
-               std::sqrt(r[4] * r[4] + r[5] * r[5] + r[6] * r[6]));
+      std::max(sqrt(l[4] * l[4] + l[5] * l[5] + l[6] * l[6]),
+               sqrt(r[4] * r[4] + r[5] * r[5] + r[6] * r[6]));
   const std::array<double, 8> scale{std::max(std::abs(l[0]), std::abs(r[0])),
                                     1., 1., 1., b_scale, b_scale, b_scale,
                                     std::max(std::abs(l[7]), std::abs(r[7]))};
@@ -493,15 +546,14 @@ int pluto_d2r_flux_impl(const int npts, const double* left,
         // transverse symmetry of the 1-D cold tube on the 3-D slab at t = 1.7
         // (2026-10-19, run07_pluto_d2r/sensitivity, iteration 3). Falls
         // through to the full path if the core calls fail.
-        const auto base = core(0, pl, pr, l[4], gamma);
-        State flux = base.flux;
-        if (base.status() == 1 and base.bounds[0] < 0. and
-            base.bounds[1] > 0.) {
-          const auto refined = core(1, pl, pr, l[4], gamma, base.bounds);
-          if (refined.status() == 1 and finite(refined.flux)) {
-            flux = refined.flux;
-          }
+        // (Design D6: mode 3 is that solve when the bounds straddle the face,
+        // the native one otherwise; the native flux when the solve fails.)
+        auto base = core(3, pl, pr, l[4], gamma);
+        if (base.status() != 1 and base.integers[2] == 1 and
+            base.bounds[0] < 0. and base.bounds[1] > 0.) {
+          base = core(0, pl, pr, l[4], gamma);
         }
+        const State flux = base.flux;
         if (base.status() == 1 and finite(flux)) {
           out[0] = flux[0];
           out[1] = flux[1];
@@ -532,7 +584,8 @@ int pluto_d2r_flux_impl(const int npts, const double* left,
       stats.active += face.active;
       stats.unsupported += not face.supported;
       stats.consistency_capped += face.consistency < 1.;
-      stats.repair_bound += face.status == "repair_exceeds_consistency_bound";
+      stats.repair_bound +=
+          std::strcmp(face.status, "repair_exceeds_consistency_bound") == 0;
       stats.jump_damped += face.jump_weight < 1.;
       diagnostics.causal_fallback += face.causal_fallback;
       if (not face.supported or not finite(face.flux)) {

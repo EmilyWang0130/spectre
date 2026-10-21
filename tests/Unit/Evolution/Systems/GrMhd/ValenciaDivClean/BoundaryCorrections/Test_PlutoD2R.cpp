@@ -16,6 +16,7 @@
 #include "DataStructures/Tensor/Tensor.hpp"
 #include "Evolution/BoundaryCorrection.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/D2R/Flux.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/D2R/State.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/PlutoD2R.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/System.hpp"
 #include "Framework/TestCreation.hpp"
@@ -31,6 +32,7 @@
 
 namespace {
 namespace bc = grmhd::ValenciaDivClean::BoundaryCorrections;
+namespace kernel = bc::d2r_detail;
 namespace helpers = TestHelpers::evolution::dg;
 using Primitive = std::array<double, 8>;
 using Eos = EquationsOfState::EquationOfState<true, 3>;
@@ -447,6 +449,153 @@ void test_kernel_rejection_hll_fallback() {
   }
 }
 
+void test_entropy_model_uses_conserved_states() {
+  const ScopedFpeState no_fpe(false);
+  constexpr double gamma = 5. / 3.;
+  struct EntropyCase {
+    kernel::State left;
+    kernel::State right;
+    double bn;
+  };
+  // The last two pressures straddle the old 2^-32 thermal-energy dispatch
+  // scale at W = 70.7. Neither that scale nor the supplied primitive hint may
+  // change which conserved state defines the entropy variables.
+  const std::array<EntropyCase, 4> entropy_cases{{
+      {{{1.08, .3, .0025, .125, .095, .036, .020}},
+       {{1., 0., 0., 0., .1, .040, .020}},
+       2.},
+      {{{1.08, .012, .0001, .005, 9.5e-5, .010155412503859613,
+         .005641895835477563}},
+       {{1., 0., 0., 0., 1.e-4, .011283791670955126, .005641895835477563}},
+       .5641895835477563},
+      {{{1., .9999, 0., 0., 1.e-10, .2, .1}},
+       {{.8, .9998, 0., 0., 1.4e-10, .21, .09}},
+       .8},
+      {{{1., .9999, 0., 0., 4.e-10, .2, .1}},
+       {{.8, .9998, 0., 0., 5.6e-10, .21, .09}},
+       .8},
+  }};
+  const auto tolerance = Approx::custom().epsilon(5.e-10).scale(1.);
+  for (const auto& face : entropy_cases) {
+    CAPTURE(face.left, face.right, face.bn);
+    const auto ul = kernel::conserved_tau(face.left, face.bn, gamma);
+    const auto ur = kernel::conserved_tau(face.right, face.bn, gamma);
+    const kernel::EntropyModel expected{ul, ur, face.bn, gamma};
+    REQUIRE(expected.supported);
+    // A root hint can be approximate. Deliberately perturb its pressure while
+    // preserving the actual conserved input: taking entropy directly from the
+    // hint would produce a percent-level error, including on ordinary tubes.
+    auto left_hint = face.left;
+    auto right_hint = face.right;
+    left_hint[4] *= 1.125;
+    right_hint[4] *= .875;
+    const kernel::EntropyModel actual{ul,         ur,      left_hint,
+                                      right_hint, face.bn, gamma};
+    REQUIRE(actual.supported);
+    REQUIRE(actual.left.recovery.roundtrip_checked);
+    REQUIRE(actual.right.recovery.roundtrip_checked);
+    CHECK(std::abs(actual.left.recovery.primitive[4] - left_hint[4]) >
+          .01 * left_hint[4]);
+    CHECK(std::abs(actual.right.recovery.primitive[4] - right_hint[4]) >
+          .01 * right_hint[4]);
+    for (size_t k = 0; k < 7; ++k) {
+      CHECK(actual.left.z[k] == tolerance(expected.left.z[k]));
+      CHECK(actual.right.z[k] == tolerance(expected.right.z[k]));
+    }
+    CHECK(actual.left.psi == tolerance(expected.left.psi));
+    CHECK(actual.right.psi == tolerance(expected.right.psi));
+    const auto fl = kernel::flux_tau(face.left, face.bn, gamma);
+    const auto fr = kernel::flux_tau(face.right, face.bn, gamma);
+    kernel::State central{};
+    for (size_t k = 0; k < 7; ++k) {
+      central[k] = .5 * (fl[k] + fr[k]);
+    }
+    for (const auto& flux : {fl, fr, central}) {
+      // Compare the entropy margin on its arithmetic scale, including when
+      // cancellation makes the margin itself much smaller than its terms.
+      double scale = std::max(1., std::abs(expected.dpsi));
+      for (size_t k = 0; k < 7; ++k) {
+        scale += std::abs(expected.dz[k] * flux[k]);
+      }
+      CHECK(std::abs(actual.margin(flux) - expected.margin(flux)) <=
+            5.e-10 * scale);
+    }
+  }
+}
+
+void test_linear_prediction_and_nominal_admissibility() {
+  const ScopedFpeState no_fpe(false);
+  constexpr double gamma = 5. / 3.;
+  constexpr double bn = .3;
+  const kernel::State primitive{1., 0., 0., 0., .2, .15, -.1};
+  const auto u = kernel::conserved_tau(primitive, bn, gamma);
+  std::array<double, 2> encoding_errors{};
+  for (size_t resolution = 0; resolution < 2; ++resolution) {
+    const double amplitude = resolution == 0 ? .01 : .005;
+    kernel::State shift{};
+    shift[1] = amplitude;
+    const auto prediction =
+        kernel::linear_ray_cap(u, u, primitive, primitive, shift, bn, gamma);
+    REQUIRE(prediction.success);
+    CHECK(prediction.full_supported);
+    CHECK(prediction.beta == 1.);
+    CHECK(prediction.primitive_prediction);
+    CHECK_FALSE(prediction.left_recovery.roundtrip_checked);
+    CHECK_FALSE(prediction.right_recovery.roundtrip_checked);
+    CHECK(kernel::admissibility(prediction.left, bn, gamma).admissible);
+    CHECK(kernel::admissibility(prediction.right, bn, gamma).admissible);
+    for (const auto* recovery :
+         {&prediction.left_recovery, &prediction.right_recovery}) {
+      CHECK(recovery->success);
+      CHECK(kernel::physical_primitive(recovery->primitive, bn, gamma));
+    }
+    const auto encoded_prediction =
+        kernel::conserved_tau(prediction.left_recovery.primitive, bn, gamma);
+    for (size_t k = 0; k < 7; ++k) {
+      encoding_errors[resolution] =
+          std::max(encoding_errors[resolution],
+                   std::abs(encoded_prediction[k] - prediction.left[k]));
+    }
+    CHECK(encoding_errors[resolution] > 1.e-7);
+  }
+  // A physical primitive predictor is not a recovery of the nominal shift:
+  // halving that shift reduces its encoding discrepancy quadratically.
+  CHECK(encoding_errors[0] / encoding_errors[1] > 3.9);
+  CHECK(encoding_errors[0] / encoding_errors[1] < 4.1);
+
+  const kernel::State cold{1., 0., 0., 0., 1.e-6, 0., 0.};
+  const auto cold_u = kernel::conserved_tau(cold, 0., gamma);
+  kernel::State shift{};
+  shift[1] = .02;
+  // At rest, the linear momentum update changes v by dm/(rho h) and leaves
+  // pressure unchanged. Those primitives are physical, but the conserved
+  // target has too little energy to carry this momentum.
+  auto predicted_primitive = cold;
+  predicted_primitive[1] =
+      shift[1] / (cold[0] + gamma / (gamma - 1.) * cold[4]);
+  REQUIRE(kernel::physical_primitive(predicted_primitive, 0., gamma));
+  auto shifted_left = cold_u;
+  auto shifted_right = cold_u;
+  shifted_left[1] += shift[1];
+  shifted_right[1] -= shift[1];
+  CHECK_FALSE(kernel::admissibility(shifted_left, 0., gamma).admissible);
+  CHECK_FALSE(kernel::admissibility(shifted_right, 0., gamma).admissible);
+  const auto rejected =
+      kernel::linear_ray_cap(cold_u, cold_u, cold, cold, shift, 0., gamma);
+  CHECK_FALSE(rejected.success);
+  CHECK_FALSE(rejected.primitive_prediction);
+  // The recovery path can instead find an admissible partial shift; the fast
+  // path must leave that decision to it rather than certify its predictor.
+  const auto fallback =
+      kernel::physical_ray_cap(cold_u, cold_u, shift, 0., gamma);
+  REQUIRE(fallback.success);
+  CHECK(fallback.beta > 0.);
+  CHECK(fallback.beta < 1.);
+  CHECK_FALSE(fallback.primitive_prediction);
+  CHECK(fallback.left_recovery.roundtrip_checked);
+  CHECK(fallback.right_recovery.roundtrip_checked);
+}
+
 SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.PlutoD2R",
                   "[Unit][GrMhd]") {
   PUPable_reg(bc::PlutoD2R);
@@ -455,6 +604,8 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.PlutoD2R",
   test_common_bn_and_energy_pairing();
   test_mass_consistent_ye();
   test_kernel_rejection_hll_fallback();
+  test_entropy_model_uses_conserved_states();
+  test_linear_prediction_and_nominal_admissibility();
   const auto created =
       TestHelpers::test_factory_creation<evolution::BoundaryCorrection,
                                          bc::PlutoD2R>(

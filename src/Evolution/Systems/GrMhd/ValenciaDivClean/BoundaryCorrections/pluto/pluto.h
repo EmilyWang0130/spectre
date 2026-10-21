@@ -907,14 +907,14 @@ extern _Thread_local int g_maxRiemannIter;
 extern int      g_maxRootIter;
 extern int      g_nprocs;
 extern long int g_stepNumber;
-extern long int g_usedMemory;
+extern _Thread_local long int g_usedMemory;
 
 extern double g_maxCoolingRate, g_minCoolingTemp;
 
 extern double g_smallDensity, g_smallPressure;
 
 extern double g_time, g_dt;
-extern double g_maxMach;
+extern _Thread_local double g_maxMach;
 #if ROTATING_FRAME
  extern double g_OmegaZ;
 #endif

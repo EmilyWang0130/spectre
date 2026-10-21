@@ -134,8 +134,10 @@ double g_smallPressure = 1.e-12; /**< Small value for pressure fix. */
 
 long int g_stepNumber;  /**< Gives the current integration step number. */
 double   g_time;        /**< The current integration time. */
-long int g_usedMemory;  /**< Amount of used memory in bytes. */
-double   g_maxMach;     /**< The maximum Mach number computed during integration. */
+/* SpECTRE workers allocate PLUTO scratch and evaluate wave speeds concurrently.
+ * These diagnostics describe the calling thread, like its scratch storage. */
+_Thread_local long int g_usedMemory;  /**< Memory allocated by this thread. */
+_Thread_local double g_maxMach;       /**< Maximum Mach number for this thread. */
 #if ROTATING_FRAME
  double g_OmegaZ;  /**< The angular rotation frequency when rotation is
                         included. */

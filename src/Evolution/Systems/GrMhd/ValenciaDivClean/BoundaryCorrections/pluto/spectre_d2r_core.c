@@ -75,7 +75,11 @@ static void physical_tau(const State *s,double *u,double *f) {
   f[4]=q[ENG];f[5]=q[BX2];f[6]=q[BX3];
 }
 
-static int prepare_pair(D2R_SR_Context *c,const double *row,double *u,double *f) {
+/* cmin, cmax: each side's fast magnetosonic speeds (KFASTM, KFASTP), as
+ * MaxSignalSpeed takes them for HLL_Speed; speeds[2][4]: each side's four
+ * (fast-, slow-, slow+, fast+), for the caller (design D8). */
+static int prepare_pair(D2R_SR_Context *c,const double *row,double *u,double *f,
+ double *cmin,double *cmax,double *speeds) {
   const double *wl=row+2,*wr=row+9;
   int left=check_w(wl,row[1],row[0]),right=check_w(wr,row[1],row[0]);
   if (left!=1 || right!=1) return left==-5||right==-5 ? -5 : 0;
@@ -95,6 +99,9 @@ static int prepare_pair(D2R_SR_Context *c,const double *row,double *u,double *f)
     double waves[NFLX];
     if(Magnetosonic(s->v[0],s->a2[0],s->h[0],waves)) return -2;
     if(!good_bounds(waves[KFASTM],waves[KFASTP])) return -2;
+    cmin[side]=waves[KFASTM];cmax[side]=waves[KFASTP];
+    speeds[4*side]=waves[KFASTM];speeds[4*side+1]=waves[KSLOWM];
+    speeds[4*side+2]=waves[KSLOWP];speeds[4*side+3]=waves[KFASTP];
   }
   return 1;
 }
@@ -113,7 +120,7 @@ static void copy_record(const D2R_SR_Record *r,int *i,double *d) {
 int d2r_sr_core_batch(size_t n,int mode,const double *faces,const double *fixed,
  double *numerical,double *states,double *physical,double *used_bounds,
  int *integers,double *doubles) {
-  if(mode<0||mode>2||!faces||!numerical||!states||!physical||!used_bounds||
+  if(mode<0||mode>3||!faces||!numerical||!states||!physical||!used_bounds||
      !integers||!doubles||(mode==1&&!fixed)||!core_setup()) return 0;
   for(size_t k=0;k<n;++k) {
     double *num=numerical+7*k,*u=states+14*k,*f=physical+14*k;
@@ -124,25 +131,45 @@ int d2r_sr_core_batch(size_t n,int mode,const double *faces,const double *fixed,
     for(int j=0;j<D2R_CORE_ND;++j) d[j]=NAN;
     for(int j=0;j<D2R_CORE_NI;++j) i[j]=-1;
     b[0]=b[1]=NAN;i[0]=0;i[1]=0;i[2]=0;i[3]=0;i[11]=0;
-    D2R_SR_Context *c=&core_context[mode==1];
-    const int prepared=prepare_pair(c,faces+16*k,u,f);
+    D2R_SR_Context *c=&core_context[mode==1||mode==3];
+    double cmin[2],cmax[2];
+    const int prepared=prepare_pair(c,faces+16*k,u,f,cmin,cmax,d+8);
     if(prepared!=1) {i[0]=prepared;i[11]=prepared==-5;continue;}
     i[1]=1;
+    int native=mode==0;
     if(mode==1) {
       b[0]=fixed[2*k];b[1]=fixed[2*k+1];
-    } else {
+    } else if(mode==2) {
       HLL_Speed(&c->sweep.stateL,&c->sweep.stateR,c->sweep.SL,c->sweep.SR,0,0);
+      b[0]=c->sweep.SL[0];b[1]=c->sweep.SR[0];
+    } else if(mode==3) {
+      /* Mode 3 (design D6, 2026-10-21): mode 0's bounds without its solve --
+       * HLL_Speed's MaxSignalSpeed takes the fast speeds of the same
+       * Magnetosonic call on the same states that prepare_pair has just made
+       * -- and with them, when they straddle the face, mode 1's fixed-bound
+       * solve: the native solve's flux was discarded there. Otherwise the
+       * native solve, whose flux is then an upwind state's. */
+      b[0]=MIN(cmin[0],cmin[1]);b[1]=MAX(cmax[0],cmax[1]);
+      native=!(b[0]<0.&&b[1]>0.);
+      if(native) {
+        g_maxRiemannIter=0;
+        HLLD_Solver(&c->sweep,0,0,c->cmax,NULL);
+      }
+    } else {
+      /* Mode 0: HLLD_Solver computes these bounds itself, by HLL_Speed on the
+       * same states, and only reads them after (hlld.c), so the HLL_Speed call
+       * this bridge made before it was a repeat (2026-10-20). The bounds check
+       * follows the solve; prepare_pair's speed checks make it pass. */
+      g_maxRiemannIter=0;
+      HLLD_Solver(&c->sweep,0,0,c->cmax,NULL);
       b[0]=c->sweep.SL[0];b[1]=c->sweep.SR[0];
     }
     d[0]=b[0];d[1]=b[1];
     if(!good_bounds(b[0],b[1])) {i[0]=-3;continue;}
     i[2]=1;
     if(mode==2) {i[0]=1;continue;}
-    if(mode==0) {
-      g_maxRiemannIter=0;
-      HLLD_Solver(&c->sweep,0,0,c->cmax,NULL);
+    if(native) {
       i[4]=g_maxRiemannIter;
-      b[0]=c->sweep.SL[0];b[1]=c->sweep.SR[0];d[0]=b[0];d[1]=b[1];
     } else {
       D2R_SR_Record r;
       memset(&r,0,sizeof(r));

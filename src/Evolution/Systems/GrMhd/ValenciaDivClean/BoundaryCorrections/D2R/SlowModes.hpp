@@ -14,7 +14,9 @@ struct SlowAction {
   bool supported = false;
   bool zero_operator = false;
   bool normalization_bound_active = false;
-  std::string status = "not_evaluated";
+  // A literal, or an exception's message in this thread's buffer (valid until
+  // the next one).
+  const char* status = "not_evaluated";
   // Order f-,a-,s-,c,s+,a+,f+. Exactly Bn=0 exits before a spectrum is needed,
   // so these diagnostic speeds remain zero on that analytical zero branch.
   std::array<double, 7> lambdas{};
@@ -36,7 +38,12 @@ struct SlowAction {
 // the same explicit choices as the audited scalar SR construction prototype.
 // Positive gamma-law flat-SR primitives and one fixed Bn are the supported
 // system.
+// root_starts (design D8): where the Newton iterations for the four
+// magnetosonic roots (gaps from the normal velocity, in the order fast-,
+// slow-, slow+, fast+) start; an entry that is NaN or outside its bracket
+// starts at the bracket's midpoint.
 SlowAction slow_action(const State& primitive, double bn, double gamma,
-                       const State& left_tau, const State& right_tau);
+                       const State& left_tau, const State& right_tau,
+                       const std::array<double, 4>& root_starts);
 
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections::D2R_DETAIL_NAMESPACE

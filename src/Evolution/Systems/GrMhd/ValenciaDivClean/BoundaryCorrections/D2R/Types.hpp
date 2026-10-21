@@ -5,6 +5,9 @@
 
 #include <array>
 #include <cmath>
+#if !defined(D2R_MULTIPRECISION) && defined(__SSE2__)
+#include <immintrin.h>
+#endif
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -55,6 +58,7 @@ inline double to_double(const Real& x) { return x.convert_to<double>(); }
 inline Real next_up(const Real& x) { return boost::math::float_next(x); }
 inline bool finite_real(const Real& x) { return boost::math::isfinite(x); }
 inline Real abs_real(const Real& x) { return boost::multiprecision::abs(x); }
+inline Real half(const Real& x) { return x / 2; }
 constexpr bool multiprecision_build = true;
 #else
 using Real = double;
@@ -70,10 +74,24 @@ inline Real next_up(const double x) {
 }
 inline bool finite_real(const double x) { return std::isfinite(x); }
 inline Real abs_real(const double x) { return std::fabs(x); }
+// x / 2 as x * 0.5: the same exact value, rounded the same way, without the
+// division the kernel's flags (-ffp-exception-behavior=maytrap) keep
+// (2026-10-20).
+inline Real half(const double x) { return x * 0.5; }
 constexpr bool multiprecision_build = false;
 using std::log;
 using std::pow;
-using std::sqrt;
+// The IEEE square root as the instruction (2026-10-20). The kernel's flags
+// (-ffp-exception-behavior=maytrap) make std::sqrt an out-of-line libm call on
+// every evaluation of the recovery's root function; sqrtsd is the same
+// correctly rounded operation that glibc's sqrt performs.
+inline double sqrt(const double x) {
+#if defined(__SSE2__)
+  return _mm_cvtsd_f64(_mm_sqrt_sd(_mm_setzero_pd(), _mm_set_sd(x)));
+#else
+  return std::sqrt(x);
+#endif
+}
 #endif
 
 using State = std::array<double, 7>;

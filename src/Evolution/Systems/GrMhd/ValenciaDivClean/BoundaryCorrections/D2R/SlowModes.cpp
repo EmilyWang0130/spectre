@@ -90,46 +90,85 @@ PhysicalState physical_state(const State& primitive, const double bn,
 // has extra guard limbs, so equality of repeatedly computed midpoints alone is
 // not a reliable termination rule. No physical gap threshold is introduced.
 // The resource ceiling only identifies unsupported numerical arithmetic.
-template <typename Function>
-Real bracketed_root(const Function& function, Real left, Real right) {
-  Real fleft = function(left);
-  Real fright = function(right);
+//
+// An unresolved family bracket (both ends of one sign) is an expected outcome
+// on evolved faces (a few per cent of a jet's), so it is returned, not thrown
+// (2026-10-20): false, the root untouched. Every other failure still throws.
+//
+// Design D2 (2026-10-21): Newton's method on the quartic with its analytic
+// slope, safeguarded by the bracket (a bisection step whenever the Newton step
+// would leave it or not halve the step before), to the same relative precision
+// as the bisection it replaces: about 6-10 evaluations instead of ~52
+// (binary64) or ~530 (160 digits). The root differs from the bisection's in the
+// last bits.
+//
+// Design D8 (2026-10-21): the endpoint values come from the caller, which
+// evaluates each of the brackets' five distinct endpoints once (they were
+// evaluated up to three times), and the iteration starts at `start` when that
+// lies strictly inside the bracket.
+template <typename Function, typename Slope>
+bool bracketed_root(const Function& function, const Slope& slope,
+                    const Real& left, const Real& right, const Real& fleft,
+                    const Real& fright, const double start,
+                    Real* const root) {
   if (not(finite(fleft) and finite(fright))) {
     throw std::runtime_error("nonfinite_quartic_endpoint");
   }
   if (fleft == 0) {
-    return left;
+    *root = left;
+    return true;
   }
   if (fright == 0) {
-    return right;
+    *root = right;
+    return true;
   }
   if ((fleft < 0) == (fright < 0)) {
-    throw std::runtime_error("quartic_family_bracket_unresolved");
+    return false;
   }
+  // The bracket oriented by sign: function(lower) < 0 < function(upper).
+  Real lower = fleft < 0 ? left : right;
+  Real upper = fleft < 0 ? right : left;
+  Real x = half(left + right);
+  if (std::isfinite(start)) {
+    const Real s = exact_double(start);
+    if (std::min(left, right) < s and s < std::max(left, right)) {
+      x = s;
+    }
+  }
+  Real step_before = magnitude(right - left);
+  Real step = step_before;
+  Real f = function(x);
   for (size_t iteration = 0; iteration < 4096; ++iteration) {
-    const Real scale = std::max(magnitude(left), magnitude(right));
-    const Real width = right - left;
-    if (width <= std::numeric_limits<Real>::epsilon() * scale) {
-      return magnitude(fleft) < magnitude(fright) ? left : right;
-    }
-    const Real middle = (left + right) / 2;
-    if (not(middle > left and middle < right)) {
-      throw std::runtime_error("quartic_midpoint_not_strictly_inside");
-    }
-    const Real fmiddle = function(middle);
-    if (not finite(fmiddle)) {
+    if (not finite(f)) {
       throw std::runtime_error("nonfinite_quartic_evaluation");
     }
-    if (fmiddle == 0) {
-      return middle;
+    if (f == 0) {
+      *root = x;
+      return true;
     }
-    if ((fmiddle < 0) == (fleft < 0)) {
-      left = middle;
-      fleft = fmiddle;
+    if (f < 0) {
+      lower = x;
     } else {
-      right = middle;
-      fright = fmiddle;
+      upper = x;
     }
+    const Real df = slope(x);
+    const bool newton = finite(df) and df != 0 and
+                        ((x - upper) * df - f) * ((x - lower) * df - f) < 0 and
+                        magnitude(2 * f) <= magnitude(step_before * df);
+    step_before = step;
+    if (newton) {
+      step = f / df;
+      x -= step;
+    } else {
+      step = half(upper - lower);
+      x = lower + step;
+    }
+    if (magnitude(step) <=
+        std::numeric_limits<Real>::epsilon() * magnitude(x)) {
+      *root = x;
+      return true;
+    }
+    f = function(x);
   }
   throw std::runtime_error("quartic_bisection_resource_limit");
 }
@@ -138,9 +177,13 @@ struct Spectrum {
   std::array<Real, 7> lambda{};
   std::array<Real, 7> gap{};
   bool exact_slow_alfven_collision = false;
+  // The expected unsupported outcomes, returned rather than thrown: null, or
+  // the status slow_action reports.
+  const char* failure = nullptr;
 };
 
-Spectrum physical_spectrum(const PhysicalState& state) {
+Spectrum physical_spectrum(const PhysicalState& state,
+                           const std::array<double, 4>& root_starts) {
   const Real& vn = state.velocity[0];
   const Real& bn = state.magnetic[0];
   const Real H = state.rho * state.enthalpy;
@@ -178,19 +221,53 @@ Spectrum physical_spectrum(const PhysicalState& state) {
     return aa * G * state.comoving_magnetic_squared - H * square(aa) +
            state.sound_squared * (H * aa * (aa + G) - square(Bq) * G);
   };
+  // d quartic / d gap, for the Newton steps of the root search.
+  const auto quartic_slope = [&state, &H, &vn, &bn](const Real& gap) -> Real {
+    const Real aa = square(state.lorentz * gap);
+    const Real G = 1 - square(vn + gap);
+    const Real Bq =
+        bn / state.lorentz - state.lorentz * state.magnetic_dot_velocity * gap;
+    const Real daa = 2 * square(state.lorentz) * gap;
+    const Real dG = -2 * (vn + gap);
+    const Real dBq = -state.lorentz * state.magnetic_dot_velocity;
+    return state.comoving_magnetic_squared * (daa * G + aa * dG) -
+           2 * H * aa * daa +
+           state.sound_squared * (H * (daa * (aa + G) + aa * (daa + dG)) -
+                                  2 * Bq * dBq * G - square(Bq) * dG);
+  };
   // A quartic root at an Alfven bracket endpoint need not be a DOUBLE
   // magnetosonic root. Returning it from both neighboring intervals would
   // silently mislabel a fast/slow family. The exactly parallel factorization
   // above handles its known collisions; other zero endpoint evaluations are
   // an explicit numerical support gap, without a fitted near-gap threshold.
-  if (quartic(alfven_gap[0]) == 0 or quartic(alfven_gap[1]) == 0) {
-    throw std::runtime_error("nonparallel_quartic_boundary_root_unsupported");
-  }
   const Real zero = 0;
-  result.gap = {bracketed_root(quartic, -1 - vn, alfven_gap[0]), alfven_gap[0],
-                bracketed_root(quartic, alfven_gap[0], zero),    zero,
-                bracketed_root(quartic, zero, alfven_gap[1]),    alfven_gap[1],
-                bracketed_root(quartic, alfven_gap[1], 1 - vn)};
+  // The brackets' endpoints, each evaluated once (design D8): family j lies
+  // between ends[j] and ends[j + 1].
+  const std::array<Real, 5> ends{-1 - vn, alfven_gap[0], zero, alfven_gap[1],
+                                 1 - vn};
+  std::array<Real, 5> values{};
+  values[1] = quartic(ends[1]);
+  values[3] = quartic(ends[3]);
+  if (values[1] == 0 or values[3] == 0) {
+    result.failure = "nonparallel_quartic_boundary_root_unsupported";
+    return result;
+  }
+  values[0] = quartic(ends[0]);
+  values[2] = quartic(ends[2]);
+  values[4] = quartic(ends[4]);
+  // The four families in the order of the original braced list, stopping at
+  // the first unresolved bracket as the exception did.
+  std::array<Real, 4> roots{};
+  for (size_t j = 0; j < 4; ++j) {
+    if (not bracketed_root(quartic, quartic_slope, ends[j], ends[j + 1],
+                           values[j], values[j + 1], root_starts[j],
+                           &roots[j])) {
+      result.failure = "quartic_family_bracket_unresolved";
+      return result;
+    }
+  }
+  result.gap = {roots[0], alfven_gap[0], roots[1], zero,
+                roots[2], alfven_gap[1], roots[3]};
   for (size_t k = 0; k < 7; ++k) {
     result.lambda[k] = vn + result.gap[k];
     if (not(result.lambda[k] > -1 and result.lambda[k] < 1 and
@@ -391,7 +468,8 @@ std::pair<MpState, MpState> analytic_pair(const PhysicalState& state,
 
 SlowAction slow_action(const State& primitive, const double bn,
                        const double gamma, const State& left_tau,
-                       const State& right_tau) {
+                       const State& right_tau,
+                       const std::array<double, 4>& root_starts) {
   SlowAction result{};
   try {
     const PhysicalState state = physical_state(primitive, bn, gamma);
@@ -403,7 +481,12 @@ SlowAction slow_action(const State& primitive, const double bn,
       result.status = "exact_Bn_zero_filter";
       return result;
     }
-    const Spectrum spectrum = physical_spectrum(state);
+    const Spectrum spectrum = physical_spectrum(state, root_starts);
+    if (spectrum.failure != nullptr) {
+      result.supported = false;
+      result.status = spectrum.failure;
+      return result;
+    }
     const FilterWeights filter = family_weights(state, spectrum);
     result.normalization_bound_active = filter.bound_active;
     for (size_t k = 0; k < 7; ++k) {
@@ -454,8 +537,10 @@ SlowAction slow_action(const State& primitive, const double bn,
     result.supported = true;
     result.status = "analytic_high_precision_pairs";
   } catch (const std::exception& error) {
+    thread_local std::string message;
+    message = error.what();
     result.supported = false;
-    result.status = error.what();
+    result.status = message.c_str();
   }
   return result;
 }

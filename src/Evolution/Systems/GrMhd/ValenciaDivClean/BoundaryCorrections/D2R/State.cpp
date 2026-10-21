@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <iomanip>
 #include <limits>
 #include <sstream>
@@ -215,7 +216,7 @@ MpState conserved_mp(const MpState& p, double bn, double gamma) {
           z * x.v[1] + magnetic_momentum[1],
           z * x.v[2] + magnetic_momentum[2],
           x.rho * x.w * x.wm1 + x.p * (k * x.w * x.w - 1) +
-              (x.b2 + dot(vx_b, vx_b)) / 2,
+              half(x.b2 + dot(vx_b, vx_b)),
           x.b[1],
           x.b[2]};
 }
@@ -226,7 +227,7 @@ MpState flux_mp(const MpState& p, double bn, double gamma) {
   for (std::size_t i = 0; i < 3; ++i)
     fm[i] = u[i + 1] * x.v[0] -
             exact_double(bn) * ((1 - x.v2) * x.b[i] + x.vb * x.v[i]);
-  fm[0] += x.p + (x.b2 * (1 - x.v2) + x.vb * x.vb) / 2;
+  fm[0] += x.p + half(x.b2 * (1 - x.v2) + x.vb * x.vb);
   const auto magnetic_momentum = cross(x.b, cross(x.v, x.b));
   const Real k = exact_double(gamma) / (exact_double(gamma) - 1);
   const Real ftau = (x.rho * x.w * x.wm1 + k * x.p * x.w * x.w) * x.v[0] +
@@ -242,7 +243,7 @@ MpState flux_mp(const MpState& p, double bn, double gamma) {
 bool reconstruction_budget(MpState* budget, const State& p, double bn,
                            double gamma) {
   const auto x = parts(imported(p), bn);
-  const Real eps = pow(Real(2), -53);
+  static const Real eps = pow(Real(2), -53);
   const Real g5 = 5 * eps / (1 - 5 * eps), g96 = 96 * eps / (1 - 96 * eps);
   const Real c = 1 - x.v2, dc = g5 * x.v2 + eps * (1 + x.v2);
   if (!(c > dc))
@@ -266,7 +267,7 @@ bool reconstruction_budget(MpState* budget, const State& p, double bn,
                 0,
                 absolute(x.rho * x.w * x.wm1) +
                     absolute(x.p) * (k * x.w * x.w + 1) +
-                    (x.b2 + dot(cross_abs, cross_abs)) / 2,
+                    half(x.b2 + dot(cross_abs, cross_abs)),
                 ab[1],
                 ab[2]};
   const Real abs_vb = dot(av, ab);
@@ -285,9 +286,29 @@ bool reconstruction_budget(MpState* budget, const State& p, double bn,
   }
   return true;
 }
-LineResult line(bool supported, const std::string& reason,
-                const State& flux = {}, const Real& coefficient = 0,
-                const Real& margin = 0) {
+// "WT17_" + an admissibility rejection, as a literal: the rejections are the
+// literals admissibility() assigns, and a recovery's reason must outlive the
+// recovery that set it (an entropy model builds its reason from two).
+const char* wt17_reason(const char* reason) {
+  static constexpr std::array<std::array<const char*, 2>, 8> prefixed{
+      {{"nonfinite_input", "WT17_nonfinite_input"},
+       {"gamma_outside_WT17_scope", "WT17_gamma_outside_WT17_scope"},
+       {"D_nonpositive", "WT17_D_nonpositive"},
+       {"q_nonpositive_or_unresolved", "WT17_q_nonpositive_or_unresolved"},
+       {"negative_Phi_radicand", "WT17_negative_Phi_radicand"},
+       {"Psi_nonpositive_or_unresolved", "WT17_Psi_nonpositive_or_unresolved"},
+       {"Psi_zero_or_precision_unresolved",
+        "WT17_Psi_zero_or_precision_unresolved"},
+       {"Psi_nonpositive", "WT17_Psi_nonpositive"}}};
+  for (const auto& entry : prefixed) {
+    if (std::strcmp(reason, entry[0]) == 0) {
+      return entry[1];
+    }
+  }
+  return "WT17_unclassified";
+}
+LineResult line(bool supported, const char* reason, const State& flux = {},
+                const Real& coefficient = 0, const Real& margin = 0) {
   return {supported, reason, flux, coefficient, margin};
 }
 }  // namespace
@@ -363,11 +384,12 @@ Admissibility admissibility(const State& u, double bn, double gamma) {
   return out;
 }
 
-Recovery recover(const State& original, double bn, double gamma) {
+Recovery recover(const State& original, double bn, double gamma,
+                 const RootHint& hint) {
   Recovery out{};
   out.admissibility = admissibility(original, bn, gamma);
   if (!out.admissibility.admissible) {
-    out.reason = "WT17_" + out.admissibility.reason;
+    out.reason = wt17_reason(out.admissibility.reason);
     return out;
   }
   const auto u = imported(original);
@@ -390,7 +412,7 @@ Recovery recover(const State& original, double bn, double gamma) {
   constexpr std::size_t maximum_evaluations = 16384;
   struct RootState {
     Triple v{};
-    Real v2 = 0, p = 0, f = 0;
+    Real v2 = 0, t = 0, p = 0, f = 0;
     bool causal = false;
   };
   const auto state = [&](const Real& x) {
@@ -404,11 +426,160 @@ Recovery recover(const State& original, double bn, double gamma) {
     if (!s.causal)
       return s;
     const Real t = sqrt(1 - s.v2);
+    s.t = t;
     s.p = a * (x * (1 - s.v2) - d * t * s.v2 / (1 + t));
     const auto vx_b = cross(s.v, b);
-    s.f = x - s.p + (b2 + dot(vx_b, vx_b)) / 2 - tau;
+    s.f = x - s.p + half(b2 + dot(vx_b, vx_b)) - tau;
     return s;
   };
+  // Bisection with foregone decisions skipped (2026-10-20). Both bisections
+  // below run to adjacent binary64 values, about 55 evaluations each, and
+  // almost all of their decisions lie far from the crossing, where the sign of
+  // the predicate is that of the exact function: the pressure is negative from
+  // the causal limit up to the pressure-zero boundary and positive beyond it,
+  // and the energy residual increases through its root. In the double build a
+  // safeguarded Newton iteration locates the crossing, and probes on either
+  // side of it whose value exceeds four times an estimate of its rounding
+  // error bound a window: a midpoint at or below the window's low end takes
+  // the lower decision and one at or above its high end the upper decision,
+  // as the exact function and so the evaluation would give them; the
+  // midpoints inside are evaluated as before. The bisection keeps its
+  // midpoints, its termination and its final bracket, so its result. The
+  // 160-digit build evaluates every midpoint (its window is the bracket).
+  struct Window {
+    Real low, high;
+  };
+#ifdef D2R_MULTIPRECISION
+  const auto trusted_window =
+      [](const Real& lower, const Real& upper, const RootState& /*at_upper*/,
+         const bool /*energy*/, const double /*start*/) {
+        return Window{lower, upper};
+      };
+  static_cast<void>(hint);
+#else
+  const double eps = std::numeric_limits<double>::epsilon();
+  const double b_norm = sqrt(b2), m_norm = sqrt(dot(m, m));
+  struct Local {
+    bool upper = false, safe = false, smooth = false;
+    double g = 0., dg = 0., margin = 0.;
+  };
+  // The bisection's predicate at x (from its own state(x), so the decision a
+  // midpoint at x would get), the value whose sign it tests, the derivative
+  // for a Newton step and the rounding allowance: four times an estimate of
+  // the error of that value, from the magnitudes of the terms it is made of
+  // and the error of v^2 propagated through d/dv^2.
+  const auto local = [&](const double x, const RootState& rs,
+                         const bool energy) {
+    Local r{};
+    r.upper = energy ? rs.f >= 0 : (rs.causal && rs.p >= 0);
+    if (!rs.causal) {
+      // Below the causal limit the pressure predicate is false: p -> -a d t
+      // < 0 as t -> 0. (The energy bracket starts above the boundary.)
+      r.safe = !energy;
+      return r;
+    }
+    const double z = d + x, zb = z + b2, v2 = rs.v2, t = rs.t;
+    const double c = mb / (z * z * zb);
+    Triple dv{};
+    for (std::size_t i = 0; i < 3; ++i)
+      dv[i] = -c * b[i] - rs.v[i] / zb;
+    const double dv2 = 2 * dot(rs.v, dv), dt = -dv2 / (2 * t);
+    const double t1 = x * (1 - v2), t2 = d * t * v2 / (1 + t);
+    const double dp = a * ((1 - v2) - x * dv2 - d * (1 - 2 * t) * dt);
+    const double v_terms = (m_norm + std::abs(mb) * b_norm / z) / zb;
+    const double v2_error = eps * (8 * sqrt(v2) * v_terms + 2 * v2);
+    const double inner_error =
+        4 * eps * (std::abs(t1) + std::abs(t2) + std::abs(t1 - t2)) +
+        v2_error * (std::abs(x) + d * std::abs(1 - 2 * t) / (2 * t));
+    if (energy) {
+      const auto vx_b = cross(rs.v, b), dvx_b = cross(dv, b);
+      const double vxb2 = dot(vx_b, vx_b);
+      r.g = rs.f;
+      r.dg = 1 - dp + dot(vx_b, dvx_b);
+      r.margin =
+          4 * (4 * eps *
+                   (std::abs(x) + std::abs(rs.p) + b2 / 2 + vxb2 / 2 +
+                    std::abs(tau)) +
+               a * inner_error + 8 * eps * sqrt(vxb2) * b_norm * v_terms);
+    } else {
+      r.g = rs.p;
+      r.dg = dp;
+      r.margin = 4 * a * inner_error;
+    }
+    r.smooth = std::isfinite(r.g) && std::isfinite(r.dg) && r.dg > 0 &&
+               std::isfinite(r.margin);
+    r.safe = r.smooth && (r.upper ? r.g > r.margin : r.g < -r.margin);
+    return r;
+  };
+  // The window for a bracket [lower, upper] whose upper end's state is known.
+  // Only probes whose decision is safe narrow it, so a poor Newton iterate can
+  // cost evaluations but never a decision. Newton starts at `start` when it
+  // lies inside the bracket (a hint), else at the upper end.
+  const auto trusted_window = [&](const double lower, const double upper,
+                                  const RootState& at_upper, const bool energy,
+                                  const double start) {
+    Window w{lower, upper};
+    double below = lower, above = upper, x = upper, slope = 0., margin = 0.;
+    bool located = false;
+    Local c{};
+    if (lower < start && start < upper) {
+      x = start;
+      c = local(x, state(x), energy);
+    } else {
+      c = local(x, at_upper, energy);
+    }
+    for (int k = 0; k < 64; ++k) {
+      if (c.upper) {
+        above = x;
+        if (c.safe)
+          w.high = std::min(w.high, x);
+      } else {
+        below = x;
+        if (c.safe)
+          w.low = std::max(w.low, x);
+      }
+      if (c.smooth) {
+        slope = c.dg;
+        margin = c.margin;
+      }
+      if (!c.safe || !(std::nextafter(below, above) < above)) {
+        located = slope > 0;
+        break;
+      }
+      double next = c.smooth ? x - c.g / c.dg : below;
+      if (!(next > below && next < above))
+        next = below + half(above - below);
+      x = next;
+      c = local(x, state(x), energy);
+    }
+    if (!located)
+      return w;
+    const double ulp =
+        std::nextafter(x, std::numeric_limits<double>::infinity()) - x;
+    const double first = std::max(4 * margin / slope, 4 * ulp);
+    double delta = first;
+    for (int k = 0; k < 4 && x - delta > w.low; ++k, delta *= 8) {
+      const auto probe = local(x - delta, state(x - delta), energy);
+      if (probe.upper)
+        break;
+      if (probe.safe) {
+        w.low = x - delta;
+        break;
+      }
+    }
+    delta = first;
+    for (int k = 0; k < 4 && x + delta < w.high; ++k, delta *= 8) {
+      const auto probe = local(x + delta, state(x + delta), energy);
+      if (!probe.upper)
+        break;
+      if (probe.safe) {
+        w.high = x + delta;
+        break;
+      }
+    }
+    return w;
+  };
+#endif
   Real low = 0, boundary;
   auto s = state(low);
   if (s.causal && s.p >= 0) {
@@ -431,6 +602,7 @@ Recovery recover(const State& original, double bn, double gamma) {
         return out;
       }
     }
+    const Window window = trusted_window(low, high, s, false, hint.boundary);
     while (true) {
       if (resolved(low, high)) {
         out.boundary_termination = "declared_decimal_precision";
@@ -440,17 +612,19 @@ Recovery recover(const State& original, double bn, double gamma) {
         out.reason = "boundary_bisection_evaluation_limit";
         return out;
       }
-      const Real mid = (low + high) / 2;
+      const Real mid = half(low + high);
       if (!(low < mid && mid < high)) {
         out.reason = "boundary_noninterior_midpoint_before_declared_precision";
         return out;
       }
-      s = state(mid);
+      bool upper = mid >= window.high;
+      if (window.low < mid && mid < window.high) {
+        s = state(mid);
+        upper = s.causal && s.p >= 0;
+      }
       ++out.boundary_bisections;
-      if (s.causal && s.p >= 0)
-        high = mid;
-      else
-        low = mid;
+      high = upper ? mid : high;
+      low = upper ? low : mid;
     }
     boundary = high;
   }
@@ -475,6 +649,7 @@ Recovery recover(const State& original, double bn, double gamma) {
       return out;
     }
   }
+  const Window window = trusted_window(left, right, s, true, hint.energy);
   while (true) {
     if (resolved(left, right)) {
       out.energy_termination = "declared_decimal_precision";
@@ -484,18 +659,22 @@ Recovery recover(const State& original, double bn, double gamma) {
       out.reason = "energy_bisection_evaluation_limit";
       return out;
     }
-    const Real mid = (left + right) / 2;
+    const Real mid = half(left + right);
     if (!(left < mid && mid < right)) {
       out.reason = "energy_noninterior_midpoint_before_declared_precision";
       return out;
     }
-    s = state(mid);
+    bool upper = mid >= window.high;
+    if (window.low < mid && mid < window.high) {
+      s = state(mid);
+      upper = s.f >= 0;
+    }
     ++out.energy_bisections;
-    if (s.f >= 0)
-      right = mid;
-    else
-      left = mid;
+    right = upper ? mid : right;
+    left = upper ? left : mid;
   }
+  out.roots.boundary = to_double(boundary);
+  out.roots.energy = to_double(left);
   bool found = false;
   Real best_error = 0;
   for (const Real& x : std::array<Real, 2>{left, right}) {
@@ -547,52 +726,94 @@ Recovery recover(const State& original, double bn, double gamma) {
   return out;
 }
 
-EntropyPair entropy_pair(const State& u, double bn, double gamma) {
+RootHint primitive_hint(const State& p, const double gamma) {
+  RootHint out{};
+  const double v2 = p[1] * p[1] + p[2] * p[2] + p[3] * p[3];
+  if (!(v2 < 1) || !(p[0] > 0) || !std::isfinite(p[4]))
+    return out;
+  const double w = 1 / sqrt(1 - v2);
+  out.energy = (p[0] + gamma / (gamma - 1) * p[4]) * w * w - p[0] * w;
+  out.boundary = out.energy;
+  return out;
+}
+
+namespace {
+// The entropy variables z, the entropy flux psi and the entropy eta of the
+// state with these primitives (out.recovery.high_precision_primitive).
+void entropy_variables(EntropyPair* const out, const double bn,
+                       const double gamma) {
+  const auto x = parts(out->recovery.high_precision_primitive, bn);
+  const Real gm = exact_double(gamma), s = log(x.p) - gm * log(x.rho),
+             beta = x.rho / x.p;
+  const Real d = x.rho * x.w;
+  out->eta = -d * s / (gm - 1);
+  out->z = {(gm - s) / (gm - 1) - beta * x.wm1,
+            beta * x.w * x.v[0],
+            beta * x.w * x.v[1],
+            beta * x.w * x.v[2],
+            -beta * x.w,
+            beta * (x.b[1] / x.w + x.w * x.vb * x.v[1]),
+            beta * (x.b[2] / x.w + x.w * x.vb * x.v[2])};
+  out->psi =
+      d * x.v[0] +
+      beta * x.w *
+          (half((x.b2 * (1 - x.v2) + x.vb * x.vb) * x.v[0]) - x.b[0] * x.vb);
+  out->success = true;
+  out->reason = "numerical_entropy_pair";
+}
+}  // namespace
+
+EntropyPair entropy_pair(const State& u, double bn, double gamma,
+                         const RootHint& hint) {
   EntropyPair out{};
-  out.recovery = recover(u, bn, gamma);
+  out.recovery = recover(u, bn, gamma, hint);
   if (!out.recovery.success) {
     out.reason = out.recovery.reason;
     return out;
   }
-  const auto x = parts(out.recovery.high_precision_primitive, bn);
-  const Real gm = exact_double(gamma), s = log(x.p) - gm * log(x.rho),
-             beta = x.rho / x.p;
-  const Real d = x.rho * x.w;
-  out.eta = -d * s / (gm - 1);
-  out.z = {(gm - s) / (gm - 1) - beta * x.wm1,
-           beta * x.w * x.v[0],
-           beta * x.w * x.v[1],
-           beta * x.w * x.v[2],
-           -beta * x.w,
-           beta * (x.b[1] / x.w + x.w * x.vb * x.v[1]),
-           beta * (x.b[2] / x.w + x.w * x.vb * x.v[2])};
-  out.psi = d * x.v[0] + beta * x.w *
-                             ((x.b2 * (1 - x.v2) + x.vb * x.vb) * x.v[0] / 2 -
-                              x.b[0] * x.vb);
-  out.success = true;
-  out.reason = "numerical_entropy_pair";
+  entropy_variables(&out, bn, gamma);
   return out;
 }
 
-Reference reference_from_tau(const State& ul, const State& ur,
-                             const State& left, const State& right, double bn,
-                             double gamma) {
+EntropyPair entropy_pair_from_primitive(const State& p, double bn,
+                                        double gamma) {
+  EntropyPair out{};
+  if (!physical_primitive(p, bn, gamma)) {
+    out.reason = "face_primitive_unphysical";
+    out.recovery.reason = out.reason;
+    return out;
+  }
+  out.recovery.success = true;
+  out.recovery.reason = "face_primitive";
+  out.recovery.primitive = p;
+  out.recovery.high_precision_primitive = imported(p);
+  out.recovery.roots = primitive_hint(p, gamma);
+  entropy_variables(&out, bn, gamma);
+  return out;
+}
+
+Reference reference_from_primitives(const State& ul, const State& ur,
+                                    const State& left, const State& right,
+                                    const double bn, const double gamma) {
   Reference out{};
   if (!physical_primitive(left, bn, gamma) ||
       !physical_primitive(right, bn, gamma) || !finite(ul) || !finite(ur)) {
     out.reason = "physical_primitive_endpoints_required";
     return out;
   }
-  State mid{};
-  for (std::size_t i = 0; i < 7; ++i)
-    if (!rounded_rational(&mid[i], (dyadic(ul[i]) + dyadic(ur[i])) / 2)) {
+  for (const std::size_t i : {std::size_t{0}, std::size_t{4}}) {
+    if (!rounded_rational(&out.primitive[i],
+                          (dyadic(left[i]) + dyadic(right[i])) / 2)) {
       out.reason = "midpoint_nonfinite";
       return out;
     }
-  const auto rec = recover(mid, bn, gamma);
-  if (!rec.success) {
-    out.reason = "stored_tau_midpoint_" + rec.reason;
-    return out;
+  }
+  for (const std::size_t i : {std::size_t{5}, std::size_t{6}}) {
+    if (!rounded_rational(&out.primitive[i],
+                          (dyadic(ul[i]) + dyadic(ur[i])) / 2)) {
+      out.reason = "midpoint_nonfinite";
+      return out;
+    }
   }
   const auto l = parts(imported(left), bn), r = parts(imported(right), bn);
   const Real wl = sqrt(l.rho), wr = sqrt(r.rho), sum = wl + wr;
@@ -600,7 +821,7 @@ Reference reference_from_tau(const State& ul, const State& ur,
   for (std::size_t i = 0; i < 3; ++i)
     difference[i] = r.v[i] - l.v[i];
   const Real cross_term =
-      ((1 - l.v2) + (1 - r.v2) + dot(difference, difference)) / 2;
+      half((1 - l.v2) + (1 - r.v2) + dot(difference, difference));
   const Real norm2 =
       (wl * wl + wr * wr + 2 * wl * wr * l.w * r.w * cross_term) / (sum * sum);
   if (!(norm2 > 0)) {
@@ -608,7 +829,6 @@ Reference reference_from_tau(const State& ul, const State& ur,
     return out;
   }
   out.four_velocity[0] = (wl * l.w + wr * r.w) / sum / sqrt(norm2);
-  out.primitive = rec.primitive;
   for (std::size_t i = 0; i < 3; ++i) {
     out.four_velocity[i + 1] =
         (wl * l.w * l.v[i] + wr * r.w * r.v[i]) / sum / sqrt(norm2);
@@ -618,8 +838,6 @@ Reference reference_from_tau(const State& ul, const State& ur,
       return out;
     }
   }
-  out.primitive[5] = mid[5];
-  out.primitive[6] = mid[6];
   out.success = physical_primitive(out.primitive, bn, gamma);
   out.reason =
       out.success ? "physical_reference" : "rounded_reference_unphysical";
@@ -627,7 +845,9 @@ Reference reference_from_tau(const State& ul, const State& ur,
 }
 
 PhysicalCap physical_ray_cap(const State& ul, const State& ur,
-                             const State& shift, double bn, double gamma) {
+                             const State& shift, double bn, double gamma,
+                             const RootHint& left_hint,
+                             const RootHint& right_hint) {
   PhysicalCap out{};
   out.left = ul;
   out.right = ur;
@@ -635,6 +855,7 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
     out.reason = "invalid_pair_or_shift";
     return out;
   }
+  Recovery left_recovery{}, right_recovery{};
   const auto at = [&](double beta, State* left, State* right) {
     for (std::size_t i = 0; i < 7; ++i) {
       // Match the prototype's stored long-double multiplication followed by
@@ -646,8 +867,11 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
           static_cast<double>(static_cast<long double>(ur[i]) - product);
     }
     ++out.evaluations;
-    return recover(*left, bn, gamma).success &&
-           recover(*right, bn, gamma).success;
+    left_recovery = recover(*left, bn, gamma, left_hint);
+    if (!left_recovery.success)
+      return false;
+    right_recovery = recover(*right, bn, gamma, right_hint);
+    return right_recovery.success;
   };
   State l{}, r{};
   if (at(1., &l, &r)) {
@@ -655,6 +879,8 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
     out.beta = 1.;
     out.left = l;
     out.right = r;
+    out.left_recovery = std::move(left_recovery);
+    out.right_recovery = std::move(right_recovery);
     out.reason = "full_supported";
     return out;
   }
@@ -664,7 +890,7 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
   }
   double low = 0., high = 1.;
   while (std::nextafter(low, high) < high) {
-    const double mid = low + (high - low) / 2;
+    const double mid = low + (high - low) * 0.5;
     if (at(mid, &l, &r))
       low = mid;
     else
@@ -678,7 +904,143 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
   out.beta = low;
   out.left = l;
   out.right = r;
+  out.left_recovery = std::move(left_recovery);
+  out.right_recovery = std::move(right_recovery);
   out.reason = "verified_numerical_coefficient";
+  return out;
+}
+
+namespace {
+// The primitive change dp with (dU/dP)(p) dp = du at fixed Bn: the field rows
+// are the identity, the other five by Gaussian elimination with partial
+// pivoting. False if the system is singular or the result nonfinite.
+bool primitive_change(MpState* const dp, const State& p, const State& du,
+                      const double bn, const double gamma) {
+  const auto x = parts(imported(p), bn);
+  const Real gm = exact_double(gamma), k = gm / (gm - 1);
+  const Real hr = x.rho + k * x.p, w2 = x.w * x.w, w3 = w2 * x.w, w4 = w2 * w2,
+             z = hr * w2;
+  const MpState d = imported(du);
+  const Real db_t = d[5], db_b = d[6];
+  std::array<std::array<Real, 6>, 5> a{};
+  // Columns rho, v_n, v_t, v_b, p; the last column is the right-hand side.
+  a[0][0] = x.w;
+  for (std::size_t i = 0; i < 3; ++i)
+    a[0][1 + i] = x.rho * w3 * x.v[i];
+  a[0][5] = d[0];
+  for (std::size_t j = 0; j < 3; ++j) {
+    a[1 + j][0] = w2 * x.v[j];
+    for (std::size_t i = 0; i < 3; ++i)
+      a[1 + j][1 + i] = 2 * hr * w4 * x.v[i] * x.v[j] +
+                        (i == j ? z + x.b2 : Real(0)) - x.b[i] * x.b[j];
+    a[1 + j][4] = k * w2 * x.v[j];
+    Real field = 0;
+    for (std::size_t c = 1; c < 3; ++c)
+      field +=
+          (2 * x.b[c] * x.v[j] - x.v[c] * x.b[j] - (j == c ? x.vb : Real(0))) *
+          (c == 1 ? db_t : db_b);
+    a[1 + j][5] = d[1 + j] - field;
+  }
+  a[4][0] = w2 - x.w;
+  for (std::size_t i = 0; i < 3; ++i)
+    a[4][1 + i] = 2 * hr * w4 * x.v[i] - x.rho * w3 * x.v[i] + x.v[i] * x.b2 -
+                  x.vb * x.b[i];
+  a[4][4] = k * w2 - 1;
+  a[4][5] = d[4] - ((x.b[1] * (1 + x.v2) - x.vb * x.v[1]) * db_t +
+                    (x.b[2] * (1 + x.v2) - x.vb * x.v[2]) * db_b);
+  for (std::size_t c = 0; c < 5; ++c) {
+    std::size_t pivot = c;
+    for (std::size_t r = c + 1; r < 5; ++r)
+      if (absolute(a[r][c]) > absolute(a[pivot][c]))
+        pivot = r;
+    if (!(absolute(a[pivot][c]) > 0) || !finite(a[pivot][c]))
+      return false;
+    std::swap(a[c], a[pivot]);
+    for (std::size_t r = c + 1; r < 5; ++r) {
+      const Real factor = a[r][c] / a[c][c];
+      for (std::size_t col = c; col < 6; ++col)
+        a[r][col] -= factor * a[c][col];
+    }
+  }
+  std::array<Real, 5> solution{};
+  for (std::size_t c = 5; c-- > 0;) {
+    Real sum = a[c][5];
+    for (std::size_t col = c + 1; col < 5; ++col)
+      sum -= a[c][col] * solution[col];
+    solution[c] = sum / a[c][c];
+    if (!finite(solution[c]))
+      return false;
+  }
+  *dp = {solution[0], solution[1], solution[2], solution[3],
+         solution[4], db_t,        db_b};
+  return true;
+}
+}  // namespace
+
+PhysicalCap linear_ray_cap(const State& ul, const State& ur, const State& left,
+                           const State& right, const State& shift,
+                           const double bn, const double gamma) {
+  PhysicalCap out{};
+  out.left = ul;
+  out.right = ur;
+  if (!finite(ul) || !finite(ur) || !finite(shift)) {
+    out.reason = "invalid_pair_or_shift";
+    return out;
+  }
+  // The shifted conserved states exactly as physical_ray_cap forms them at
+  // beta = 1.
+  State l{}, r{}, dl{}, dr{};
+  for (std::size_t i = 0; i < 7; ++i) {
+    volatile long double product = static_cast<long double>(1.) * shift[i];
+    l[i] = static_cast<double>(static_cast<long double>(ul[i]) + product);
+    r[i] = static_cast<double>(static_cast<long double>(ur[i]) - product);
+    dl[i] = static_cast<double>(static_cast<long double>(l[i]) - ul[i]);
+    dr[i] = static_cast<double>(static_cast<long double>(r[i]) - ur[i]);
+  }
+  // Physicality of the primitive prediction does not certify the intended
+  // conserved shift. Check both shifted encodings independently before using
+  // the fast predictor; an unsupported state takes the recovery/beta fallback.
+  const auto left_admissibility = admissibility(l, bn, gamma);
+  const auto right_admissibility = admissibility(r, bn, gamma);
+  if (!left_admissibility.admissible || !right_admissibility.admissible) {
+    out.reason = "linear_shifted_encoding_unsupported";
+    return out;
+  }
+  MpState dpl{}, dpr{};
+  if (!primitive_change(&dpl, left, dl, bn, gamma) ||
+      !primitive_change(&dpr, right, dr, bn, gamma)) {
+    out.reason = "linear_update_singular";
+    return out;
+  }
+  MpState pl = imported(left), pr = imported(right);
+  for (std::size_t i = 0; i < 7; ++i) {
+    pl[i] += dpl[i];
+    pr[i] += dpr[i];
+  }
+  State left_new{}, right_new{};
+  if (!rounded_state(&left_new, pl) || !rounded_state(&right_new, pr) ||
+      !physical_primitive(left_new, bn, gamma) ||
+      !physical_primitive(right_new, bn, gamma)) {
+    out.reason = "linear_update_unphysical";
+    return out;
+  }
+  out.success = out.full_supported = true;
+  out.primitive_prediction = true;
+  out.beta = 1.;
+  out.left = l;
+  out.right = r;
+  out.evaluations = 1;
+  for (auto* recovery : {&out.left_recovery, &out.right_recovery}) {
+    recovery->success = true;
+    recovery->reason = "linear_primitive_prediction";
+  }
+  out.left_recovery.admissibility = left_admissibility;
+  out.right_recovery.admissibility = right_admissibility;
+  out.left_recovery.primitive = left_new;
+  out.left_recovery.high_precision_primitive = pl;
+  out.right_recovery.primitive = right_new;
+  out.right_recovery.high_precision_primitive = pr;
+  out.reason = "linear_full_supported";
   return out;
 }
 
@@ -710,14 +1072,31 @@ bool causal_hll(State* out, const State& ul, const State& ur, const State& fl,
 }
 
 EntropyModel::EntropyModel(const State& ul, const State& ur, double bn,
-                           double gamma)
-    : left(entropy_pair(ul, bn, gamma)),
-      right(entropy_pair(ur, bn, gamma)),
+                           double gamma, const RootHint& left_hint,
+                           const RootHint& right_hint)
+    : left(entropy_pair(ul, bn, gamma, left_hint)),
+      right(entropy_pair(ur, bn, gamma, right_hint)),
       ul_(ul),
       ur_(ur) {
+  complete();
+}
+EntropyModel::EntropyModel(const State& ul, const State& ur,
+                           const State& left_primitive,
+                           const State& right_primitive, double bn,
+                           double gamma)
+    : left(entropy_pair(ul, bn, gamma, primitive_hint(left_primitive, gamma))),
+      right(entropy_pair(ur, bn, gamma, primitive_hint(right_primitive, gamma))),
+      ul_(ul),
+      ur_(ur) {
+  complete();
+}
+void EntropyModel::complete() {
+  const State& ul = ul_;
+  const State& ur = ur_;
   supported = left.success && right.success;
-  reason = supported ? "supported"
-                     : "entropy_inputs_" + left.reason + "_" + right.reason;
+  reason = supported ? std::string("supported")
+                     : std::string("entropy_inputs_") + left.reason + "_" +
+                           right.reason;
   if (!supported)
     return;
   dpsi = right.psi - left.psi;
@@ -750,7 +1129,7 @@ Real EntropyModel::tolerance(const State& flux) const {
 }
 LineResult EntropyModel::repair(const State& candidate) const {
   if (!supported)
-    return line(false, reason);
+    return line(false, reason.c_str());
   if (!finite(candidate))
     return line(false, "nonfinite_native");
   const Real m0 = margin(candidate);
@@ -758,7 +1137,7 @@ LineResult EntropyModel::repair(const State& candidate) const {
     return line(true, "native_entropy_supported", candidate, 0, m0);
   if (!(h > 0))
     return line(false, "nonpositive_entropy_jump");
-  const Real u = pow(Real(2), -53), sigma = pow(Real(2), -1075);
+  static const Real u = pow(Real(2), -53), sigma = pow(Real(2), -1075);
   Real a = 0, b = 0, c = 0;
   for (std::size_t i = 0; i < 7; ++i) {
     const Real z = absolute(dz[i]);
@@ -786,7 +1165,7 @@ LineResult EntropyModel::repair(const State& candidate) const {
 LineResult EntropyModel::cap(const State& baseline,
                              const State& direction) const {
   if (!supported)
-    return line(false, reason);
+    return line(false, reason.c_str());
   if (!finite(baseline))
     return line(false, "nonfinite_baseline");
   if (!finite(direction))
@@ -803,7 +1182,7 @@ LineResult EntropyModel::cap(const State& baseline,
     if (m >= -tolerance(full))
       return line(true, "full_response", full, 1, m);
   }
-  const Real u = pow(Real(2), -53), sigma = pow(Real(2), -1075);
+  static const Real u = pow(Real(2), -53), sigma = pow(Real(2), -1075);
   Real a = 0, b = 0, c = 0, slope = 0;
   for (std::size_t i = 0; i < 7; ++i) {
     const Real z = absolute(dz[i]), t = exact_double(direction[i]);
