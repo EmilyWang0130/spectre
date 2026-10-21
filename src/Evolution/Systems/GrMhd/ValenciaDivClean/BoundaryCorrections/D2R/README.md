@@ -99,6 +99,43 @@ the unit tests do not know which. The paragraphs below describe the 160-digit
 backend as it was written; they apply to the double build with the
 qualifications above.
 
+### The double kernel's cost, before and after the optimization of 2026-10-20
+
+Branch `d2r-opt`; every change is bit-identical to the unchanged kernel
+(per-face dumps of 69 000 stored faces and 14 evolution arms, element by
+element), so the agreement with the 160-digit oracle is the unchanged kernel's:
+worst relative flux difference 2.0e-15 and 3.3e-14 on the two tube face sets,
+1.08e-12 on the jet sets. Measured in one job on one node, one pinned core,
+median of 7 repetitions (`spectre_runs/branch_testing/run09_d2r_optimization`,
+job 79354):
+
+| | before | after | PLUTO HLLD | PLUTO HLLx |
+|---|---|---|---|---|
+| µs per active face, relativistic large-B_x tube (156 faces) | 37.2–37.7 | 17.0 | 0.70 | 4.25 |
+| µs per active face, cold large-B_x tube (159) | 39.7–39.8 | 16.8–17.0 | 0.68 | 4.62 |
+| µs per active face, 44 × 88 jet, t = 0.5 … 3.5 (4063 of 53 284) | 40.2 | 19.8 | 0.64 | 6.1 |
+| 44 × 88 jet to t = 3, 1 worker (wall, 2 runs) | 27.9 s | 19.1–19.2 s | 11.8 s | 16.0 s |
+| 44 × 88 jet to t = 3, 16 workers | 20.2–20.3 s | 8.2 s | 2.0 s | 3.7 s |
+
+What changed (one commit each): the double build takes no lock (its C core keeps
+all scratch `_Thread_local`); `recover()` evaluates only the bisection midpoints
+inside a window bounded by a safeguarded Newton search and rounding-margin
+probes, starting from nearby known roots, and reuses the physical-ray cap's
+recoveries (5 instead of 7 per active face); the response's first fixed-bound
+solve reuses the refined solve when its inputs are equal; two repeated
+computations in the C bridge are dropped; `sqrt` is the instruction and `x / 2`
+is `x * 0.5` (the flags' `-ffp-exception-behavior=maytrap` otherwise keeps a
+libm call and a division on every bisection step); statuses are string literals
+(no heap allocation per face); the expected unsupported spectra are returned
+rather than thrown.
+
+Where the time goes now (flat profile on jet faces): primitive recovery ~45 %
+(about 115 bisection steps per recovery, kept to stay bit-identical); the C core
+~30 %, mostly the fixed-bound solver's refinement bisection (16–27 `Fstar`
+evaluations per solve on jet faces); the quartic roots ~10 %. On 16 workers the
+jet is limited by its element distribution: one worker carries ~60 % of the D2-R
+solves.
+
 ## Precision, support and cost
 
 This first compiled correctness backend uses fixed 160-digit decimal
