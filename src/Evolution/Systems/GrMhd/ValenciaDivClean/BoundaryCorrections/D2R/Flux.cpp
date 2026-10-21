@@ -163,6 +163,11 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   result.right_tau = base.ur;
   result.bounds = base.bounds;
   State candidate = base.flux;
+  // The fixed-bound solve of the input pair with the native bounds (the
+  // candidate), kept: the response's first fixed-bound solve is the same call
+  // whenever the recovered primitives equal the inputs bit for bit.
+  CoreResult refined{};
+  bool have_refined = false;
   const bool equal = left == right;
   if (equal) {
     candidate = base.fl;
@@ -182,7 +187,8 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
     }
   } else if (not result.causal_fallback and base.bounds[0] < 0. and
              base.bounds[1] > 0.) {
-    const auto refined = core(1, left, right, bn, gamma, base.bounds);
+    refined = core(1, left, right, bn, gamma, base.bounds);
+    have_refined = true;
     ++result.core_calls;
     result.baseline_outcome = refined.integers[5];
     if (refined.status() != 1) {
@@ -288,9 +294,13 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   if (cl.primitive == pl and cr.primitive == pr) {
     return keep("zero_represented_primitive_change");
   }
-  const auto k0 = core(1, pl, pr, bn, gamma, base.bounds);
+  // The C core is deterministic and keeps no state between calls that its
+  // result depends on, so an identical call is not repeated (2026-10-20).
+  const bool repeat_of_refined = have_refined and pl == left and pr == right;
+  const auto k0 =
+      repeat_of_refined ? refined : core(1, pl, pr, bn, gamma, base.bounds);
   const auto kc = core(1, cl.primitive, cr.primitive, bn, gamma, base.bounds);
-  result.core_calls += 2;
+  result.core_calls += repeat_of_refined ? 1 : 2;
   if (k0.status() != 1 or kc.status() != 1) {
     return keep("fixed_core_unusable");
   }
