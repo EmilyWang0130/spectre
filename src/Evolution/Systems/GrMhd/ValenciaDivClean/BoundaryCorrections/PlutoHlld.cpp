@@ -596,6 +596,16 @@ void pluto_dg_boundary_terms(
     }
   }
 
+  // A curved face is solved in its canonical orientation, the one whose unit
+  // normal covector is lexicographically positive (see the curved batch
+  // below); `true` when the element's own outward normal is the other one.
+  const auto canonical_flip = [](const FaceFrame& frame) {
+    const auto& n_lo = frame.duals[0];
+    return n_lo[0] < 0.0 or
+           (n_lo[0] == 0.0 and
+            (n_lo[1] < 0.0 or (n_lo[1] == 0.0 and n_lo[2] < 0.0)));
+  };
+
   // HLL flux for one component given explicit bounds.
   const auto hll_with = [&weak, &num_points](
                             const DataVector& l_max, const DataVector& l_min,
@@ -772,24 +782,45 @@ void pluto_dg_boundary_terms(
     const double g_bn = hll_point(l_max, l_min, bn_i, nfbn_i, bn_e, nfbn_e);
     glm_normal_b_flux[pt] =
         (l_max * nfbn_i + l_min * nfbn_e + l_max * l_min * (bn_e - bn_i)) / dl;
-    // The unclamped light cone and the GLM fan's states on it.
-    const double cone_max = std::max(get(largest_outgoing_char_speed_int)[pt],
-                                     -get(largest_ingoing_char_speed_ext)[pt]);
-    const double cone_min = std::min(get(largest_ingoing_char_speed_int)[pt],
-                                     -get(largest_outgoing_char_speed_ext)[pt]);
+    // The unclamped light cone and the GLM fan's states on it, in the face's
+    // canonical orientation (left = the side behind the canonical normal; see
+    // the curved batch below): the two elements sharing the face evaluate the
+    // same expressions on the same numbers, so the common normal field the
+    // MHD solver gets is the same bit for bit from either side.
+    const bool flip = canonical_flip(frame);
+    const double bn_left = flip ? -bn_e : bn_i;
+    const double bn_right = flip ? -bn_i : bn_e;
+    const double nfbn_left = flip ? -nfbn_e : nfbn_i;
+    const double nfbn_right = flip ? -nfbn_i : nfbn_e;
+    const double phi_left = get(flip ? tilde_phi_ext : tilde_phi_int)[pt];
+    const double phi_right = get(flip ? tilde_phi_int : tilde_phi_ext)[pt];
+    const double nfphi_left = get(flip ? normal_dot_flux_tilde_phi_ext
+                                       : normal_dot_flux_tilde_phi_int)[pt];
+    const double nfphi_right = get(flip ? normal_dot_flux_tilde_phi_int
+                                        : normal_dot_flux_tilde_phi_ext)[pt];
+    const double cone_max =
+        flip ? std::max(get(largest_outgoing_char_speed_ext)[pt],
+                        -get(largest_ingoing_char_speed_int)[pt])
+             : std::max(get(largest_outgoing_char_speed_int)[pt],
+                        -get(largest_ingoing_char_speed_ext)[pt]);
+    const double cone_min =
+        flip ? std::min(get(largest_ingoing_char_speed_ext)[pt],
+                        -get(largest_outgoing_char_speed_int)[pt])
+             : std::min(get(largest_ingoing_char_speed_int)[pt],
+                        -get(largest_outgoing_char_speed_ext)[pt]);
     const double cone_width = std::max(cone_max - cone_min, 1.0e-30);
     const double bn_middle =
-        (cone_max * bn_e - cone_min * bn_i + nfbn_i + nfbn_e) / cone_width;
-    glm_normal_b_star[pt] = cone_min >= 0.0   ? bn_i
-                            : cone_max <= 0.0 ? bn_e
-                                              : bn_middle;
-    const double phi_star =
-        (cone_max * get(tilde_phi_ext)[pt] - cone_min * get(tilde_phi_int)[pt] +
-         get(normal_dot_flux_tilde_phi_int)[pt] +
-         get(normal_dot_flux_tilde_phi_ext)[pt]) /
+        (cone_max * bn_right - cone_min * bn_left + nfbn_left + nfbn_right) /
         cone_width;
-    const double phi_on_ray = cone_min >= 0.0   ? get(tilde_phi_int)[pt]
-                              : cone_max <= 0.0 ? get(tilde_phi_ext)[pt]
+    const double bn_on_ray = cone_min >= 0.0   ? bn_left
+                             : cone_max <= 0.0 ? bn_right
+                                               : bn_middle;
+    glm_normal_b_star[pt] = flip ? -bn_on_ray : bn_on_ray;
+    const double phi_star = (cone_max * phi_right - cone_min * phi_left +
+                             nfphi_left + nfphi_right) /
+                            cone_width;
+    const double phi_on_ray = cone_min >= 0.0   ? phi_left
+                              : cone_max <= 0.0 ? phi_right
                                                 : phi_star;
     glm_phi_sel[pt] = frame.lapse * phi_on_ray;
     for (size_t i = 0; i < 3; ++i) {
@@ -824,10 +855,22 @@ void pluto_dg_boundary_terms(
   //            + alpha sqrt(gamma) [f[BX2] e_(1)^j + f[BX3] e_(2)^j] (vectors).
   // Everything here runs before the flat batch so that the latter keeps its
   // early return exactly as it always had.
+  //
+  // Each face is solved in its canonical orientation: the one whose unit
+  // normal covector is lexicographically positive, with the side behind it as
+  // the solver's left state. The two elements sharing a face then hand the
+  // solver the same problem bit for bit (the swapped face's frame is this
+  // one's rotated by pi about e_(1), which the canonical frame undoes), and
+  // the element facing the other way takes the flux with the opposite sign.
+  // The face flux is exactly antisymmetric under the int <-> ext swap --
+  // discrete conservation -- whatever the solver's own symmetry: hllc_kb.c and
+  // hllx.c iterate, and a mirrored iteration need not take the same branch.
   {
     const ScopedFpeState curved_fpe_scope(false);
     std::vector<size_t> curved_index;
     std::vector<double> curved_vl, curved_vr, curved_speed, curved_gamma;
+    std::vector<FaceFrame> curved_frame;
+    std::vector<double> curved_sign;
     for (size_t pt = 0; pt < num_points; ++pt) {
       if (not frames[pt].has_value()) {
         continue;
@@ -861,16 +904,30 @@ void pluto_dg_boundary_terms(
         ++tally.fallback_ray;
         continue;  // a ray-0 kernel cannot sample a moving face
       }
+      const bool flip = canonical_flip(frame);
+      FaceFrame canonical = frame;
+      if (flip) {
+        for (const size_t a : {size_t{0}, size_t{2}}) {
+          for (size_t i = 0; i < 3; ++i) {
+            canonical.legs[a][i] = -frame.legs[a][i];
+            canonical.duals[a][i] = -frame.duals[a][i];
+          }
+        }
+        canonical.shift_dot_normal = -frame.shift_dot_normal;
+        canonical.face_speed = -frame.face_speed;
+      }
+      const double sign = flip ? -1.0 : 1.0;
       const double inv_sqrt_det = 1.0 / frame.sqrt_det_spatial_metric;
-      const double common_normal_field = glm_normal_b_star[pt] * inv_sqrt_det;
+      const double common_normal_field =
+          sign * glm_normal_b_star[pt] * inv_sqrt_det;
       const auto push = [&](std::vector<double>* out,
                             const Scalar<DataVector>& rho,
                             const tnsr::I<DataVector, 3, Frame::Inertial>& vel,
                             const tnsr::I<DataVector, 3, Frame::Inertial>& bt,
                             const Scalar<DataVector>& press) {
-        const auto v = frame.components(
+        const auto v = canonical.components(
             {{get<0>(vel)[pt], get<1>(vel)[pt], get<2>(vel)[pt]}});
-        const auto b = frame.components(
+        const auto b = canonical.components(
             {{get<0>(bt)[pt] * inv_sqrt_det, get<1>(bt)[pt] * inv_sqrt_det,
               get<2>(bt)[pt] * inv_sqrt_det}});
         out->push_back(get(rho)[pt]);
@@ -882,14 +939,23 @@ void pluto_dg_boundary_terms(
         out->push_back(b[2]);
         out->push_back(get(press)[pt]);
       };
-      push(&curved_vl, rest_mass_density_int, spatial_velocity_int, tilde_b_int,
-           pressure_int);
-      push(&curved_vr, rest_mass_density_ext, spatial_velocity_ext, tilde_b_ext,
-           pressure_ext);
+      if (flip) {
+        push(&curved_vl, rest_mass_density_ext, spatial_velocity_ext,
+             tilde_b_ext, pressure_ext);
+        push(&curved_vr, rest_mass_density_int, spatial_velocity_int,
+             tilde_b_int, pressure_int);
+      } else {
+        push(&curved_vl, rest_mass_density_int, spatial_velocity_int,
+             tilde_b_int, pressure_int);
+        push(&curved_vr, rest_mass_density_ext, spatial_velocity_ext,
+             tilde_b_ext, pressure_ext);
+      }
       curved_index.push_back(pt);
-      curved_speed.push_back(frame.face_speed);
+      curved_speed.push_back(canonical.face_speed);
       curved_gamma.push_back(
           1.0 + 0.5 * (p_i / (rho_i * eps_i) + p_e / (rho_e * eps_e)));
+      curved_frame.push_back(canonical);
+      curved_sign.push_back(sign);
     }
 
     if (not curved_index.empty()) {
@@ -936,7 +1002,12 @@ void pluto_dg_boundary_terms(
         }
         const size_t pt = curved_index[k];
         const FaceFrame& frame = *frames[pt];
-        const double scale = frame.lapse * frame.sqrt_det_spatial_metric;
+        // The solver's flux is along the canonical normal, the element's along
+        // its own outward normal: the sign carries one to the other, and the
+        // canonical frame maps the triad components back.
+        const FaceFrame& canonical = curved_frame[k];
+        const double scale =
+            curved_sign[k] * frame.lapse * frame.sqrt_det_spatial_metric;
         const double g_d = scale * f[0];
         double g_ye = 0.0;
         if (force_mass_consistent_ye) {
@@ -957,9 +1028,9 @@ void pluto_dg_boundary_terms(
             continue;
           }
         }
-        const auto g_s = frame.covector(
+        const auto g_s = canonical.covector(
             {{scale * (f[1] + press[k]), scale * f[2], scale * f[3]}});
-        const auto g_bt = frame.vector({{0.0, scale * f[5], scale * f[6]}});
+        const auto g_bt = canonical.vector({{0.0, scale * f[5], scale * f[6]}});
         const double g_tau = scale * f[7];
         get(*boundary_correction_tilde_d)[pt] =
             g_d - (weak ? 0.0 : get(normal_dot_flux_tilde_d_int)[pt]);

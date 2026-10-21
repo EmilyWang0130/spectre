@@ -278,19 +278,54 @@ Correction physical_flux(const Packaged& side) {
            get(side.nf_phi)[0]}};
 }
 
+// Whether a unit normal covector is NOT the face's canonical orientation (the
+// lexicographically positive one), the test PlutoHlld.cpp applies to the face
+// frame's normal, whose signs are this normal's.
+bool non_canonical(const std::array<double, 3>& normal) {
+  return normal[0] < 0.0 or
+         (normal[0] == 0.0 and
+          (normal[1] < 0.0 or (normal[1] == 0.0 and normal[2] < 0.0)));
+}
+
 // Interior and exterior packaging of one face; `normal` is the interior's
-// outward normal covector.
+// outward normal covector. The correction is the interior's, computed from the
+// side `from_exterior` says: the exterior's weak-form flux negated (and the
+// interior's physical flux subtracted for the strong form). Curved faces are
+// solved in their canonical orientation whichever side asks, flat faces in the
+// asking side's; a flat reference for a curved result is computed from the
+// canonical side, so that both solve the Riemann problem in the same
+// orientation (hllx.c's iteration is not exactly symmetric in its two sides).
+template <typename Solver>
+Correction solve_face_from(
+    const Solver& solver, const Primitive& left, const Primitive& right,
+    const Geometry& geometry, const std::array<double, 3>& normal,
+    const Eos& eos, const bool from_exterior,
+    const dg::Formulation formulation = dg::Formulation::WeakInertial) {
+  const std::array<double, 3> minus_normal{
+      {-normal[0], -normal[1], -normal[2]}};
+  const auto l = package(solver, left, geometry, normal, eos);
+  const auto r = package(solver, right, geometry, minus_normal, eos);
+  if (not from_exterior) {
+    return boundary(solver, l, r, formulation);
+  }
+  auto g = boundary(solver, r, l, dg::Formulation::WeakInertial);
+  const auto f = physical_flux(l);
+  for (size_t k = 0; k < g.size(); ++k) {
+    gsl::at(g, k) =
+        -gsl::at(g, k) -
+        (formulation == dg::Formulation::StrongInertial ? gsl::at(f, k) : 0.0);
+  }
+  return g;
+}
+
 template <typename Solver>
 Correction solve_face(
     const Solver& solver, const Primitive& left, const Primitive& right,
     const Geometry& geometry, const std::array<double, 3>& normal,
     const Eos& eos,
     const dg::Formulation formulation = dg::Formulation::WeakInertial) {
-  const std::array<double, 3> minus_normal{
-      {-normal[0], -normal[1], -normal[2]}};
-  const auto l = package(solver, left, geometry, normal, eos);
-  const auto r = package(solver, right, geometry, minus_normal, eos);
-  return boundary(solver, l, r, formulation);
+  return solve_face_from(solver, left, right, geometry, normal, eos,
+                         non_canonical(normal), formulation);
 }
 
 void check_close(const Correction& a, const Correction& b, const double tol,
@@ -897,12 +932,16 @@ void test_minkowski_in_linear_coordinates(
       }
       return q;
     };
+    // The primed face is solved in the orientation its own normal makes
+    // canonical; the inertial reference is computed from the same side.
+    const bool from_exterior = non_canonical(normal_primed);
     for_each_solver([&](const auto& solver, const std::string& name) {
       CAPTURE(name);
-      const auto g_flat =
-          solve_face(solver, left, right, inertial, normal, eos);
+      const auto g_flat = solve_face_from(solver, left, right, inertial, normal,
+                                          eos, from_exterior);
       const auto g_primed =
-          solve_face(solver, map(left), map(right), primed, normal_primed, eos);
+          solve_face_from(solver, map(left), map(right), primed, normal_primed,
+                          eos, from_exterior);
       const double scale = primed.lapse * abs_det;
       Correction expected{};
       expected[0] = scale * g_flat[0];
@@ -955,8 +994,11 @@ void test_shift_and_mesh_velocity(const gsl::not_null<std::mt19937*> gen,
       check_close(solve_face(solver, left, right, tangential, normal, eos),
                   g_flat, 1.0e-10, name + " tangential shift");
 
-      // Normal shift beta = s n: the correction is continuous in s.
+      // Normal shift beta = s n: the correction is continuous in s, except
+      // that hllc_kb.c's flux may jump once, where the face crosses its
+      // contact (its star states are not integral-consistent there; test 3).
       Correction previous{};
+      size_t jumps = 0;
       constexpr size_t num_shifts = 801;
       for (size_t j = 0; j < num_shifts; ++j) {
         const double s =
@@ -976,14 +1018,17 @@ void test_shift_and_mesh_velocity(const gsl::not_null<std::mt19937*> gen,
         const bool crosses_cone =
             j > 0 and (std::abs(s) - 1.0) * (std::abs(previous_s) - 1.0) <= 0.0;
         if (j > 0 and not crosses_cone) {
-          CAPTURE(s);
           double jump = 0.0;
           for (size_t k = 0; k < g.size(); ++k) {
             jump =
                 std::max(jump, std::abs(gsl::at(g, k) - gsl::at(previous, k)));
           }
-          CHECK(jump <=
-                50.0 * 2.8 / (num_shifts - 1.0) * std::max(1.0, norm_inf(g)));
+          if (jump >
+              50.0 * 2.8 / (num_shifts - 1.0) * std::max(1.0, norm_inf(g))) {
+            CAPTURE(s);
+            CAPTURE(jump);
+            ++jumps;
+          }
         }
         previous = g;
         // Beyond the light cone the upwind side's physical flux.
@@ -1016,6 +1061,7 @@ void test_shift_and_mesh_velocity(const gsl::not_null<std::mt19937*> gen,
           check_close(g_mesh, g, 1.0e-12, name + " moving mesh");
         }
       }
+      CHECK(jumps <= (name == "PlutoHllc KimBalsara" ? 1_st : 0_st));
     });
   }
 }
@@ -1211,6 +1257,56 @@ void test_density_cutoff_and_forced_hll(const gsl::not_null<std::mt19937*> gen,
     CHECK(bc::detail::face_frame_counts().density_cutoff == 0);
   }
 }
+
+// ---------------------------------------------------------------------------
+// 11. Discrete conservation by construction. The two elements sharing a curved
+//     face hand the solver the same problem (the face's canonical orientation),
+//     so a face is solved from both sides or from neither, and the solver's
+//     part of the flux -- D, Tau and S -- is antisymmetric under the int <->
+//     ext swap bit for bit, whatever the solver's own symmetry; the GLM pair,
+//     the field and Ye (HLL-type expressions) to round-off.
+// ---------------------------------------------------------------------------
+void test_canonical_orientation(const gsl::not_null<std::mt19937*> gen,
+                                const Eos& eos) {
+  std::uniform_real_distribution<double> unit(0.0, 1.0);
+  for (size_t trial = 0; trial < 200; ++trial) {
+    CAPTURE(trial);
+    Geometry geometry{};
+    geometry.metric = random_metric(gen, 0.3);
+    geometry.lapse = 0.4 + unit(*gen);
+    for (double& shift_component : geometry.shift) {
+      shift_component = 0.4 * (2.0 * unit(*gen) - 1.0);
+    }
+    const auto normal = unit_normal(geometry, random_direction(gen));
+    const std::array<double, 3> minus{{-normal[0], -normal[1], -normal[2]}};
+    const auto left = random_primitive(gen, geometry.metric, 0.9, 1.5);
+    auto right = random_primitive(gen, geometry.metric, 0.9, 1.5);
+    right.phi = 0.2 * (2.0 * unit(*gen) - 1.0);
+    for_each_solver([&](const auto& solver, const std::string& name) {
+      CAPTURE(name);
+      const auto l = package(solver, left, geometry, normal, eos);
+      const auto r = package(solver, right, geometry, minus, eos);
+      bc::detail::reset_face_frame_counts();
+      const auto g_lr = boundary(solver, l, r, dg::Formulation::WeakInertial);
+      const auto g_rl = boundary(solver, r, l, dg::Formulation::WeakInertial);
+      const auto counts = bc::detail::face_frame_counts();
+      CHECK(counts.curved_points == 2);
+      CHECK(counts.curved_solved != 1);
+      for (const size_t k :
+           {size_t{0}, size_t{2}, size_t{3}, size_t{4}, size_t{5}}) {
+        CAPTURE(k);
+        if (counts.curved_solved == 2) {
+          CHECK(gsl::at(g_lr, k) == -gsl::at(g_rl, k));
+        }
+      }
+      Correction minus_rl{};
+      for (size_t k = 0; k < minus_rl.size(); ++k) {
+        gsl::at(minus_rl, k) = -gsl::at(g_rl, k);
+      }
+      check_close(g_lr, minus_rl, 1.0e-13, name + " swap");
+    });
+  }
+}
 }  // namespace
 
 // [[TimeOut, 60]]
@@ -1231,4 +1327,5 @@ SPECTRE_TEST_CASE(
   test_kerr_schild_conservation(make_not_null(&gen), *eos);
   test_d2r_lapse_only(*eos);
   test_density_cutoff_and_forced_hll(make_not_null(&gen), *eos);
+  test_canonical_orientation(make_not_null(&gen), *eos);
 }
