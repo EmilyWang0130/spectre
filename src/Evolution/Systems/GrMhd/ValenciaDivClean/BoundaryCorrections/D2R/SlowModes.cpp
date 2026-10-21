@@ -90,27 +90,35 @@ PhysicalState physical_state(const State& primitive, const double bn,
 // has extra guard limbs, so equality of repeatedly computed midpoints alone is
 // not a reliable termination rule. No physical gap threshold is introduced.
 // The resource ceiling only identifies unsupported numerical arithmetic.
+//
+// An unresolved family bracket (both ends of one sign) is an expected outcome
+// on evolved faces (a few per cent of a jet's), so it is returned, not thrown
+// (2026-10-20): false, the root untouched. Every other failure still throws.
 template <typename Function>
-Real bracketed_root(const Function& function, Real left, Real right) {
+bool bracketed_root(const Function& function, Real left, Real right,
+                    Real* const root) {
   Real fleft = function(left);
   Real fright = function(right);
   if (not(finite(fleft) and finite(fright))) {
     throw std::runtime_error("nonfinite_quartic_endpoint");
   }
   if (fleft == 0) {
-    return left;
+    *root = left;
+    return true;
   }
   if (fright == 0) {
-    return right;
+    *root = right;
+    return true;
   }
   if ((fleft < 0) == (fright < 0)) {
-    throw std::runtime_error("quartic_family_bracket_unresolved");
+    return false;
   }
   for (size_t iteration = 0; iteration < 4096; ++iteration) {
     const Real scale = std::max(magnitude(left), magnitude(right));
     const Real width = right - left;
     if (width <= std::numeric_limits<Real>::epsilon() * scale) {
-      return magnitude(fleft) < magnitude(fright) ? left : right;
+      *root = magnitude(fleft) < magnitude(fright) ? left : right;
+      return true;
     }
     const Real middle = (left + right) / 2;
     if (not(middle > left and middle < right)) {
@@ -121,7 +129,8 @@ Real bracketed_root(const Function& function, Real left, Real right) {
       throw std::runtime_error("nonfinite_quartic_evaluation");
     }
     if (fmiddle == 0) {
-      return middle;
+      *root = middle;
+      return true;
     }
     if ((fmiddle < 0) == (fleft < 0)) {
       left = middle;
@@ -138,6 +147,9 @@ struct Spectrum {
   std::array<Real, 7> lambda{};
   std::array<Real, 7> gap{};
   bool exact_slow_alfven_collision = false;
+  // The expected unsupported outcomes, returned rather than thrown: null, or
+  // the status slow_action reports.
+  const char* failure = nullptr;
 };
 
 Spectrum physical_spectrum(const PhysicalState& state) {
@@ -184,13 +196,26 @@ Spectrum physical_spectrum(const PhysicalState& state) {
   // above handles its known collisions; other zero endpoint evaluations are
   // an explicit numerical support gap, without a fitted near-gap threshold.
   if (quartic(alfven_gap[0]) == 0 or quartic(alfven_gap[1]) == 0) {
-    throw std::runtime_error("nonparallel_quartic_boundary_root_unsupported");
+    result.failure = "nonparallel_quartic_boundary_root_unsupported";
+    return result;
   }
   const Real zero = 0;
-  result.gap = {bracketed_root(quartic, -1 - vn, alfven_gap[0]), alfven_gap[0],
-                bracketed_root(quartic, alfven_gap[0], zero),    zero,
-                bracketed_root(quartic, zero, alfven_gap[1]),    alfven_gap[1],
-                bracketed_root(quartic, alfven_gap[1], 1 - vn)};
+  // The four families in the order of the original braced list, stopping at
+  // the first unresolved bracket as the exception did.
+  const std::array<std::array<Real, 2>, 4> brackets{{{-1 - vn, alfven_gap[0]},
+                                                     {alfven_gap[0], zero},
+                                                     {zero, alfven_gap[1]},
+                                                     {alfven_gap[1], 1 - vn}}};
+  std::array<Real, 4> roots{};
+  for (size_t j = 0; j < 4; ++j) {
+    if (not bracketed_root(quartic, brackets[j][0], brackets[j][1],
+                           &roots[j])) {
+      result.failure = "quartic_family_bracket_unresolved";
+      return result;
+    }
+  }
+  result.gap = {roots[0], alfven_gap[0], roots[1], zero,
+                roots[2], alfven_gap[1], roots[3]};
   for (size_t k = 0; k < 7; ++k) {
     result.lambda[k] = vn + result.gap[k];
     if (not(result.lambda[k] > -1 and result.lambda[k] < 1 and
@@ -404,6 +429,11 @@ SlowAction slow_action(const State& primitive, const double bn,
       return result;
     }
     const Spectrum spectrum = physical_spectrum(state);
+    if (spectrum.failure != nullptr) {
+      result.supported = false;
+      result.status = spectrum.failure;
+      return result;
+    }
     const FilterWeights filter = family_weights(state, spectrum);
     result.normalization_bound_active = filter.bound_active;
     for (size_t k = 0; k < 7; ++k) {
