@@ -191,7 +191,12 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
     }
     candidate = refined.flux;
   }
-  const EntropyModel model(base.ul, base.ur, bn, gamma);
+  // Each recovery's root search starts from a nearby known root: the face
+  // primitives' for the two states, then the endpoints' roots for the midpoint
+  // and the capped states (2026-10-20; a start only seeds the search).
+  const EntropyModel model(base.ul, base.ur, bn, gamma,
+                           primitive_hint(left, gamma),
+                           primitive_hint(right, gamma));
   if (not model.supported) {
     result.status = model.reason;
     return result;
@@ -239,8 +244,12 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   }
   const auto& pl = model.left.recovery.primitive;
   const auto& pr = model.right.recovery.primitive;
+  const auto& left_roots = model.left.recovery.roots;
+  const auto& right_roots = model.right.recovery.roots;
+  const RootHint mid_roots{(left_roots.boundary + right_roots.boundary) / 2.,
+                           (left_roots.energy + right_roots.energy) / 2.};
   const auto reference =
-      reference_from_tau(base.ul, base.ur, pl, pr, bn, gamma);
+      reference_from_tau(base.ul, base.ur, pl, pr, bn, gamma, mid_roots);
   if (not reference.success) {
     return keep("reference_unsupported");
   }
@@ -260,7 +269,8 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   for (auto& x : shift) {
     x /= 2.;
   }
-  const auto input_cap = physical_ray_cap(base.ul, base.ur, shift, bn, gamma);
+  const auto input_cap = physical_ray_cap(base.ul, base.ur, shift, bn, gamma,
+                                          left_roots, right_roots);
   result.beta = input_cap.beta;
   if (not input_cap.success or input_cap.beta == 0.) {
     return keep("input_ray_baseline");

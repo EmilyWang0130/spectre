@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstddef>
+#include <limits>
 #include <string>
 
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/D2R/Types.hpp"
@@ -20,6 +21,15 @@ struct Admissibility {
   Real psi = 0;
 };
 
+// Starting points for the root searches of a recovery (2026-10-20): the
+// pressure-zero boundary and the energy root, in the unknown x = z - D, NaN
+// for none. They only seed the Newton iteration that bounds the bisection's
+// foregone decisions, so they change the cost of a recovery, never its result.
+struct RootHint {
+  double boundary = std::numeric_limits<double>::quiet_NaN();
+  double energy = std::numeric_limits<double>::quiet_NaN();
+};
+
 struct Recovery {
   bool success = false;
   std::string reason{};
@@ -34,6 +44,9 @@ struct Recovery {
   double reconstruction_error = 0.;
   double thermal_relative_error = 0.;
   Admissibility admissibility{};
+  // The two roots found (the boundary and the lower end of the final energy
+  // bracket), to seed the recoveries of nearby states.
+  RootHint roots{};
 };
 
 struct EntropyPair {
@@ -79,13 +92,20 @@ bool physical_primitive(const State& p, double bn, double gamma);
 State conserved_tau(const State& p, double bn, double gamma);
 State flux_tau(const State& p, double bn, double gamma);
 Admissibility admissibility(const State& u, double bn, double gamma);
-Recovery recover(const State& u, double bn, double gamma);
-EntropyPair entropy_pair(const State& u, double bn, double gamma);
+Recovery recover(const State& u, double bn, double gamma,
+                 const RootHint& hint = {});
+EntropyPair entropy_pair(const State& u, double bn, double gamma,
+                         const RootHint& hint = {});
+// The energy root of the state with these primitives, x = (rho + Gamma p /
+// (Gamma - 1)) W^2 - rho W: a start for recovering its conserved state.
+RootHint primitive_hint(const State& p, double gamma);
 Reference reference_from_tau(const State& ul, const State& ur,
                              const State& left, const State& right, double bn,
-                             double gamma);
+                             double gamma, const RootHint& hint = {});
 PhysicalCap physical_ray_cap(const State& ul, const State& ur,
-                             const State& shift, double bn, double gamma);
+                             const State& shift, double bn, double gamma,
+                             const RootHint& left_hint = {},
+                             const RootHint& right_hint = {});
 
 // Exact represented affine arithmetic, rounded once, ties to even. Return
 // false for nonfinite input/output. coefficient is its represented decimal
@@ -105,7 +125,8 @@ struct EntropyModel {
   Real dpsi = 0;
   Real h = 0;
 
-  EntropyModel(const State& ul, const State& ur, double bn, double gamma);
+  EntropyModel(const State& ul, const State& ur, double bn, double gamma,
+               const RootHint& left_hint = {}, const RootHint& right_hint = {});
   Real margin(const State& flux) const;
   Real tolerance(const State& flux) const;
   LineResult repair(const State& candidate) const;

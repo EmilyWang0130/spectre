@@ -363,7 +363,8 @@ Admissibility admissibility(const State& u, double bn, double gamma) {
   return out;
 }
 
-Recovery recover(const State& original, double bn, double gamma) {
+Recovery recover(const State& original, double bn, double gamma,
+                 const RootHint& hint) {
   Recovery out{};
   out.admissibility = admissibility(original, bn, gamma);
   if (!out.admissibility.admissible) {
@@ -428,11 +429,12 @@ Recovery recover(const State& original, double bn, double gamma) {
     Real low, high;
   };
 #ifdef D2R_MULTIPRECISION
-  const auto trusted_window = [](const Real& lower, const Real& upper,
-                                 const RootState& /*at_upper*/,
-                                 const bool /*energy*/) {
-    return Window{lower, upper};
-  };
+  const auto trusted_window =
+      [](const Real& lower, const Real& upper, const RootState& /*at_upper*/,
+         const bool /*energy*/, const double /*start*/) {
+        return Window{lower, upper};
+      };
+  static_cast<void>(hint);
 #else
   const double eps = std::numeric_limits<double>::epsilon();
   const double b_norm = std::sqrt(b2), m_norm = std::sqrt(dot(m, m));
@@ -490,14 +492,21 @@ Recovery recover(const State& original, double bn, double gamma) {
   };
   // The window for a bracket [lower, upper] whose upper end's state is known.
   // Only probes whose decision is safe narrow it, so a poor Newton iterate can
-  // cost evaluations but never a decision.
+  // cost evaluations but never a decision. Newton starts at `start` when it
+  // lies inside the bracket (a hint), else at the upper end.
   const auto trusted_window = [&](const double lower, const double upper,
-                                  const RootState& at_upper,
-                                  const bool energy) {
+                                  const RootState& at_upper, const bool energy,
+                                  const double start) {
     Window w{lower, upper};
     double below = lower, above = upper, x = upper, slope = 0., margin = 0.;
     bool located = false;
-    Local c = local(x, at_upper, energy);
+    Local c{};
+    if (lower < start && start < upper) {
+      x = start;
+      c = local(x, state(x), energy);
+    } else {
+      c = local(x, at_upper, energy);
+    }
     for (int k = 0; k < 64; ++k) {
       if (c.upper) {
         above = x;
@@ -572,7 +581,7 @@ Recovery recover(const State& original, double bn, double gamma) {
         return out;
       }
     }
-    const Window window = trusted_window(low, high, s, false);
+    const Window window = trusted_window(low, high, s, false, hint.boundary);
     while (true) {
       if (resolved(low, high)) {
         out.boundary_termination = "declared_decimal_precision";
@@ -620,7 +629,7 @@ Recovery recover(const State& original, double bn, double gamma) {
       return out;
     }
   }
-  const Window window = trusted_window(left, right, s, true);
+  const Window window = trusted_window(left, right, s, true, hint.energy);
   while (true) {
     if (resolved(left, right)) {
       out.energy_termination = "declared_decimal_precision";
@@ -644,6 +653,8 @@ Recovery recover(const State& original, double bn, double gamma) {
     right = upper ? mid : right;
     left = upper ? left : mid;
   }
+  out.roots.boundary = to_double(boundary);
+  out.roots.energy = to_double(left);
   bool found = false;
   Real best_error = 0;
   for (const Real& x : std::array<Real, 2>{left, right}) {
@@ -695,9 +706,21 @@ Recovery recover(const State& original, double bn, double gamma) {
   return out;
 }
 
-EntropyPair entropy_pair(const State& u, double bn, double gamma) {
+RootHint primitive_hint(const State& p, const double gamma) {
+  RootHint out{};
+  const double v2 = p[1] * p[1] + p[2] * p[2] + p[3] * p[3];
+  if (!(v2 < 1) || !(p[0] > 0) || !std::isfinite(p[4]))
+    return out;
+  const double w = 1 / std::sqrt(1 - v2);
+  out.energy = (p[0] + gamma / (gamma - 1) * p[4]) * w * w - p[0] * w;
+  out.boundary = out.energy;
+  return out;
+}
+
+EntropyPair entropy_pair(const State& u, double bn, double gamma,
+                         const RootHint& hint) {
   EntropyPair out{};
-  out.recovery = recover(u, bn, gamma);
+  out.recovery = recover(u, bn, gamma, hint);
   if (!out.recovery.success) {
     out.reason = out.recovery.reason;
     return out;
@@ -724,7 +747,7 @@ EntropyPair entropy_pair(const State& u, double bn, double gamma) {
 
 Reference reference_from_tau(const State& ul, const State& ur,
                              const State& left, const State& right, double bn,
-                             double gamma) {
+                             double gamma, const RootHint& hint) {
   Reference out{};
   if (!physical_primitive(left, bn, gamma) ||
       !physical_primitive(right, bn, gamma) || !finite(ul) || !finite(ur)) {
@@ -737,7 +760,7 @@ Reference reference_from_tau(const State& ul, const State& ur,
       out.reason = "midpoint_nonfinite";
       return out;
     }
-  const auto rec = recover(mid, bn, gamma);
+  const auto rec = recover(mid, bn, gamma, hint);
   if (!rec.success) {
     out.reason = "stored_tau_midpoint_" + rec.reason;
     return out;
@@ -775,7 +798,9 @@ Reference reference_from_tau(const State& ul, const State& ur,
 }
 
 PhysicalCap physical_ray_cap(const State& ul, const State& ur,
-                             const State& shift, double bn, double gamma) {
+                             const State& shift, double bn, double gamma,
+                             const RootHint& left_hint,
+                             const RootHint& right_hint) {
   PhysicalCap out{};
   out.left = ul;
   out.right = ur;
@@ -795,10 +820,10 @@ PhysicalCap physical_ray_cap(const State& ul, const State& ur,
           static_cast<double>(static_cast<long double>(ur[i]) - product);
     }
     ++out.evaluations;
-    left_recovery = recover(*left, bn, gamma);
+    left_recovery = recover(*left, bn, gamma, left_hint);
     if (!left_recovery.success)
       return false;
-    right_recovery = recover(*right, bn, gamma);
+    right_recovery = recover(*right, bn, gamma, right_hint);
     return right_recovery.success;
   };
   State l{}, r{};
@@ -866,9 +891,10 @@ bool causal_hll(State* out, const State& ul, const State& ur, const State& fl,
 }
 
 EntropyModel::EntropyModel(const State& ul, const State& ur, double bn,
-                           double gamma)
-    : left(entropy_pair(ul, bn, gamma)),
-      right(entropy_pair(ur, bn, gamma)),
+                           double gamma, const RootHint& left_hint,
+                           const RootHint& right_hint)
+    : left(entropy_pair(ul, bn, gamma, left_hint)),
+      right(entropy_pair(ur, bn, gamma, right_hint)),
       ul_(ul),
       ur_(ur) {
   supported = left.success && right.success;
