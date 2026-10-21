@@ -106,10 +106,23 @@ const double jump_floor = [] {
 
 FaceResult solve_face(const State& left, const State& right, const double bn,
                       const double gamma) {
-  // Serialize this first correctness embedding, including lazy PLUTO scratch
-  // allocation. Legacy PLUTO methods retain their existing threading contract.
+#ifdef D2R_MULTIPRECISION
+  // The 160-digit oracle stays serialized, as the first correctness embedding
+  // was: it is a test backend, and Boost's lazily initialized multiprecision
+  // constants have not been audited for concurrent first use.
   static std::mutex kernel_mutex;
   const std::lock_guard<std::mutex> guard(kernel_mutex);
+#endif
+  // The double kernel runs unlocked on every worker (2026-10-20). Its own
+  // state is per call (the memo is per batch, stats and diagnostics are
+  // thread_local, the switches are constants set before main). The C core it
+  // calls keeps its grid, contexts and every PLUTO scratch array in
+  // _Thread_local storage and initializes them on each thread's first call
+  // (spectre_d2r_core.c core_setup, hlld.c, d2r_hlld_fixed.c, arrays.c,
+  // hll_speed.c, mappers.c); the process globals that path still writes
+  // (g_maxMach, g_usedMemory, g_maxRootIter) are diagnostics nothing reads.
+  // That is the threading contract of the legacy PLUTO solvers, which call
+  // the same HLL_Speed/Magnetosonic/HLLD_Solver from every worker unlocked.
   FaceResult result;
   result.status = "invalid_primitive";
   if (not physical_primitive(left, bn, gamma) or
