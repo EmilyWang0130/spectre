@@ -9,6 +9,7 @@ set(LIBRARY_SOURCES
   BoundaryConditions/Test_DirichletAnalytic.cpp
   BoundaryConditions/Test_DemandOutgoingCharSpeeds.cpp
   BoundaryConditions/Test_HydroFreeOutflow.cpp
+  BoundaryConditions/Test_NozzleDirichletAnalytic.cpp
   BoundaryConditions/Test_Periodic.cpp
   BoundaryConditions/Test_Reflective.cpp
   BoundaryCorrections/Test_Hll.cpp
