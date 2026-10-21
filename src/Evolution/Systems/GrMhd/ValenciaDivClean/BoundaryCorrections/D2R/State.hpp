@@ -63,8 +63,6 @@ struct EntropyPair {
 
 struct Reference {
   bool success = false;
-  // A literal, or for an unsupported midpoint "stored_tau_midpoint_" + its
-  // recovery's reason in this thread's buffer (valid until the next such one).
   const char* reason = "";
   State primitive{};
   std::array<Real, 4> four_velocity{};
@@ -109,9 +107,15 @@ EntropyPair entropy_pair_from_primitive(const State& p, double bn,
 // The energy root of the state with these primitives, x = (rho + Gamma p /
 // (Gamma - 1)) W^2 - rho W: a start for recovering its conserved state.
 RootHint primitive_hint(const State& p, double gamma);
-Reference reference_from_tau(const State& ul, const State& ur,
-                             const State& left, const State& right, double bn,
-                             double gamma, const RootHint& hint = {});
+// The reference state of the slow modes (design D4, 2026-10-21): density and
+// pressure the averages of the face primitives left, right, the transverse
+// field the midpoint of the stored states ul, ur, the velocity from the
+// square-root-density weighted average of the four-velocities. (Originally
+// density and pressure were recovered from the stored midpoint (ul + ur) / 2;
+// the two differ at second order in the jump.)
+Reference reference_from_primitives(const State& ul, const State& ur,
+                                    const State& left, const State& right,
+                                    double bn, double gamma);
 PhysicalCap physical_ray_cap(const State& ul, const State& ur,
                              const State& shift, double bn, double gamma,
                              const RootHint& left_hint = {},

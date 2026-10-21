@@ -793,27 +793,28 @@ EntropyPair entropy_pair_from_primitive(const State& p, double bn,
   return out;
 }
 
-Reference reference_from_tau(const State& ul, const State& ur,
-                             const State& left, const State& right, double bn,
-                             double gamma, const RootHint& hint) {
+Reference reference_from_primitives(const State& ul, const State& ur,
+                                    const State& left, const State& right,
+                                    const double bn, const double gamma) {
   Reference out{};
   if (!physical_primitive(left, bn, gamma) ||
       !physical_primitive(right, bn, gamma) || !finite(ul) || !finite(ur)) {
     out.reason = "physical_primitive_endpoints_required";
     return out;
   }
-  State mid{};
-  for (std::size_t i = 0; i < 7; ++i)
-    if (!rounded_rational(&mid[i], (dyadic(ul[i]) + dyadic(ur[i])) / 2)) {
+  for (const std::size_t i : {std::size_t{0}, std::size_t{4}}) {
+    if (!rounded_rational(&out.primitive[i],
+                          (dyadic(left[i]) + dyadic(right[i])) / 2)) {
       out.reason = "midpoint_nonfinite";
       return out;
     }
-  const auto rec = recover(mid, bn, gamma, hint);
-  if (!rec.success) {
-    thread_local std::string buffer;
-    buffer = std::string("stored_tau_midpoint_") + rec.reason;
-    out.reason = buffer.c_str();
-    return out;
+  }
+  for (const std::size_t i : {std::size_t{5}, std::size_t{6}}) {
+    if (!rounded_rational(&out.primitive[i],
+                          (dyadic(ul[i]) + dyadic(ur[i])) / 2)) {
+      out.reason = "midpoint_nonfinite";
+      return out;
+    }
   }
   const auto l = parts(imported(left), bn), r = parts(imported(right), bn);
   const Real wl = sqrt(l.rho), wr = sqrt(r.rho), sum = wl + wr;
@@ -829,7 +830,6 @@ Reference reference_from_tau(const State& ul, const State& ur,
     return out;
   }
   out.four_velocity[0] = (wl * l.w + wr * r.w) / sum / sqrt(norm2);
-  out.primitive = rec.primitive;
   for (std::size_t i = 0; i < 3; ++i) {
     out.four_velocity[i + 1] =
         (wl * l.w * l.v[i] + wr * r.w * r.v[i]) / sum / sqrt(norm2);
@@ -839,8 +839,6 @@ Reference reference_from_tau(const State& ul, const State& ur,
       return out;
     }
   }
-  out.primitive[5] = mid[5];
-  out.primitive[6] = mid[6];
   out.success = physical_primitive(out.primitive, bn, gamma);
   out.reason =
       out.success ? "physical_reference" : "rounded_reference_unphysical";

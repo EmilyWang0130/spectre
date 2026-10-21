@@ -201,8 +201,8 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   // of the face's own primitives, whose encoding the conserved states are; the
   // original recovered them from ul, ur, which reproduces the primitives to
   // round-off at the cost of two recoveries. The response's first fixed-bound
-  // solve is then the refined solve itself. The recoveries of the midpoint and
-  // the capped states start from the face primitives' roots.
+  // solve is then the refined solve itself. The fallback recoveries of the
+  // capped states start from the face primitives' roots.
   const EntropyModel model(base.ul, base.ur, left, right, bn, gamma);
   if (not model.supported) {
     thread_local std::string composite;
@@ -255,10 +255,8 @@ FaceResult solve_face(const State& left, const State& right, const double bn,
   const auto& pr = model.right.recovery.primitive;
   const auto& left_roots = model.left.recovery.roots;
   const auto& right_roots = model.right.recovery.roots;
-  const RootHint mid_roots{(left_roots.boundary + right_roots.boundary) * 0.5,
-                           (left_roots.energy + right_roots.energy) * 0.5};
   const auto reference =
-      reference_from_tau(base.ul, base.ur, pl, pr, bn, gamma, mid_roots);
+      reference_from_primitives(base.ul, base.ur, pl, pr, bn, gamma);
   if (not reference.success) {
     return keep("reference_unsupported");
   }
