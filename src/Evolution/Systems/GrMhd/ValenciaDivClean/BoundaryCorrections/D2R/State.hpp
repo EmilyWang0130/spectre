@@ -150,7 +150,8 @@ struct EntropyModel {
   EntropyModel(const State& ul, const State& ur, double bn, double gamma,
                const RootHint& left_hint = {}, const RootHint& right_hint = {});
   // The model of the conserved states ul, ur with the entropy variables of
-  // their primitives, given (design D1).
+  // their primitives, given (design D1); a state whose encoding does not
+  // resolve its thermal energy is recovered as before (design D1b).
   EntropyModel(const State& ul, const State& ur, const State& left_primitive,
                const State& right_primitive, double bn, double gamma);
   Real margin(const State& flux) const;
