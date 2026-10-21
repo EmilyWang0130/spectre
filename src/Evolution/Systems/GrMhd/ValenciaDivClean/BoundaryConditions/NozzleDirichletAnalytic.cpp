@@ -453,8 +453,9 @@ void NozzleDirichletAnalytic::fd_ghost(
               .get(normal_dimension);
       Index<3> ghost_extents = subcell_extents;
       ghost_extents[normal_dimension] = ghost_zone_size;
-      Variables<tmpl::list<NormalMomentum>> ghost_slices{number_of_face_points *
-                                                         ghost_zone_size};
+      // add_slice_to_data adds into the buffer, so it must start at zero.
+      Variables<tmpl::list<NormalMomentum>> ghost_slices{
+          number_of_face_points * ghost_zone_size, 0.0};
       for (size_t ghost_index = 0; ghost_index < ghost_zone_size;
            ++ghost_index) {
         add_slice_to_data(make_not_null(&ghost_slices), boundary_slice,
