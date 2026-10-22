@@ -19,9 +19,11 @@
 
 #include "DataStructures/DataVector.hpp"
 #include "DataStructures/Tags/TempTensor.hpp"
+#include "DataStructures/Tensor/EagerMath/Determinant.hpp"
 #include "DataStructures/Tensor/EagerMath/DotProduct.hpp"
 #include "DataStructures/Tensor/EagerMath/Magnitude.hpp"
 #include "DataStructures/Tensor/Tensor.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/PlutoFaceFrame.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/pluto/pluto_hlld_shim.h"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/Characteristics.hpp"
 #include "NumericalAlgorithms/DiscontinuousGalerkin/Formulation.hpp"
@@ -94,6 +96,11 @@ double PlutoHlld::dg_package_data(
     const gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
         packaged_interface_unit_normal,
     const gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
+    const gsl::not_null<Scalar<DataVector>*> packaged_interface_lapse,
+    const gsl::not_null<Scalar<DataVector>*>
+        packaged_interface_shift_dot_normal,
+    const gsl::not_null<tnsr::ii<DataVector, 3, Frame::Inertial>*>
+        packaged_interface_spatial_metric,
     const gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
     const gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
         packaged_spatial_velocity,
@@ -117,6 +124,7 @@ double PlutoHlld::dg_package_data(
     const Scalar<DataVector>& lapse,
     const tnsr::I<DataVector, 3, Frame::Inertial>& shift,
     const tnsr::i<DataVector, 3, Frame::Inertial>& spatial_velocity_one_form,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
 
     const Scalar<DataVector>& rest_mass_density,
     const Scalar<DataVector>& electron_fraction,
@@ -215,10 +223,31 @@ double PlutoHlld::dg_package_data(
   // relativistic M&M tests, nonzero otherwise (where we fall back to HLL).
   // We deliberately do NOT use sqrt(det gamma)=TildeD/(rho W): at reconstructed
   // FD faces TildeD and rho,W are reconstructed independently so that ratio is
-  // not 1 even in flat space. A curved spatial metric with lapse=1, shift=0 is
-  // not a target regime and is not separately guarded here.
+  // not 1 even in flat space. Since the GR face frame (PlutoFaceFrame.hpp) the
+  // spatial metric and the mesh motion count too: both add exact zeros on a
+  // static Minkowski face, so the flat path is selected exactly as before,
+  // and every other face is solved in the face frame.
   get(*packaged_metric_flatness) = abs(get(lapse) - 1.0) + abs(get<0>(shift)) +
                                    abs(get<1>(shift)) + abs(get<2>(shift));
+  for (size_t i = 0; i < 3; ++i) {
+    for (size_t j = i; j < 3; ++j) {
+      get(*packaged_metric_flatness) +=
+          abs(spatial_metric.get(i, j) - (i == j ? 1.0 : 0.0));
+    }
+  }
+  if (normal_dot_mesh_velocity.has_value()) {
+    get(*packaged_metric_flatness) += abs(get(*normal_dot_mesh_velocity));
+  }
+  // This side's geometry for the face frame. The normal shift carries the
+  // mesh velocity: the face moves through the normal observer's frame at
+  // (beta^n + n.v_g)/alpha, because the fluxes reaching dg_package_data are
+  // already shifted by -v_g U.
+  *packaged_interface_lapse = lapse;
+  dot_product(packaged_interface_shift_dot_normal, shift, normal_covector);
+  if (normal_dot_mesh_velocity.has_value()) {
+    get(*packaged_interface_shift_dot_normal) += get(*normal_dot_mesh_velocity);
+  }
+  *packaged_interface_spatial_metric = spatial_metric;
   *packaged_rest_mass_density = rest_mass_density;
   *packaged_spatial_velocity = spatial_velocity;
   *packaged_pressure = pressure;
@@ -282,11 +311,10 @@ double PlutoHlld::dg_package_data(
   // roots, so the entire quartic solve was dead work.
   *packaged_fast_outgoing_char_speed = *packaged_largest_outgoing_char_speed;
   *packaged_fast_ingoing_char_speed = *packaged_largest_ingoing_char_speed;
-  // The flat-space decomposition (and the identity metric used below) only
-  // holds where the background is flat; elsewhere the fast bounds stay at the
-  // light speed and the scheme is the standard HLL flux. A face is either
-  // all-flat or all-curved for the uniform backgrounds this is used on, so
-  // test the whole face at once.
+  // A flat face keeps exactly the computation it always had (the identity
+  // metric, TildeB = B); any other face computes the same per-side speeds
+  // with its own metric, below. A face with flat and curved points takes the
+  // second branch, which gives its flat points the same speeds.
   if (max(get(*packaged_metric_flatness)) <= 1.0e-12) {
     const ScopedFpeState fpe(false);
     const size_t num_points = get(rest_mass_density).size();
@@ -321,6 +349,48 @@ double PlutoHlld::dg_package_data(
             get(*packaged_largest_ingoing_char_speed)[pt];
       }
     }
+  } else {
+    // The GR face frame: the same per-side fast-magnetosonic speeds with this
+    // side's metric, lapse and shift (characteristic_speeds_approximate_mhd
+    // returns alpha lambda_hat - beta^n) and the undensitized field
+    // B^i = TildeB^i / sqrt(gamma). They serve the MHD part of the HLL
+    // baseline only -- D, Ye, Tau, S and the tangential field, as on a flat
+    // face; the GLM pair (Phi, B_n) keeps the Largest (light-cone) speeds.
+    // Points where they come out non-finite or inverted (incoming above
+    // outgoing, which inadmissible states such as v^2 c_s^2 > 1 produce) keep
+    // the Largest speeds: with inverted bounds both clamped HLL bounds can
+    // vanish, and the clamped formula is then not weak/strong consistent.
+    const ScopedFpeState fpe(false);
+    const size_t num_points = get(rest_mass_density).size();
+    const Scalar<DataVector> specific_enthalpy =
+        hydro::relativistic_specific_enthalpy(
+            rest_mass_density, specific_internal_energy, pressure);
+    const DataVector sqrt_det_spatial_metric =
+        sqrt(get(determinant(spatial_metric)));
+    tnsr::I<DataVector, 3, Frame::Inertial> magnetic_field = tilde_b;
+    for (size_t i = 0; i < 3; ++i) {
+      magnetic_field.get(i) /= sqrt_det_spatial_metric;
+    }
+    std::array<DataVector, 9> fast_speeds{};
+    characteristic_speeds_approximate_mhd(
+        make_not_null(&fast_speeds), rest_mass_density, electron_fraction,
+        specific_internal_energy, specific_enthalpy, spatial_velocity,
+        lorentz_factor, magnetic_field, lapse, shift, spatial_metric,
+        normal_covector, equation_of_state);
+    for (size_t pt = 0; pt < num_points; ++pt) {
+      double outgoing = fast_speeds[7][pt];
+      double ingoing = fast_speeds[1][pt];
+      if (normal_dot_mesh_velocity.has_value()) {
+        outgoing -= get(*normal_dot_mesh_velocity)[pt];
+        ingoing -= get(*normal_dot_mesh_velocity)[pt];
+      }
+      if (get(rest_mass_density)[pt] > light_speed_density_cutoff_ and
+          std::isfinite(outgoing) and std::isfinite(ingoing) and
+          ingoing <= outgoing) {
+        get(*packaged_fast_outgoing_char_speed)[pt] = outgoing;
+        get(*packaged_fast_ingoing_char_speed)[pt] = ingoing;
+      }
+    }
   }
 
   normal_dot_flux(packaged_normal_dot_flux_tilde_d, normal_covector,
@@ -344,6 +414,7 @@ double PlutoHlld::dg_package_data(
 namespace detail {
 void pluto_dg_boundary_terms(
     const PlutoFluxFunction pluto_solver,
+    const PlutoMovingFaceFluxFunction moving_face_solver,
     const gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
     const gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
     const gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_tau,
@@ -370,6 +441,10 @@ void pluto_dg_boundary_terms(
     const Scalar<DataVector>& fast_ingoing_char_speed_int,
     const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
     const Scalar<DataVector>& metric_flatness_int,
+    const Scalar<DataVector>& interface_lapse_int,
+    const Scalar<DataVector>& interface_shift_dot_normal_int,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>&
+        interface_spatial_metric_int,
     const Scalar<DataVector>& rest_mass_density_int,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
     const Scalar<DataVector>& pressure_int,
@@ -391,15 +466,21 @@ void pluto_dg_boundary_terms(
     const Scalar<DataVector>& largest_ingoing_char_speed_ext,
     const Scalar<DataVector>& fast_outgoing_char_speed_ext,
     const Scalar<DataVector>& fast_ingoing_char_speed_ext,
-    const tnsr::i<DataVector, 3, Frame::Inertial>& /*iface_normal_ext*/,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& iface_normal_ext,
     const Scalar<DataVector>& metric_flatness_ext,
+    const Scalar<DataVector>& interface_lapse_ext,
+    const Scalar<DataVector>& interface_shift_dot_normal_ext,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>&
+        interface_spatial_metric_ext,
     const Scalar<DataVector>& rest_mass_density_ext,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
     const Scalar<DataVector>& pressure_ext,
     const Scalar<DataVector>& /*lorentz_factor_ext*/,
-    const Scalar<DataVector>& /*specific_internal_energy_ext*/,
-    const dg::Formulation dg_formulation, const bool force_common_normal_field,
-    const bool force_glm_energy_pair, const bool force_mass_consistent_ye) {
+    const Scalar<DataVector>& specific_internal_energy_ext,
+    const dg::Formulation dg_formulation,
+    const double light_speed_density_cutoff,
+    const bool force_common_normal_field, const bool force_glm_energy_pair,
+    const bool force_mass_consistent_ye) {
   const size_t num_points = get(tilde_d_int).size();
   const bool weak = dg_formulation == dg::Formulation::WeakInertial;
 
@@ -448,10 +529,82 @@ void pluto_dg_boundary_terms(
                                   -get(fast_ingoing_char_speed_ext));
   const DataVector fast_min = min(0.0, get(fast_ingoing_char_speed_int),
                                   -get(fast_outgoing_char_speed_ext));
-  // The B-field normal/tangential split below treats n as both covector and
-  // raised vector, which holds only in flat space.
-  const bool flat_face = max(get(metric_flatness_int)) <= 1.0e-12 and
-                         max(get(metric_flatness_ext)) <= 1.0e-12;
+  // Each point takes one of three paths. FLAT (both sides' flatness within
+  // 1e-12): the special-relativistic fan exactly as before the GR face frame.
+  // CURVED (finite flatness): the fan solved in the face frame
+  // (PlutoFaceFrame.hpp) and sampled on the ray of the moving face; where the
+  // frame cannot be built the point keeps the HLL baseline. UNSUPPORTED
+  // (infinite flatness, PlutoD2R's gate): the HLL baseline only.
+  enum class PointPath : char { Flat, Curved, Unsupported };
+  std::vector<PointPath> path(num_points, PointPath::Flat);
+  std::vector<std::optional<FaceFrame>> frames(num_points);
+  FaceFrameCounts tally{};
+  tally.calls = 1;
+  // A curved point keeps the HLL flux wherever a side's density is at or below
+  // LightSpeedDensityCutoff, whose bounds dg_package_data set to the light
+  // speeds there: Hll's and HllcGr's treatment of an atmosphere. With the
+  // kernels' own cold-gas speeds instead, a static TOV star's surface cells
+  // next to the atmosphere grew over 100 M (tov/run46_gr_tetrad_null). Flat
+  // points keep the kernels everywhere, as before the GR face frame.
+  const auto below_density_cutoff = [&](const size_t pt) {
+    return get(rest_mass_density_int)[pt] <= light_speed_density_cutoff or
+           get(rest_mass_density_ext)[pt] <= light_speed_density_cutoff;
+  };
+  // SPECTRE_PLUTO_FORCE_HLL=1 keeps the HLL flux at every point, flat or
+  // curved -- the fast bounds for the MHD variables, the light cone for the
+  // GLM pair: the HLLE arm of a solver comparison. Read on every call (one
+  // lookup per face), so that a test can set it.
+  const bool force_hll = [] {
+    const char* e = std::getenv("SPECTRE_PLUTO_FORCE_HLL");
+    return e != nullptr and std::atoi(e) != 0;
+  }();
+  const auto symmetric_components =
+      [](const tnsr::ii<DataVector, 3, Frame::Inertial>& metric,
+         const size_t pt) {
+        return std::array<double, 6>{
+            {get<0, 0>(metric)[pt], get<0, 1>(metric)[pt],
+             get<0, 2>(metric)[pt], get<1, 1>(metric)[pt],
+             get<1, 2>(metric)[pt], get<2, 2>(metric)[pt]}};
+      };
+  const auto covector_at = [](const tnsr::i<DataVector, 3, Frame::Inertial>& v,
+                              const size_t pt) {
+    return std::array<double, 3>{{get<0>(v)[pt], get<1>(v)[pt], get<2>(v)[pt]}};
+  };
+  for (size_t pt = 0; pt < num_points; ++pt) {
+    const double flatness_int = get(metric_flatness_int)[pt];
+    const double flatness_ext = get(metric_flatness_ext)[pt];
+    if (flatness_int <= 1.0e-12 and flatness_ext <= 1.0e-12) {
+      ++tally.flat_points;
+    } else if (not(std::isfinite(flatness_int) and
+                   std::isfinite(flatness_ext))) {
+      path[pt] = PointPath::Unsupported;
+      ++tally.unsupported_points;
+    } else {
+      path[pt] = PointPath::Curved;
+      ++tally.curved_points;
+      frames[pt] = make_face_frame(
+          get(interface_lapse_int)[pt], get(interface_lapse_ext)[pt],
+          get(interface_shift_dot_normal_int)[pt],
+          get(interface_shift_dot_normal_ext)[pt],
+          symmetric_components(interface_spatial_metric_int, pt),
+          symmetric_components(interface_spatial_metric_ext, pt),
+          covector_at(interface_unit_normal_int, pt),
+          covector_at(iface_normal_ext, pt));
+      if (not frames[pt].has_value()) {
+        ++tally.fallback_frame;
+      }
+    }
+  }
+
+  // A curved face is solved in its canonical orientation, the one whose unit
+  // normal covector is lexicographically positive (see the curved batch
+  // below); `true` when the element's own outward normal is the other one.
+  const auto canonical_flip = [](const FaceFrame& frame) {
+    const auto& n_lo = frame.duals[0];
+    return n_lo[0] < 0.0 or
+           (n_lo[0] == 0.0 and
+            (n_lo[1] < 0.0 or (n_lo[1] == 0.0 and n_lo[2] < 0.0)));
+  };
 
   // HLL flux for one component given explicit bounds.
   const auto hll_with = [&weak, &num_points](
@@ -512,9 +665,11 @@ void pluto_dg_boundary_terms(
   // Magnetic field: the NORMAL component belongs to the GLM subsystem (light
   // speed), the TANGENTIAL component is MHD (fast bounds). Split along the
   // interface normal, use the appropriate bounds for each part, and recombine
-  // G(B^i) = G(B_n) n^i + G(B_t^i). The decomposition treats n as both covector
-  // and raised vector, which holds only in flat space, so on a curved face we
-  // keep the plain light-speed HLL flux (which stays conservative).
+  // G(B^i) = G(B_n) n^i + G(B_t^i). The decomposition below treats n as both
+  // covector and raised vector, which holds only in flat space; curved points
+  // with a face frame are redone after this block with the frame's normal
+  // covector (projection) and vector (recombination), and the other non-flat
+  // points keep the plain light-speed HLL flux (which stays conservative).
   {
     const auto& n = interface_unit_normal_int;
     DataVector bn_int{num_points, 0.0};
@@ -574,9 +729,375 @@ void pluto_dg_boundary_terms(
                    normal_dot_flux_tilde_b_ext.get(i));
       for (size_t pt = 0; pt < num_points; ++pt) {
         boundary_correction_tilde_b->get(i)[pt] =
-            flat_face ? g_split[pt] : g_plain[pt];
+            path[pt] == PointPath::Flat ? g_split[pt] : g_plain[pt];
       }
     }
+  }
+
+  // The GLM pair and the field split at the curved points with a face frame.
+  // The pair (Phi, B_n) keeps the light-cone bounds -- the Largest speeds,
+  // +/-alpha - beta^n - n.v_g, as on a flat face -- and the tangential field
+  // the fast bounds. In coordinates the HLL state is the normal observer's
+  // HLL state and the HLL flux maps by F = alpha F_hat - beta^n U, so this
+  // coordinate-frame HLL is the light-speed fan sampled on the ray of the
+  // moving face. Two quantities need more care than on a flat face:
+  //  * the common normal field handed to the MHD solver is the GLM fan's state
+  //    ON THE FACE'S RAY: its MIDDLE state (bounds not clamped to include 0)
+  //    while the face is inside the light cone -- the MHD fan lies inside it,
+  //    where B_n = B_n* -- and the upwind side's own B_n outside it
+  //    (|w| >= 1, inside a horizon), where the face takes the upwind state of
+  //    the whole fan and the MHD solver must see that state unchanged. (On a
+  //    flat face the light bounds are never clamped and the face is always
+  //    inside the cone, so this is the flat path's middle state.)
+  //  * the cleaning part of the normal-field flux, alpha Phi_sel (densitized),
+  //    for the energy pairing: the normal-field flux is
+  //    sqrt(gamma) (alpha Phi - beta^n B_n), and its -beta^n B_n part is the
+  //    common translation every variable gets, not cleaning.
+  DataVector glm_phi_sel{num_points, 0.0};
+  for (size_t pt = 0; pt < num_points; ++pt) {
+    if (not frames[pt].has_value()) {
+      continue;
+    }
+    const FaceFrame& frame = *frames[pt];
+    const auto& n_lo = frame.duals[0];
+    const auto& n_up = frame.legs[0];
+    double bn_i = 0.0, bn_e = 0.0, nfbn_i = 0.0, nfbn_e = 0.0;
+    for (size_t i = 0; i < 3; ++i) {
+      bn_i += n_lo[i] * tilde_b_int.get(i)[pt];
+      bn_e += n_lo[i] * tilde_b_ext.get(i)[pt];
+      nfbn_i += n_lo[i] * normal_dot_flux_tilde_b_int.get(i)[pt];
+      nfbn_e += n_lo[i] * normal_dot_flux_tilde_b_ext.get(i)[pt];
+    }
+    const double l_max = lambda_max[pt];
+    const double l_min = lambda_min[pt];
+    const double dl = std::max(l_max - l_min, 1.0e-30);
+    const auto hll_point = [&dl, &weak](const double lp, const double lm,
+                                        const double u_i, const double nf_i,
+                                        const double u_e, const double nf_e) {
+      if (weak) {
+        return (lp * nf_i + lm * nf_e + lp * lm * (u_e - u_i)) / dl;
+      }
+      return (lm * (nf_i + nf_e) + lp * lm * (u_e - u_i)) / dl;
+    };
+    const double g_bn = hll_point(l_max, l_min, bn_i, nfbn_i, bn_e, nfbn_e);
+    glm_normal_b_flux[pt] =
+        (l_max * nfbn_i + l_min * nfbn_e + l_max * l_min * (bn_e - bn_i)) / dl;
+    // The unclamped light cone and the GLM fan's states on it, in the face's
+    // canonical orientation (left = the side behind the canonical normal; see
+    // the curved batch below): the two elements sharing the face evaluate the
+    // same expressions on the same numbers, so the common normal field the
+    // MHD solver gets is the same bit for bit from either side.
+    const bool flip = canonical_flip(frame);
+    const double bn_left = flip ? -bn_e : bn_i;
+    const double bn_right = flip ? -bn_i : bn_e;
+    const double nfbn_left = flip ? -nfbn_e : nfbn_i;
+    const double nfbn_right = flip ? -nfbn_i : nfbn_e;
+    const double phi_left = get(flip ? tilde_phi_ext : tilde_phi_int)[pt];
+    const double phi_right = get(flip ? tilde_phi_int : tilde_phi_ext)[pt];
+    const double nfphi_left = get(flip ? normal_dot_flux_tilde_phi_ext
+                                       : normal_dot_flux_tilde_phi_int)[pt];
+    const double nfphi_right = get(flip ? normal_dot_flux_tilde_phi_int
+                                        : normal_dot_flux_tilde_phi_ext)[pt];
+    const double cone_max =
+        flip ? std::max(get(largest_outgoing_char_speed_ext)[pt],
+                        -get(largest_ingoing_char_speed_int)[pt])
+             : std::max(get(largest_outgoing_char_speed_int)[pt],
+                        -get(largest_ingoing_char_speed_ext)[pt]);
+    const double cone_min =
+        flip ? std::min(get(largest_ingoing_char_speed_ext)[pt],
+                        -get(largest_outgoing_char_speed_int)[pt])
+             : std::min(get(largest_ingoing_char_speed_int)[pt],
+                        -get(largest_outgoing_char_speed_ext)[pt]);
+    const double cone_width = std::max(cone_max - cone_min, 1.0e-30);
+    const double bn_middle =
+        (cone_max * bn_right - cone_min * bn_left + nfbn_left + nfbn_right) /
+        cone_width;
+    const double bn_on_ray = cone_min >= 0.0   ? bn_left
+                             : cone_max <= 0.0 ? bn_right
+                                               : bn_middle;
+    glm_normal_b_star[pt] = flip ? -bn_on_ray : bn_on_ray;
+    const double phi_star = (cone_max * phi_right - cone_min * phi_left +
+                             nfphi_left + nfphi_right) /
+                            cone_width;
+    const double phi_on_ray = cone_min >= 0.0   ? phi_left
+                              : cone_max <= 0.0 ? phi_right
+                                                : phi_star;
+    glm_phi_sel[pt] = frame.lapse * phi_on_ray;
+    for (size_t i = 0; i < 3; ++i) {
+      const double bt_i = tilde_b_int.get(i)[pt] - bn_i * n_up[i];
+      const double bt_e = tilde_b_ext.get(i)[pt] - bn_e * n_up[i];
+      const double nfbt_i =
+          normal_dot_flux_tilde_b_int.get(i)[pt] - nfbn_i * n_up[i];
+      const double nfbt_e =
+          normal_dot_flux_tilde_b_ext.get(i)[pt] - nfbn_e * n_up[i];
+      const double dl_fast = std::max(fast_max[pt] - fast_min[pt], 1.0e-30);
+      const double g_bt =
+          (weak ? (fast_max[pt] * nfbt_i + fast_min[pt] * nfbt_e +
+                   fast_max[pt] * fast_min[pt] * (bt_e - bt_i))
+                : (fast_min[pt] * (nfbt_i + nfbt_e) +
+                   fast_max[pt] * fast_min[pt] * (bt_e - bt_i))) /
+          dl_fast;
+      boundary_correction_tilde_b->get(i)[pt] = g_bn * n_up[i] + g_bt;
+    }
+  }
+
+  // --- The curved points: the fan in the face frame --------------------------
+  // (HLLx campaign, gr_tetrad_adapter.md.) The states are the packaged
+  // primitives in the frame's triad, undensitized, with the GLM state on the
+  // face's ray as the common normal field. The solver samples its fan on the
+  // ray of the moving face, w = frame.face_speed, and returns the flux through
+  // the moving face in the triad, f, with the normal total pressure P apart;
+  // then
+  //   G(D)   = alpha sqrt(gamma) f[RHO],   G(Tau) = alpha sqrt(gamma) f[ENG],
+  //   G(S_j) = alpha sqrt(gamma) [(f[MX1] + P) n_j + f[MX2] e^(1)_j
+  //                               + f[MX3] e^(2)_j]                (covectors)
+  //   G(B^j) = G_GLM(B_n) n^j
+  //            + alpha sqrt(gamma) [f[BX2] e_(1)^j + f[BX3] e_(2)^j] (vectors).
+  // Everything here runs before the flat batch so that the latter keeps its
+  // early return exactly as it always had.
+  //
+  // Each face is solved in its canonical orientation: the one whose unit
+  // normal covector is lexicographically positive, with the side behind it as
+  // the solver's left state. The two elements sharing a face then hand the
+  // solver the same problem bit for bit (the swapped face's frame is this
+  // one's rotated by pi about e_(1), which the canonical frame undoes), and
+  // the element facing the other way takes the flux with the opposite sign.
+  // The face flux is exactly antisymmetric under the int <-> ext swap --
+  // discrete conservation -- whatever the solver's own symmetry: hllc_kb.c and
+  // hllx.c iterate, and a mirrored iteration need not take the same branch.
+  {
+    const ScopedFpeState curved_fpe_scope(false);
+    std::vector<size_t> curved_index;
+    std::vector<double> curved_vl, curved_vr, curved_speed, curved_gamma;
+    std::vector<FaceFrame> curved_frame;
+    std::vector<double> curved_sign;
+    for (size_t pt = 0; pt < num_points; ++pt) {
+      if (not frames[pt].has_value()) {
+        continue;
+      }
+      const FaceFrame& frame = *frames[pt];
+      if (force_hll) {
+        ++tally.forced_hll;
+        continue;
+      }
+      // Both sides are checked, and the adiabatic index is the two sides'
+      // mean, so that swapping interior and exterior gives the mirror image
+      // of the same problem (conservation across the face). On a flat face
+      // the interior's index is used as before; for an ideal gas the two
+      // agree to round-off at FD faces.
+      const double rho_i = get(rest_mass_density_int)[pt];
+      const double eps_i = get(specific_internal_energy_int)[pt];
+      const double p_i = get(pressure_int)[pt];
+      const double rho_e = get(rest_mass_density_ext)[pt];
+      const double eps_e = get(specific_internal_energy_ext)[pt];
+      const double p_e = get(pressure_ext)[pt];
+      if (not(rho_i > 0.0 and eps_i > 0.0 and p_i > 0.0 and rho_e > 0.0 and
+              eps_e > 0.0 and p_e > 0.0)) {
+        ++tally.fallback_state;
+        continue;  // keep HLL where the ideal-gas relation is undefined
+      }
+      if (below_density_cutoff(pt)) {
+        ++tally.density_cutoff;
+        continue;  // keep the light-speed HLL flux
+      }
+      if (moving_face_solver == nullptr and frame.face_speed != 0.0) {
+        ++tally.fallback_ray;
+        continue;  // a ray-0 kernel cannot sample a moving face
+      }
+      const bool flip = canonical_flip(frame);
+      FaceFrame canonical = frame;
+      if (flip) {
+        for (const size_t a : {size_t{0}, size_t{2}}) {
+          for (size_t i = 0; i < 3; ++i) {
+            canonical.legs[a][i] = -frame.legs[a][i];
+            canonical.duals[a][i] = -frame.duals[a][i];
+          }
+        }
+        canonical.shift_dot_normal = -frame.shift_dot_normal;
+        canonical.face_speed = -frame.face_speed;
+      }
+      const double sign = flip ? -1.0 : 1.0;
+      const double inv_sqrt_det = 1.0 / frame.sqrt_det_spatial_metric;
+      const double common_normal_field =
+          sign * glm_normal_b_star[pt] * inv_sqrt_det;
+      const auto push = [&](std::vector<double>* out,
+                            const Scalar<DataVector>& rho,
+                            const tnsr::I<DataVector, 3, Frame::Inertial>& vel,
+                            const tnsr::I<DataVector, 3, Frame::Inertial>& bt,
+                            const Scalar<DataVector>& press) {
+        const auto v = canonical.components(
+            {{get<0>(vel)[pt], get<1>(vel)[pt], get<2>(vel)[pt]}});
+        const auto b = canonical.components(
+            {{get<0>(bt)[pt] * inv_sqrt_det, get<1>(bt)[pt] * inv_sqrt_det,
+              get<2>(bt)[pt] * inv_sqrt_det}});
+        out->push_back(get(rho)[pt]);
+        out->push_back(v[0]);
+        out->push_back(v[1]);
+        out->push_back(v[2]);
+        out->push_back(common_normal_field);
+        out->push_back(b[1]);
+        out->push_back(b[2]);
+        out->push_back(get(press)[pt]);
+      };
+      if (flip) {
+        push(&curved_vl, rest_mass_density_ext, spatial_velocity_ext,
+             tilde_b_ext, pressure_ext);
+        push(&curved_vr, rest_mass_density_int, spatial_velocity_int,
+             tilde_b_int, pressure_int);
+      } else {
+        push(&curved_vl, rest_mass_density_int, spatial_velocity_int,
+             tilde_b_int, pressure_int);
+        push(&curved_vr, rest_mass_density_ext, spatial_velocity_ext,
+             tilde_b_ext, pressure_ext);
+      }
+      curved_index.push_back(pt);
+      curved_speed.push_back(canonical.face_speed);
+      curved_gamma.push_back(
+          1.0 + 0.5 * (p_i / (rho_i * eps_i) + p_e / (rho_e * eps_e)));
+      curved_frame.push_back(canonical);
+      curved_sign.push_back(sign);
+    }
+
+    if (not curved_index.empty()) {
+      const size_t n_solve = curved_index.size();
+      std::vector<double> flux(8 * n_solve, 0.0);
+      std::vector<double> press(n_solve, 0.0);
+      const double gamma_min =
+          *std::min_element(curved_gamma.begin(), curved_gamma.end());
+      const double gamma_max =
+          *std::max_element(curved_gamma.begin(), curved_gamma.end());
+      const bool uniform_gamma =
+          gamma_max - gamma_min <= 1.0e-12 * std::max(1.0, gamma_max);
+      const auto solve = [&](const size_t offset, const size_t count,
+                             const double gamma) {
+        if (moving_face_solver != nullptr) {
+          moving_face_solver(static_cast<int>(count),
+                             curved_vl.data() + 8 * offset,
+                             curved_vr.data() + 8 * offset, gamma,
+                             curved_speed.data() + offset,
+                             flux.data() + 8 * offset, press.data() + offset);
+        } else {
+          pluto_solver(static_cast<int>(count), curved_vl.data() + 8 * offset,
+                       curved_vr.data() + 8 * offset, gamma,
+                       flux.data() + 8 * offset, press.data() + offset);
+        }
+      };
+      if (uniform_gamma) {
+        solve(0, n_solve, gamma_min);
+      } else {
+        for (size_t k = 0; k < n_solve; ++k) {
+          solve(k, 1, curved_gamma[k]);
+        }
+      }
+
+      for (size_t k = 0; k < n_solve; ++k) {
+        const double* f = flux.data() + 8 * k;
+        bool all_finite = std::isfinite(press[k]);
+        for (size_t q = 0; q < 8; ++q) {
+          all_finite = all_finite and std::isfinite(f[q]);
+        }
+        if (not all_finite) {
+          ++tally.fallback_solver;
+          continue;  // keep HLL if PLUTO returned a non-finite result
+        }
+        const size_t pt = curved_index[k];
+        const FaceFrame& frame = *frames[pt];
+        // The solver's flux is along the canonical normal, the element's along
+        // its own outward normal: the sign carries one to the other, and the
+        // canonical frame maps the triad components back.
+        const FaceFrame& canonical = curved_frame[k];
+        const double scale =
+            curved_sign[k] * frame.lapse * frame.sqrt_det_spatial_metric;
+        const double g_d = scale * f[0];
+        double g_ye = 0.0;
+        if (force_mass_consistent_ye) {
+          // As on a flat face: the upwind concentration with the accepted mass
+          // flux, upwind by the sign of the coordinate mass flux.
+          const double upwind_d =
+              g_d >= 0.0 ? get(tilde_d_int)[pt] : get(tilde_d_ext)[pt];
+          const double upwind_dye =
+              g_d >= 0.0 ? get(tilde_ye_int)[pt] : get(tilde_ye_ext)[pt];
+          if (not std::isfinite(upwind_d) or upwind_d <= 0.0 or
+              not std::isfinite(upwind_dye)) {
+            ++tally.fallback_solver;
+            continue;  // retain the complete HLL baseline
+          }
+          g_ye = upwind_dye / upwind_d * g_d;
+          if (not std::isfinite(g_ye)) {
+            ++tally.fallback_solver;
+            continue;
+          }
+        }
+        const auto g_s = canonical.covector(
+            {{scale * (f[1] + press[k]), scale * f[2], scale * f[3]}});
+        const auto g_bt = canonical.vector({{0.0, scale * f[5], scale * f[6]}});
+        const double g_tau = scale * f[7];
+        get(*boundary_correction_tilde_d)[pt] =
+            g_d - (weak ? 0.0 : get(normal_dot_flux_tilde_d_int)[pt]);
+        if (force_mass_consistent_ye) {
+          get(*boundary_correction_tilde_ye)[pt] =
+              g_ye - (weak ? 0.0 : get(normal_dot_flux_tilde_ye_int)[pt]);
+        }
+        get(*boundary_correction_tilde_tau)[pt] =
+            g_tau - (weak ? 0.0 : get(normal_dot_flux_tilde_tau_int)[pt]);
+        for (size_t q = 0; q < 3; ++q) {
+          boundary_correction_tilde_s->get(q)[pt] =
+              g_s[q] - (weak ? 0.0 : normal_dot_flux_tilde_s_int.get(q)[pt]);
+          boundary_correction_tilde_b->get(q)[pt] =
+              glm_normal_b_flux[pt] * frame.legs[0][q] + g_bt[q] -
+              (weak ? 0.0 : normal_dot_flux_tilde_b_int.get(q)[pt]);
+        }
+        ++tally.curved_solved;
+        if (std::abs(frame.face_speed) >= 1.0) {
+          ++tally.outside_light_cone;
+        }
+      }
+    }
+
+    // The GLM energy pairing in GR form (same switches as on a flat face):
+    //   G(Tau) += alpha Phi~_sel [(1 - v^2) B_n* + (v.B) v^n],
+    // alpha Phi~_sel = glm_phi_sel (the cleaning part of the normal-field
+    // flux), B_n* = glm_normal_b_star / sqrt(gamma), and v, B the two sides'
+    // means in the triad. With alpha = sqrt(gamma) = 1 and w = 0 this is the
+    // flat-face term below.
+    static const int glm_pair_curved = [] {
+      const char* e = std::getenv("SPECTRE_GLM_PAIR");
+      return e == nullptr ? 0 : std::atoi(e);
+    }();
+    if (glm_pair_curved != 0 or force_glm_energy_pair) {
+      for (size_t pt = 0; pt < num_points; ++pt) {
+        if (not frames[pt].has_value()) {
+          continue;
+        }
+        const FaceFrame& frame = *frames[pt];
+        const double inv_sqrt_det = 1.0 / frame.sqrt_det_spatial_metric;
+        const auto v_i = frame.components({{get<0>(spatial_velocity_int)[pt],
+                                            get<1>(spatial_velocity_int)[pt],
+                                            get<2>(spatial_velocity_int)[pt]}});
+        const auto v_e = frame.components({{get<0>(spatial_velocity_ext)[pt],
+                                            get<1>(spatial_velocity_ext)[pt],
+                                            get<2>(spatial_velocity_ext)[pt]}});
+        const auto b_i =
+            frame.components({{get<0>(tilde_b_int)[pt] * inv_sqrt_det,
+                               get<1>(tilde_b_int)[pt] * inv_sqrt_det,
+                               get<2>(tilde_b_int)[pt] * inv_sqrt_det}});
+        const auto b_e =
+            frame.components({{get<0>(tilde_b_ext)[pt] * inv_sqrt_det,
+                               get<1>(tilde_b_ext)[pt] * inv_sqrt_det,
+                               get<2>(tilde_b_ext)[pt] * inv_sqrt_det}});
+        double v2 = 0.0, vb = 0.0;
+        for (size_t a = 0; a < 3; ++a) {
+          const double va = 0.5 * (v_i[a] + v_e[a]);
+          v2 += va * va;
+          vb += va * 0.5 * (b_i[a] + b_e[a]);
+        }
+        const double vn = 0.5 * (v_i[0] + v_e[0]);
+        get(*boundary_correction_tilde_tau)[pt] +=
+            glm_phi_sel[pt] *
+            ((1.0 - v2) * glm_normal_b_star[pt] * inv_sqrt_det + vb * vn);
+      }
+    }
+    add_face_frame_counts(tally);
   }
 
   // --- MHD flux from PLUTO's own HLLD ---------------------------------------
@@ -595,6 +1116,7 @@ void pluto_dg_boundary_terms(
   // Gather the interfaces PLUTO can handle; the rest keep the HLL flux that has
   // already been written above.
   std::vector<size_t> pt_index;
+  size_t flat_forced_hll = 0;
   std::vector<std::array<double, 3>> triad_n, triad_t1, triad_t2;
   std::vector<double> pluto_vl, pluto_vr, pt_gamma;
   pt_index.reserve(num_points);
@@ -606,9 +1128,12 @@ void pluto_dg_boundary_terms(
   pt_gamma.reserve(num_points);
 
   for (size_t i = 0; i < num_points; ++i) {
-    if (get(metric_flatness_int)[i] > 1.0e-12 or
-        get(metric_flatness_ext)[i] > 1.0e-12) {
-      continue;  // curved metric: keep the (conservative) HLL flux
+    if (path[i] != PointPath::Flat) {
+      continue;  // solved in the face frame above, or kept on HLL
+    }
+    if (force_hll) {
+      ++flat_forced_hll;
+      continue;
     }
     const double rho_i = get(rest_mass_density_int)[i];
     const double eps_i = get(specific_internal_energy_int)[i];
@@ -674,6 +1199,11 @@ void pluto_dg_boundary_terms(
     pt_gamma.push_back(1.0 + p_i / (rho_i * eps_i));
   }
 
+  if (flat_forced_hll > 0) {
+    FaceFrameCounts flat_tally{};
+    flat_tally.forced_hll = flat_forced_hll;
+    add_face_frame_counts(flat_tally);
+  }
   if (pt_index.empty()) {
     return;
   }
@@ -802,9 +1332,8 @@ void pluto_dg_boundary_terms(
     if (glm_pair != 0 or force_glm_energy_pair) {
       const auto& n = interface_unit_normal_int;
       for (size_t i = 0; i < num_points; ++i) {
-        // metric_flatness is |lapse - 1| + |shift| + |gamma - delta|: zero in flat space
-        if (get(metric_flatness_int)[i] > 1.0e-12 or
-            get(metric_flatness_ext)[i] > 1.0e-12) {
+        // flat points only; the curved points got the GR form above
+        if (path[i] != PointPath::Flat) {
           continue;
         }
         double v2 = 0.0, vb = 0.0, vn = 0.0;
@@ -853,6 +1382,10 @@ void PlutoHlld::dg_boundary_terms(
     const Scalar<DataVector>& fast_ingoing_char_speed_int,
     const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
     const Scalar<DataVector>& metric_flatness_int,
+    const Scalar<DataVector>& interface_lapse_int,
+    const Scalar<DataVector>& interface_shift_dot_normal_int,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>&
+        interface_spatial_metric_int,
     const Scalar<DataVector>& rest_mass_density_int,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
     const Scalar<DataVector>& pressure_int,
@@ -876,14 +1409,18 @@ void PlutoHlld::dg_boundary_terms(
     const Scalar<DataVector>& fast_ingoing_char_speed_ext,
     const tnsr::i<DataVector, 3, Frame::Inertial>& iface_normal_ext,
     const Scalar<DataVector>& metric_flatness_ext,
+    const Scalar<DataVector>& interface_lapse_ext,
+    const Scalar<DataVector>& interface_shift_dot_normal_ext,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>&
+        interface_spatial_metric_ext,
     const Scalar<DataVector>& rest_mass_density_ext,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
     const Scalar<DataVector>& pressure_ext,
     const Scalar<DataVector>& lorentz_factor_ext,
     const Scalar<DataVector>& specific_internal_energy_ext,
-    const dg::Formulation dg_formulation) {
+    const dg::Formulation dg_formulation) const {
   detail::pluto_dg_boundary_terms(
-      &pluto_hlld_flux, boundary_correction_tilde_d,
+      &pluto_hlld_flux, &pluto_hlld_flux_moving, boundary_correction_tilde_d,
       boundary_correction_tilde_ye, boundary_correction_tilde_tau,
       boundary_correction_tilde_s, boundary_correction_tilde_b,
       boundary_correction_tilde_phi, tilde_d_int, tilde_ye_int, tilde_tau_int,
@@ -893,7 +1430,8 @@ void PlutoHlld::dg_boundary_terms(
       normal_dot_flux_tilde_phi_int, largest_outgoing_char_speed_int,
       largest_ingoing_char_speed_int, fast_outgoing_char_speed_int,
       fast_ingoing_char_speed_int, interface_unit_normal_int,
-      metric_flatness_int, rest_mass_density_int, spatial_velocity_int,
+      metric_flatness_int, interface_lapse_int, interface_shift_dot_normal_int,
+      interface_spatial_metric_int, rest_mass_density_int, spatial_velocity_int,
       pressure_int, lorentz_factor_int, specific_internal_energy_int,
       tilde_d_ext, tilde_ye_ext, tilde_tau_ext, tilde_s_ext, tilde_b_ext,
       tilde_phi_ext, normal_dot_flux_tilde_d_ext, normal_dot_flux_tilde_ye_ext,
@@ -901,9 +1439,11 @@ void PlutoHlld::dg_boundary_terms(
       normal_dot_flux_tilde_b_ext, normal_dot_flux_tilde_phi_ext,
       largest_outgoing_char_speed_ext, largest_ingoing_char_speed_ext,
       fast_outgoing_char_speed_ext, fast_ingoing_char_speed_ext,
-      iface_normal_ext, metric_flatness_ext, rest_mass_density_ext,
-      spatial_velocity_ext, pressure_ext, lorentz_factor_ext,
-      specific_internal_energy_ext, dg_formulation);
+      iface_normal_ext, metric_flatness_ext, interface_lapse_ext,
+      interface_shift_dot_normal_ext, interface_spatial_metric_ext,
+      rest_mass_density_ext, spatial_velocity_ext, pressure_ext,
+      lorentz_factor_ext, specific_internal_energy_ext, dg_formulation,
+      light_speed_density_cutoff_);
 }
 
 bool operator==(const PlutoHlld& lhs, const PlutoHlld& rhs) {

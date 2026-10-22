@@ -30,10 +30,15 @@ static void shim_init(void) {
 
 /* One batch through any of PLUTO's RMHD Riemann solvers. They all share the
    same contract: u and v of both states filled, everything else (a2, h, flux,
-   prs, SL, SR) computed inside the solver. */
+   prs, SL, SR) computed inside the solver. face_speed (npts entries, or NULL
+   for PLUTO's own static interface) is the speed of each interface in the
+   frame of the states; the solvers then return the flux through the moving
+   interface (spectre_face_speed.h). It rides in the thread-local Sweep, so the
+   shim stays free of shared state. */
 static int pluto_riemann_flux(Riemann_Solver* solver, int npts,
                               const double* vL, const double* vR, double gamma,
-                              double* flux_out, double* press_out) {
+                              const double* face_speed, double* flux_out,
+                              double* press_out) {
   if (npts <= 0) return 0;
   shim_init();
   g_gamma = gamma;
@@ -63,7 +68,10 @@ static int pluto_riemann_flux(Riemann_Solver* solver, int npts,
     Enthalpy  (shim_sweep.stateL.v, shim_sweep.stateL.h, 0, n - 1);
     Enthalpy  (shim_sweep.stateR.v, shim_sweep.stateR.h, 0, n - 1);
 
+    shim_sweep.spectre_face_speed =
+        face_speed == NULL ? NULL : face_speed + base;
     solver(&shim_sweep, 0, n - 1, shim_cmax, NULL);
+    shim_sweep.spectre_face_speed = NULL;
 
     for (int i = 0; i < n; ++i) {
       double* out = flux_out + (size_t)(base + i) * 8;
@@ -76,24 +84,52 @@ static int pluto_riemann_flux(Riemann_Solver* solver, int npts,
 
 int pluto_hlld_flux(int npts, const double* vL, const double* vR, double gamma,
                     double* flux_out, double* press_out) {
-  return pluto_riemann_flux(HLLD_Solver, npts, vL, vR, gamma, flux_out,
+  return pluto_riemann_flux(HLLD_Solver, npts, vL, vR, gamma, NULL, flux_out,
+                            press_out);
+}
+
+int pluto_hlld_flux_moving(int npts, const double* vL, const double* vR, double gamma,
+                           const double* face_speed, double* flux_out,
+                           double* press_out) {
+  return pluto_riemann_flux(HLLD_Solver, npts, vL, vR, gamma, face_speed, flux_out,
                             press_out);
 }
 
 int pluto_hllc_mb_flux(int npts, const double* vL, const double* vR,
                        double gamma, double* flux_out, double* press_out) {
-  return pluto_riemann_flux(HLLC_MB_Solver, npts, vL, vR, gamma, flux_out,
+  return pluto_riemann_flux(HLLC_MB_Solver, npts, vL, vR, gamma, NULL, flux_out,
+                            press_out);
+}
+
+int pluto_hllc_mb_flux_moving(int npts, const double* vL, const double* vR, double gamma,
+                              const double* face_speed, double* flux_out,
+                              double* press_out) {
+  return pluto_riemann_flux(HLLC_MB_Solver, npts, vL, vR, gamma, face_speed, flux_out,
                             press_out);
 }
 
 int pluto_hllc_kb_flux(int npts, const double* vL, const double* vR,
                        double gamma, double* flux_out, double* press_out) {
-  return pluto_riemann_flux(HLLC_KB_Solver, npts, vL, vR, gamma, flux_out,
+  return pluto_riemann_flux(HLLC_KB_Solver, npts, vL, vR, gamma, NULL, flux_out,
+                            press_out);
+}
+
+int pluto_hllc_kb_flux_moving(int npts, const double* vL, const double* vR, double gamma,
+                              const double* face_speed, double* flux_out,
+                              double* press_out) {
+  return pluto_riemann_flux(HLLC_KB_Solver, npts, vL, vR, gamma, face_speed, flux_out,
                             press_out);
 }
 
 int pluto_hllx_flux(int npts, const double* vL, const double* vR, double gamma,
                     double* flux_out, double* press_out) {
-  return pluto_riemann_flux(HLLX_Solver, npts, vL, vR, gamma, flux_out,
+  return pluto_riemann_flux(HLLX_Solver, npts, vL, vR, gamma, NULL, flux_out,
+                            press_out);
+}
+
+int pluto_hllx_flux_moving(int npts, const double* vL, const double* vR, double gamma,
+                           const double* face_speed, double* flux_out,
+                           double* press_out) {
+  return pluto_riemann_flux(HLLX_Solver, npts, vL, vR, gamma, face_speed, flux_out,
                             press_out);
 }

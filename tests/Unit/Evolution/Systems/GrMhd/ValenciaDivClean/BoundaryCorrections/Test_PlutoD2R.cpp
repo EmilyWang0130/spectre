@@ -18,6 +18,7 @@
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/D2R/Flux.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/D2R/State.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/PlutoD2R.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/PlutoFaceFrame.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/System.hpp"
 #include "Framework/TestCreation.hpp"
 #include "Framework/TestHelpers.hpp"
@@ -56,6 +57,9 @@ struct Packaged {
   Scalar<DataVector> fast_minus{DataVector{1_st, 0.0}};
   tnsr::i<DataVector, 3> normal{1_st, 0.0};
   Scalar<DataVector> eligible{DataVector{1_st, 0.0}};
+  Scalar<DataVector> iface_lapse{DataVector{1_st, 1.0}};
+  Scalar<DataVector> iface_shift_n{DataVector{1_st, 0.0}};
+  tnsr::ii<DataVector, 3, Frame::Inertial> iface_metric{1_st, 0.0};
   Scalar<DataVector> rho{DataVector{1_st, 0.0}};
   tnsr::I<DataVector, 3> velocity{1_st, 0.0};
   Scalar<DataVector> pressure{DataVector{1_st, 0.0}};
@@ -88,7 +92,8 @@ Packaged package(const bc::PlutoD2R& solver, const Primitive& p,
                  const double gamma, const double sign, const size_t axis,
                  const Eos& eos, const tnsr::ii<DataVector, 3>& metric,
                  const double mesh_speed = 0.0, const double phi = 0.0,
-                 const double electron_fraction = 0.2) {
+                 const double electron_fraction = 0.2,
+                 const double normal_shift = 0.0) {
   Packaged out{};
   const double rho = p[0];
   const double pressure = p[7];
@@ -152,7 +157,8 @@ Packaged package(const bc::PlutoD2R& solver, const Primitive& p,
   const Scalar<DataVector> ye{DataVector{1_st, electron_fraction}};
   const Scalar<DataVector> temperature{DataVector{1_st, pressure / rho}};
   const Scalar<DataVector> lapse{DataVector{1_st, 1.0}};
-  const tnsr::I<DataVector, 3> shift{1_st, 0.0};
+  tnsr::I<DataVector, 3> shift{1_st, 0.0};
+  shift.get(axis) = normal_shift;
   tnsr::i<DataVector, 3> normal{1_st, 0.0};
   tnsr::I<DataVector, 3> normal_vector{1_st, 0.0};
   normal.get(axis) = sign;
@@ -172,12 +178,14 @@ Packaged package(const bc::PlutoD2R& solver, const Primitive& p,
       make_not_null(&out.light_plus), make_not_null(&out.light_minus),
       make_not_null(&out.fast_plus), make_not_null(&out.fast_minus),
       make_not_null(&out.normal), make_not_null(&out.eligible),
-      make_not_null(&out.rho), make_not_null(&out.velocity),
-      make_not_null(&out.pressure), make_not_null(&out.lorentz),
-      make_not_null(&out.eps), u_d, u_ye, u_tau, u_s, u_b, u_phi, f_d, f_ye,
-      f_tau, f_s, f_b, f_phi, lapse, shift, velocity_one_form, metric,
-      rest_mass_density, ye, temperature, velocity, eps, pressure_scalar,
-      lorentz, normal, normal_vector, mesh_velocity, mesh_normal, eos);
+      make_not_null(&out.iface_lapse), make_not_null(&out.iface_shift_n),
+      make_not_null(&out.iface_metric), make_not_null(&out.rho),
+      make_not_null(&out.velocity), make_not_null(&out.pressure),
+      make_not_null(&out.lorentz), make_not_null(&out.eps), u_d, u_ye, u_tau,
+      u_s, u_b, u_phi, f_d, f_ye, f_tau, f_s, f_b, f_phi, lapse, shift,
+      velocity_one_form, metric, rest_mass_density, ye, temperature, velocity,
+      eps, pressure_scalar, lorentz, normal, normal_vector, mesh_velocity,
+      mesh_normal, eos);
   return out;
 }
 
@@ -189,10 +197,12 @@ Fluxes boundary(const bc::PlutoD2R& solver, const Packaged& l,
       make_not_null(&f.s), make_not_null(&f.b), make_not_null(&f.phi), l.d,
       l.ye, l.tau, l.s, l.b, l.phi, l.fd, l.fye, l.ftau, l.fs, l.fb, l.fphi,
       l.light_plus, l.light_minus, l.fast_plus, l.fast_minus, l.normal,
-      l.eligible, l.rho, l.velocity, l.pressure, l.lorentz, l.eps, r.d, r.ye,
-      r.tau, r.s, r.b, r.phi, r.fd, r.fye, r.ftau, r.fs, r.fb, r.fphi,
-      r.light_plus, r.light_minus, r.fast_plus, r.fast_minus, r.normal,
-      r.eligible, r.rho, r.velocity, r.pressure, r.lorentz, r.eps, form);
+      l.eligible, l.iface_lapse, l.iface_shift_n, l.iface_metric, l.rho,
+      l.velocity, l.pressure, l.lorentz, l.eps, r.d, r.ye, r.tau, r.s, r.b,
+      r.phi, r.fd, r.fye, r.ftau, r.fs, r.fb, r.fphi, r.light_plus,
+      r.light_minus, r.fast_plus, r.fast_minus, r.normal, r.eligible,
+      r.iface_lapse, r.iface_shift_n, r.iface_metric, r.rho, r.velocity,
+      r.pressure, r.lorentz, r.eps, form);
   return f;
 }
 
@@ -268,28 +278,60 @@ void test_fallbacks() {
       EquationsOfState::IdealFluid<true>{face.gamma}.promote_to_3d_eos();
   const auto nonideal =
       EquationsOfState::PolytropicFluid<true>{1., 2.}.promote_to_3d_eos();
-  for (const std::string kind : {"curved", "nonideal", "moving"}) {
+  // Since the GR face frame the metric is not part of D2-R's gate. "curved"
+  // (unit determinant, lapse 1, zero shift, normal z unchanged by the metric)
+  // is now solved by the D2-R kernel in the face frame at ray 0; "shifted" adds
+  // a normal shift, so the face moves through the normal observer's frame
+  // (w = 0.1) and, D2-R's kernel sampling only x/t = 0, the point keeps the
+  // adapter's HLL baseline -- with the fast bounds of a supported face -- and
+  // is counted. The ideal-EoS and static-mesh checks still reject a face
+  // outright (infinite flatness, light-bound HLL).
+  for (const std::string kind : {"curved", "shifted", "nonideal", "moving"}) {
     CAPTURE(kind);
     auto metric = identity_metric();
-    // Unit determinant, lapse=1 and shift=0: only the NEW spatial metric
-    // argument can reject this geometry. Normal z is unchanged by the metric.
-    if (kind == "curved") {
+    const bool curved = kind == "curved" or kind == "shifted";
+    if (curved) {
       metric.get(0, 0) = 2.;
       metric.get(1, 1) = .5;
     }
-    const size_t axis = kind == "curved" ? 2 : 0;
+    const size_t axis = curved ? 2 : 0;
     const double vm = kind == "moving" ? .2 : 0.;
+    const double normal_shift = kind == "shifted" ? .1 : 0.;
     const Eos& eos = kind == "nonideal" ? *nonideal : *ideal;
-    const auto l =
-        package(solver, face.left, face.gamma, 1., axis, eos, metric, vm);
-    const auto r =
-        package(solver, face.right, face.gamma, -1., axis, eos, metric, vm);
-    CHECK(std::isinf(get(l.eligible)[0]));
+    const auto l = package(solver, face.left, face.gamma, 1., axis, eos, metric,
+                           vm, 0., 0.2, normal_shift);
+    const auto r = package(solver, face.right, face.gamma, -1., axis, eos,
+                           metric, vm, 0., 0.2, normal_shift);
     pluto_d2r_reset_diagnostics();
+    bc::detail::reset_face_frame_counts();
     const auto result = boundary(solver, l, r, dg::Formulation::WeakInertial);
-    CHECK(pluto_d2r_diagnostics().faces == 0);
-    const double plus = get(l.light_plus)[0];
-    const double minus = get(l.light_minus)[0];
+    const auto counts = bc::detail::face_frame_counts();
+    if (curved) {
+      CHECK(std::isfinite(get(l.eligible)[0]));
+      CHECK(get(l.eligible)[0] > 0.);
+      CHECK(counts.curved_points == 1);
+      CHECK(pluto_d2r_diagnostics().faces == (kind == "curved" ? 1 : 0));
+      CHECK(counts.curved_solved == (kind == "curved" ? 1 : 0));
+      CHECK(counts.fallback_ray == (kind == "shifted" ? 1 : 0));
+    } else {
+      CHECK(std::isinf(get(l.eligible)[0]));
+      CHECK(counts.unsupported_points == 1);
+      CHECK(pluto_d2r_diagnostics().faces == 0);
+    }
+    if (kind == "curved") {
+      CHECK(std::isfinite(get(result.d)[0]));
+      continue;
+    }
+    // The HLL baseline: the fast bounds where the face is supported, the
+    // light bounds where it is not.
+    const double plus =
+        kind == "shifted"
+            ? std::max({0., get(l.fast_plus)[0], -get(r.fast_minus)[0]})
+            : get(l.light_plus)[0];
+    const double minus =
+        kind == "shifted"
+            ? std::min({0., get(l.fast_minus)[0], -get(r.fast_plus)[0]})
+            : get(l.light_minus)[0];
     const double expected = (plus * get(l.fd)[0] + minus * get(r.fd)[0] +
                              plus * minus * (get(r.d)[0] - get(l.d)[0])) /
                             (plus - minus);
@@ -621,10 +663,22 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.PlutoD2R",
       ranges{std::array{.3, 1.}, std::array{.01, .02}};
   const tuples::TaggedTuple<hydro::Tags::GrmhdEquationOfState> volume_data{
       EquationsOfState::IdealFluid<true>{4. / 3.}.promote_to_3d_eos()};
+  // The helper fills every packaged input with independent random values: its
+  // conserved variables and normal fluxes are not those of its primitives.
+  // Since the GR face frame its curved faces (random lapse and shift) are
+  // solved by PLUTO from the primitives alone, so a face with the same random
+  // state on both sides does not return the packaged flux, and the helper's
+  // "zero correction for a smooth solution" check cannot hold; it held before
+  // only because every curved face fell back to HLL. Conservation and the
+  // weak/strong relation are still checked here; the uniform-state property is
+  // checked with consistent states in Test_PlutoFaceFrame.cpp.
+  // D2-R also forces the GLM energy pairing, which adds alpha Phi (b/W)^n to
+  // the energy flux of a uniform state with Phi != 0 by construction.
   TestHelpers::evolution::dg::test_boundary_correction_conservation<
       grmhd::ValenciaDivClean::System>(
       make_not_null(&gen), bc::PlutoD2R{1.e-30, 1.e-12},
       Mesh<2>{5, Spectral::Basis::Legendre, Spectral::Quadrature::Gauss},
-      volume_data, ranges);
+      volume_data, ranges,
+      TestHelpers::evolution::dg::ZeroOnSmoothSolution::No);
 }
 }  // namespace

@@ -23,6 +23,7 @@
 */
 /* ///////////////////////////////////////////////////////////////////// */
 #include"pluto.h"
+#include "spectre_face_speed.h"   /* SPECTRE-MOD */
 #define BX_MIN  1.e-6
 
 /* ********************************************************************* */
@@ -126,17 +127,21 @@ void HLLC_MB_Solver (const Sweep *sweep, int beg, int end,
     #if COUNT_FAILURES == YES
     totzones += 1.0;
     #endif
+    /* SPECTRE-MOD: the fan is sampled on the ray of the (moving) face; 0 for PLUTO's own calls. */
+    const double wf = SpectreFaceSpeed (sweep, i);
 
-    if (SL[i] >= 0.0){
+    if (SL[i] >= wf){   /* SPECTRE-MOD: 0 -> wf */
       NFLX_LOOP(nv){
         sweep->flux[i][nv] = fL[i][nv];
       }
       sweep->press[i] = pL[i];
-    }else if (SR[i] <= 0.0){
+      if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, stateL->u[i]);   /* SPECTRE-MOD */
+    }else if (SR[i] <= wf){   /* SPECTRE-MOD: 0 -> wf */
       NFLX_LOOP(nv){
         sweep->flux[i][nv] = fR[i][nv];
       }
       sweep->press[i] = pR[i];
+      if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, stateR->u[i]);   /* SPECTRE-MOD */
     }else{
 
       uL = stateL->u[i];
@@ -329,16 +334,18 @@ if ( (Ex1*Ex1 + Ex2*Ex2 + Ex3*Ex3) > (Bxs*Bxs + Bys*Bys + Bzs*Bzs)) switch_to_hl
        -------------------------------- */
 
       if (switch_to_hll == 0){   /* --> Use HLLC flux */
-        if (vxs > 0.0) {
+        if (vxs > wf) {   /* SPECTRE-MOD: 0 -> wf */
           NFLX_LOOP(nv) {
             sweep->flux[i][nv] = fL[i][nv] + SL[i]*(usL[nv] - uL[nv]);
           }
           sweep->press[i] = pL[i];
+          if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, usL);   /* SPECTRE-MOD */
         }else {
           NFLX_LOOP(nv) {
             sweep->flux[i][nv] = fR[i][nv] + SR[i]*(usR[nv] - uR[nv]);
           }
           sweep->press[i] = pR[i];
+          if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, usR);   /* SPECTRE-MOD */
         }
       }else{                    /* --> Use HLL flux */
         scrh = 1.0/(SR[i] - SL[i]);
@@ -351,6 +358,8 @@ if ( (Ex1*Ex1 + Ex2*Ex2 + Ex3*Ex3) > (Bxs*Bxs + Bys*Bys + Bzs*Bzs)) switch_to_hl
           sweep->flux[i][nv] *= scrh;
         }
         sweep->press[i] = (SR[i]*pL[i] - SL[i]*pR[i])*scrh;
+        if (wf != 0.0) SpectreMovingFaceHll (sweep->flux[i], wf, uL, uR, fL[i], fR[i],   /* SPECTRE-MOD */
+                                             pL[i], pR[i], SL[i], SR[i]);
       }
     }  /* End if  Bx > 0 */
   }  /* End loop on points */

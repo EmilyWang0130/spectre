@@ -272,6 +272,10 @@ void MakeState (Sweep *sweep)
    0. Allocate memory for sweep structure members
    -------------------------------------------------------- */
 
+  /* SPECTRE-MOD: no moving interface unless a caller sets one (structs.h, spectre_face_speed.h);
+     a Sweep built here is safe however its storage was obtained. */
+  sweep->spectre_face_speed = NULL;
+
   sweep->vn      = ARRAY_2D(NMAX_POINT, NVAR, double);
   sweep->flux    = ARRAY_2D(NMAX_POINT, NVAR, double);
   sweep->src     = ARRAY_2D(NMAX_POINT, NVAR, double);

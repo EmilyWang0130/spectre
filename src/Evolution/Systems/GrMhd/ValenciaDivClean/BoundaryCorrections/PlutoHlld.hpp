@@ -84,13 +84,31 @@ class PlutoHlld final : public evolution::BoundaryCorrection {
   struct InterfaceUnitNormal : db::SimpleTag {
     using type = tnsr::i<DataVector, 3, Frame::Inertial>;
   };
-  // Departure of the metric from flat space, |lapse-1| + |shift| +
-  // |sqrt(det)-1|. The five-wave fan is reconstructed assuming flat space (the
-  // regime of the relativistic M&M tests); where the metric is curved we fall
-  // back to HLL.
+  // Departure of the face from a static Minkowski face,
+  // |lapse - 1| + sum |shift^i| + sum_{i<=j} |gamma_ij - delta_ij| + |n.v_g|.
+  // Points where both sides are within 1e-12 of zero take the flat path
+  // (the special-relativistic fan, exactly as before the GR face frame);
+  // the others are solved in the face frame of `PlutoFaceFrame.hpp`. An
+  // infinite value marks a point the packaging could not support at all
+  // (`PlutoD2R`'s gate): it keeps the HLL flux.
   struct MetricFlatness : db::SimpleTag {
     using type = Scalar<DataVector>;
   };
+  /// @{
+  /// THIS side's geometry, from which `dg_boundary_terms` builds the face
+  /// frame (`detail::make_face_frame`): the lapse, the normal shift
+  /// \f$\beta^i n_i + n_i v_g^i\f$ against this side's outward normal, and
+  /// the spatial metric.
+  struct InterfaceLapse : db::SimpleTag {
+    using type = Scalar<DataVector>;
+  };
+  struct InterfaceShiftDotNormal : db::SimpleTag {
+    using type = Scalar<DataVector>;
+  };
+  struct InterfaceSpatialMetric : db::SimpleTag {
+    using type = tnsr::ii<DataVector, 3, Frame::Inertial>;
+  };
+  /// @}
 
   struct MagneticFieldMagnitudeForHydro {
     static constexpr Options::String help = {
@@ -105,16 +123,17 @@ class PlutoHlld final : public evolution::BoundaryCorrection {
         "same scalar/MHD split Hllem uses, and only the eight MHD fluxes come "
         "from PLUTO.\n\n"
         "Restrictions inherited from PLUTO's configuration: ideal-gas EoS "
-        "only, "
-        "and flat (special-relativistic) space -- curved-metric points fall "
-        "back "
-        "to HLL, as in Hlld."};
+        "only. On a curved background (or a moving mesh) the fan is solved in "
+        "the normal observer's orthonormal frame at each face and sampled on "
+        "the ray of the moving face; points where that frame cannot be built "
+        "keep the HLL flux."};
     using type = double;
   };
   struct LightSpeedDensityCutoff {
     static constexpr Options::String help = {
         "When the density is below this value we just use the light speed for "
-        "the characteristic speeds."};
+        "the characteristic speeds. On curved faces, points with a side at or "
+        "below it also keep the HLL flux."};
     using type = double;
   };
   using options =
@@ -154,14 +173,16 @@ class PlutoHlld final : public evolution::BoundaryCorrection {
       ::Tags::NormalDotFlux<Tags::TildeB<Frame::Inertial>>,
       ::Tags::NormalDotFlux<Tags::TildePhi>, LargestOutgoingCharSpeed,
       LargestIngoingCharSpeed, FastOutgoingCharSpeed, FastIngoingCharSpeed,
-      InterfaceUnitNormal, MetricFlatness,
+      InterfaceUnitNormal, MetricFlatness, InterfaceLapse,
+      InterfaceShiftDotNormal, InterfaceSpatialMetric,
       hydro::Tags::RestMassDensity<DataVector>,
       hydro::Tags::SpatialVelocity<DataVector, 3>,
       hydro::Tags::Pressure<DataVector>, hydro::Tags::LorentzFactor<DataVector>,
       hydro::Tags::SpecificInternalEnergy<DataVector>>;
   using dg_package_data_temporary_tags = tmpl::list<
       gr::Tags::Lapse<DataVector>, gr::Tags::Shift<DataVector, 3>,
-      hydro::Tags::SpatialVelocityOneForm<DataVector, 3, Frame::Inertial>>;
+      hydro::Tags::SpatialVelocityOneForm<DataVector, 3, Frame::Inertial>,
+      gr::Tags::SpatialMetric<DataVector, 3, Frame::Inertial>>;
   using dg_package_data_primitive_tags =
       tmpl::list<hydro::Tags::RestMassDensity<DataVector>,
                  hydro::Tags::ElectronFraction<DataVector>,
@@ -198,6 +219,10 @@ class PlutoHlld final : public evolution::BoundaryCorrection {
       gsl::not_null<tnsr::i<DataVector, 3, Frame::Inertial>*>
           packaged_interface_unit_normal,
       gsl::not_null<Scalar<DataVector>*> packaged_metric_flatness,
+      gsl::not_null<Scalar<DataVector>*> packaged_interface_lapse,
+      gsl::not_null<Scalar<DataVector>*> packaged_interface_shift_dot_normal,
+      gsl::not_null<tnsr::ii<DataVector, 3, Frame::Inertial>*>
+          packaged_interface_spatial_metric,
       gsl::not_null<Scalar<DataVector>*> packaged_rest_mass_density,
       gsl::not_null<tnsr::I<DataVector, 3, Frame::Inertial>*>
           packaged_spatial_velocity,
@@ -221,6 +246,7 @@ class PlutoHlld final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& lapse,
       const tnsr::I<DataVector, 3, Frame::Inertial>& shift,
       const tnsr::i<DataVector, 3, Frame::Inertial>& spatial_velocity_one_form,
+      const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
 
       const Scalar<DataVector>& rest_mass_density,
       const Scalar<DataVector>& electron_fraction,
@@ -238,7 +264,7 @@ class PlutoHlld final : public evolution::BoundaryCorrection {
       const EquationsOfState::EquationOfState<true, 3>& equation_of_state)
       const;
 
-  static void dg_boundary_terms(
+  void dg_boundary_terms(
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
       gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_tau,
@@ -267,6 +293,10 @@ class PlutoHlld final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& fast_ingoing_char_speed_int,
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
       const Scalar<DataVector>& metric_flatness_int,
+      const Scalar<DataVector>& interface_lapse_int,
+      const Scalar<DataVector>& interface_shift_dot_normal_int,
+      const tnsr::ii<DataVector, 3, Frame::Inertial>&
+          interface_spatial_metric_int,
       const Scalar<DataVector>& rest_mass_density_int,
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
       const Scalar<DataVector>& pressure_int,
@@ -292,12 +322,16 @@ class PlutoHlld final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& fast_ingoing_char_speed_ext,
       const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_ext,
       const Scalar<DataVector>& metric_flatness_ext,
+      const Scalar<DataVector>& interface_lapse_ext,
+      const Scalar<DataVector>& interface_shift_dot_normal_ext,
+      const tnsr::ii<DataVector, 3, Frame::Inertial>&
+          interface_spatial_metric_ext,
       const Scalar<DataVector>& rest_mass_density_ext,
       const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
       const Scalar<DataVector>& pressure_ext,
       const Scalar<DataVector>& lorentz_factor_ext,
       const Scalar<DataVector>& specific_internal_energy_ext,
-      dg::Formulation dg_formulation);
+      dg::Formulation dg_formulation) const;
 
  private:
   friend bool operator==(const PlutoHlld& lhs, const PlutoHlld& rhs);
@@ -314,6 +348,12 @@ namespace detail {
 /// `(npts, vL, vR, gamma, flux_out, press_out)`.
 using PlutoFluxFunction = int (*)(int, const double*, const double*, double,
                                   double*, double*);
+/// The shim's moving-face entry points, `(npts, vL, vR, gamma, face_speed,
+/// flux_out, press_out)`: the fan sampled on the ray `face_speed` and the flux
+/// through the moving face returned (`pluto/spectre_face_speed.h`).
+using PlutoMovingFaceFluxFunction = int (*)(int, const double*, const double*,
+                                            double, const double*, double*,
+                                            double*);
 
 /// The body of `PlutoHlld::dg_boundary_terms`, with the PLUTO solver it hands
 /// the five-wave (or three-wave) fan to as a parameter. Everything around that
@@ -322,8 +362,23 @@ using PlutoFluxFunction = int (*)(int, const double*, const double*, double,
 /// `PlutoHllc` calls this with PLUTO's HLLC instead of duplicating it.
 /// The trailing switches opt D2-R into common GLM Bn, energy pairing and
 /// passive Ye transport by its accepted mass flux; legacy defaults are kept.
+///
+/// Flat points (`MetricFlatness` within 1e-12 on both sides) are solved
+/// exactly as before the GR face frame, through `pluto_solver`. Curved points
+/// are solved in the face frame (`PlutoFaceFrame.hpp`) through
+/// `moving_face_solver`; a solver without one (`nullptr`, D2-R) solves the
+/// curved points whose face does not move (w = 0) through `pluto_solver` and
+/// keeps the HLL flux where it does.
+///
+/// `light_speed_density_cutoff` is the correction's `LightSpeedDensityCutoff`.
+/// Curved points where either side's density is at or below it keep the HLL
+/// flux, whose bounds the packaging set to the light speeds there -- what
+/// `Hll` and `HllcGr` do in an atmosphere; flat points do not.
+/// With `SPECTRE_PLUTO_FORCE_HLL=1` in the environment every point keeps the
+/// HLL flux (the HLLE arm of a solver comparison).
 void pluto_dg_boundary_terms(
     PlutoFluxFunction pluto_solver,
+    PlutoMovingFaceFluxFunction moving_face_solver,
     gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_d,
     gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_ye,
     gsl::not_null<Scalar<DataVector>*> boundary_correction_tilde_tau,
@@ -350,6 +405,10 @@ void pluto_dg_boundary_terms(
     const Scalar<DataVector>& fast_ingoing_char_speed_int,
     const tnsr::i<DataVector, 3, Frame::Inertial>& interface_unit_normal_int,
     const Scalar<DataVector>& metric_flatness_int,
+    const Scalar<DataVector>& interface_lapse_int,
+    const Scalar<DataVector>& interface_shift_dot_normal_int,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>&
+        interface_spatial_metric_int,
     const Scalar<DataVector>& rest_mass_density_int,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_int,
     const Scalar<DataVector>& pressure_int,
@@ -371,15 +430,19 @@ void pluto_dg_boundary_terms(
     const Scalar<DataVector>& largest_ingoing_char_speed_ext,
     const Scalar<DataVector>& fast_outgoing_char_speed_ext,
     const Scalar<DataVector>& fast_ingoing_char_speed_ext,
-    const tnsr::i<DataVector, 3, Frame::Inertial>& /*iface_normal_ext*/,
+    const tnsr::i<DataVector, 3, Frame::Inertial>& iface_normal_ext,
     const Scalar<DataVector>& metric_flatness_ext,
+    const Scalar<DataVector>& interface_lapse_ext,
+    const Scalar<DataVector>& interface_shift_dot_normal_ext,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>&
+        interface_spatial_metric_ext,
     const Scalar<DataVector>& rest_mass_density_ext,
     const tnsr::I<DataVector, 3, Frame::Inertial>& spatial_velocity_ext,
     const Scalar<DataVector>& pressure_ext,
     const Scalar<DataVector>& /*lorentz_factor_ext*/,
-    const Scalar<DataVector>& /*specific_internal_energy_ext*/,
-    dg::Formulation dg_formulation, bool force_common_normal_field = false,
-    bool force_glm_energy_pair = false,
+    const Scalar<DataVector>& specific_internal_energy_ext,
+    dg::Formulation dg_formulation, double light_speed_density_cutoff,
+    bool force_common_normal_field = false, bool force_glm_energy_pair = false,
     bool force_mass_consistent_ye = false);
 }  // namespace detail
 }  // namespace grmhd::ValenciaDivClean::BoundaryCorrections

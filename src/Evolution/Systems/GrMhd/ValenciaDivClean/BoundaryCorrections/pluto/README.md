@@ -108,6 +108,56 @@ as a function pointer.
    our additions). `COUNT_FAILURES` made `RiemannCheck` write `riemann_check.dat`
    from every process every step, which is unacceptable inside SpECTRE.
 
+5. **The fan sampled on a moving interface (2026-10-20, the GR face frame).**
+   On a curved background SpECTRE solves each face in the normal observer's
+   orthonormal frame (`../PlutoFaceFrame.hpp`), through which the coordinate
+   face moves with speed w = (beta^n + n.v_mesh)/alpha. The fan does not depend
+   on w; only the ray it is sampled on does, and the flux through the moving
+   face is F_sel - w U_sel (U_sel the region's conserved state, energy reduced
+   like ENG; the normal total pressure in `press` is unchanged). Edits:
+   - `structs.h`: a member `Sweep::spectre_face_speed` (`const double*`, NULL
+     = PLUTO's static interface); `tools.c`: `MakeState` sets it to NULL.
+   - `spectre_face_speed.h` (new, ours): static inline, stateless helpers
+     `SpectreFaceSpeed`, `SpectreMovingFace` (flux -= w u) and
+     `SpectreMovingFaceHll` (the HLL state rebuilt from its definition, not
+     from a stored `Uhll` that `ConsToPrim` may have touched).
+   - `hlld.c`: the supersonic tests, the HLL fallback, the Alfven tests
+     (`PaL.Sa >= w - 1e-6`, `PaR.Sa <= w + 1e-6`), the contact test
+     `Sc > w` and `HLLD_GetCState`'s side choice `vxc > w` (w passed as a new
+     parameter); `hllx.c`: the same sites in its copy, and the eight-region pick
+     of `hx_flux` (w as a new member of the local `HX_Ctx`); `hllc_mb.c`,
+     `hllc_kb.c`: the supersonic tests, the star tests (`vxs > w`, `vx > w`) and
+     the HLL fallbacks. The `SHOCK_FLATTENING == MULTID` branches are compiled
+     out and untouched.
+   - `pluto_hlld_shim.{c,h}`: `pluto_{hlld,hllc_mb,hllc_kb,hllx}_flux_moving`,
+     which take a per-interface `face_speed` array; the static entry points pass
+     NULL.
+   Thread safety is unchanged: the face speeds ride in the calling thread's
+   `Sweep` (the shim's is `_Thread_local`, as are D2-R's contexts) and in
+   explicit parameters; no global was added. With w = 0 every region test
+   compares against the same constant as before and every subtraction is
+   skipped (`if (w != 0.0)`), so the static entry points and the moving ones at
+   w = 0 agree bit for bit (`Test_PlutoFaceFrame.cpp` checks it with `memcmp`
+   on 2500 interfaces through all four solvers).
+
+6. **No interface's wave speeds depend on another's (2026-10-21; a PLUTO bug).**
+   `MaxSignalSpeed` (`eigenv.c`) returned at the first interface whose
+   `Magnetosonic()` failed (|v| >= 1, `a4 < 1e-12`, a quartic with no
+   solution), and `HLL_Speed` ignores that return value, so that interface and
+   every later one in the batch used whatever the thread-local speed buffers
+   held from an earlier call: silently wrong, finite fluxes that depended on
+   the batch's composition and on call history. (The GR face frame's unit tests
+   found it: a physical interface's flux changed when a garbage one was batched
+   in front of it.) Now a failing interface gets the light-cone bounds -1, +1
+   and the loop goes on; the return value is upstream's (the first failing
+   index). `hllx.c` likewise keeps HLLD's flux where either side's
+   `Magnetosonic()` fails, instead of seeding the slow speeds from the previous
+   interface's eigenvalues. A batch without failures computes exactly what it
+   did before; no recorded SpECTRE run (`spectre_runs/`, searched 2026-10-21)
+   logs a single `Magnetosonic()` failure. Checked by `Test_PlutoFaceFrame.cpp`
+   (physical interfaces batched alone and interleaved with failing ones give
+   the same fluxes, bit for bit).
+
 ## Configuration
 
 `PHYSICS=RMHD`, `EOS=IDEAL`, `DIVB_CONTROL=NO`, `NTRACER=0`, no GLM, no CT.

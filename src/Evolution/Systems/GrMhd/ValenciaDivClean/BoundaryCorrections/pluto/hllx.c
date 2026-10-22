@@ -53,6 +53,7 @@
 */
 /* ///////////////////////////////////////////////////////////////////// */
 #include "pluto.h"
+#include "spectre_face_speed.h"   /* SPECTRE-MOD */
 #include <string.h>
 
 #ifndef HLLD_MAX_ITER
@@ -221,7 +222,7 @@ static void HX_GetAState (HX_Riemann_State *Pa,  double p)
 }
 
 static void HX_GetCState (HX_Riemann_State *PaL, HX_Riemann_State *PaR, double p,
-                          double *Uc)
+                          double *Uc, double wf)   /* SPECTRE-MOD: + wf, the face speed */
 {
   double dK, *ua;
   double vxcL, vycL, vzcL, KLBc;
@@ -271,7 +272,7 @@ static void HX_GetCState (HX_Riemann_State *PaL, HX_Riemann_State *PaR, double p
   vyc = 0.5*(vycL + vycR);
   vzc = 0.5*(vzcL + vzcR);
 
-  if (vxc > 0.0) {
+  if (vxc > wf) {   /* SPECTRE-MOD: 0 -> wf (the face is left of the contact) */
     HX_GetAState (PaL, p);
     ua  = PaL->u;
     Sa  = PaL->Sa;
@@ -382,6 +383,7 @@ static double HX_TotalPressure (double *v)
 typedef struct {
   double UL[7], UR[7], FL[7], FR[7], RL[7], RR[7];
   double SfL, SfR, SsL, SsR, bx;
+  double w;   /* SPECTRE-MOD: the face speed the fan is sampled at (0 for PLUTO's own calls) */
 } HX_Ctx;
 
 typedef struct {
@@ -711,7 +713,7 @@ static void hx_flux (const HX_Fan *f, const HX_Ctx *c, double *F)
   int k;
   double UfL[7], UaL[7], UsL[7], UsR[7], UaR[7], UfR[7];
   double FfL[7], FaL[7], FsL[7], FfR[7], FaR[7], FsR[7];
-  const double *pick;
+  const double *pick, *pickU;   /* SPECTRE-MOD: + the picked region's state */
   hx_auxU (f->XfL, c->bx, UfL); hx_auxU (f->XaL, c->bx, UaL); hx_auxU (f->XsL, c->bx, UsL);
   hx_auxU (f->XsR, c->bx, UsR); hx_auxU (f->XaR, c->bx, UaR); hx_auxU (f->XfR, c->bx, UfR);
   for (k = 0; k < 7; k++){
@@ -722,15 +724,18 @@ static void hx_flux (const HX_Fan *f, const HX_Ctx *c, double *F)
     FaR[k] = FfR[k] + f->SaR*(UaR[k] - UfR[k]);
     FsR[k] = FaR[k] + c->SsR*(UsR[k] - UaR[k]);
   }
-  if      (c->SfL >= 0.0) pick = c->FL;
-  else if (c->SfR <= 0.0) pick = c->FR;
-  else if (f->SaL >= 0.0) pick = FfL;
-  else if (f->SaR <= 0.0) pick = FfR;
-  else if (c->SsL >= 0.0) pick = FaL;
-  else if (c->SsR <= 0.0) pick = FaR;
-  else if (f->Sm  >= 0.0) pick = FsL;
-  else                    pick = FsR;
+  /* SPECTRE-MOD: the region tests compare against the face speed c->w instead of 0, and the
+     flux through the moving face is F - w U of the picked region (spectre_face_speed.h). */
+  if      (c->SfL >= c->w) { pick = c->FL; pickU = c->UL; }
+  else if (c->SfR <= c->w) { pick = c->FR; pickU = c->UR; }
+  else if (f->SaL >= c->w) { pick = FfL;   pickU = UfL;   }
+  else if (f->SaR <= c->w) { pick = FfR;   pickU = UfR;   }
+  else if (c->SsL >= c->w) { pick = FaL;   pickU = UaL;   }
+  else if (c->SsR <= c->w) { pick = FaR;   pickU = UaR;   }
+  else if (f->Sm  >= c->w) { pick = FsL;   pickU = UsL;   }
+  else                     { pick = FsR;   pickU = UsR;   }
   for (k = 0; k < 7; k++) F[k] = pick[k];
+  if (c->w != 0.0) for (k = 0; k < 7; k++) F[k] -= c->w*pickU[k];
 }
 
 /* The seven-wave solve for one interface. Returns HX_HLLX, HX_HLLX_CONT or
@@ -831,16 +836,20 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
 
     vL = stateL->v[i]; uL = stateL->u[i]; fL = stateL->flux[i];
     vR = stateR->v[i]; uR = stateR->u[i]; fR = stateR->flux[i];
+    /* SPECTRE-MOD: the fan is sampled on the ray of the (moving) face; 0 for PLUTO's own calls. */
+    const double wf = SpectreFaceSpeed (sweep, i);
 
-    if (SL[i] >= 0.0){
+    if (SL[i] >= wf){   /* SPECTRE-MOD: 0 -> wf */
       NFLX_LOOP(nv) sweep->flux[i][nv] = fL[nv];
       sweep->press[i] = pL[i];
+      if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, uL);   /* SPECTRE-MOD */
       hx_stat[HX_SUPERSONIC]++;
       continue;
     }
-    if (SR[i] <= 0.0){
+    if (SR[i] <= wf){   /* SPECTRE-MOD: 0 -> wf */
       NFLX_LOOP(nv) sweep->flux[i][nv] = fR[nv];
       sweep->press[i] = pR[i];
+      if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, uR);   /* SPECTRE-MOD */
       hx_stat[HX_SUPERSONIC]++;
       continue;
     }
@@ -892,6 +901,8 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
     if (switch_to_hll){
       NFLX_LOOP(nv) sweep->flux[i][nv] = Fhll[i][nv];
       sweep->press[i]  = (SR[i]*pL[i] - SL[i]*pR[i])*dS_1;
+      if (wf != 0.0) SpectreMovingFaceHll (sweep->flux[i], wf, uL, uR, fL, fR,   /* SPECTRE-MOD */
+                                           pL[i], pR[i], SL[i], SR[i]);
       hx_stat[HX_HLL]++;
       continue;
     }
@@ -903,23 +914,25 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
       double SaL = PaL.Kx, SaR = PaR.Kx, Sc = hx_Sc;   /* before GetAState etc. */
       double Byc, Bzc, dK;
 
-      if (PaL.Sa >= -1.e-6){
+      if (PaL.Sa >= wf - 1.e-6){   /* SPECTRE-MOD: 0 -> wf */
         HX_GetAState (&PaL, p);
         #if RMHD_REDUCED_ENERGY == YES
         PaL.u[ENG] -= PaL.u[RHO];
         #endif
         NFLX_LOOP(nv) sweep->flux[i][nv] = fL[nv] + SL[i]*(PaL.u[nv] - uL[nv]);
         sweep->press[i] = pL[i];
-      }else if (PaR.Sa <= 1.e-6){
+        if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, PaL.u);   /* SPECTRE-MOD */
+      }else if (PaR.Sa <= wf + 1.e-6){   /* SPECTRE-MOD: 0 -> wf */
         HX_GetAState (&PaR, p);
         #if RMHD_REDUCED_ENERGY == YES
         PaR.u[ENG] -= PaR.u[RHO];
         #endif
         NFLX_LOOP(nv) sweep->flux[i][nv] = fR[nv] + SR[i]*(PaR.u[nv] - uR[nv]);
         sweep->press[i] = pR[i];
+        if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, PaR.u);   /* SPECTRE-MOD */
       }else{
-        HX_GetCState (&PaL, &PaR, p, Uc);
-        if (hx_Sc > 0.0){
+        HX_GetCState (&PaL, &PaR, p, Uc, wf);   /* SPECTRE-MOD: + wf */
+        if (hx_Sc > wf){   /* SPECTRE-MOD: 0 -> wf */
           #if RMHD_REDUCED_ENERGY == YES
           PaL.u[ENG] -= PaL.u[RHO];
           Uc[ENG]    -= Uc[RHO];
@@ -927,6 +940,7 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
           NFLX_LOOP(nv) sweep->flux[i][nv] = fL[nv] + SL[i]*(PaL.u[nv] - uL[nv])
                                                     + PaL.Sa*(Uc[nv] - PaL.u[nv]);
           sweep->press[i] = pL[i];
+          if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, Uc);   /* SPECTRE-MOD */
         }else{
           #if RMHD_REDUCED_ENERGY == YES
           PaR.u[ENG] -= PaR.u[RHO];
@@ -935,6 +949,7 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
           NFLX_LOOP(nv) sweep->flux[i][nv] = fR[nv] + SR[i]*(PaR.u[nv] - uR[nv])
                                                     + PaR.Sa*(Uc[nv] - PaR.u[nv]);
           sweep->press[i] = pR[i];
+          if (wf != 0.0) SpectreMovingFace (sweep->flux[i], wf, Uc);   /* SPECTRE-MOD */
         }
       }
 
@@ -954,6 +969,7 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
 
         c.bx = hx_Bx;
         c.SfL = SL[i]; c.SfR = SR[i];
+        c.w = wf;   /* SPECTRE-MOD */
         c.UL[0] = uL[RHO]; c.UL[1] = uL[MXn]; c.UL[2] = uL[MXt]; c.UL[3] = uL[MXb];
         c.UL[4] = uL[ENG] + uL[RHO]; c.UL[5] = uL[BXt]; c.UL[6] = uL[BXb];
         c.UR[0] = uR[RHO]; c.UR[1] = uR[MXn]; c.UR[2] = uR[MXt]; c.UR[3] = uR[MXb];
@@ -967,8 +983,15 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
           c.RR[k] = c.SfR*c.UR[k] - c.FR[k];
         }
         /* slow speeds: the mean of the input states' slow eigenvalues */
-        Magnetosonic (vL, stateL->a2[i], stateL->h[i], lamL);
-        Magnetosonic (vR, stateR->a2[i], stateR->h[i], lamR);
+        /* SPECTRE-MOD (2026-10-21): where either side's eigenvalues cannot be
+           computed (MaxSignalSpeed then gave the face the light-cone bounds), keep
+           HLLD's flux instead of seeding the slow speeds from the previous
+           interface's lamL/lamR. */
+        if (Magnetosonic (vL, stateL->a2[i], stateL->h[i], lamL) != 0 ||
+            Magnetosonic (vR, stateR->a2[i], stateR->h[i], lamR) != 0) {
+          hx_stat[HX_HLLD]++;
+          continue;
+        }
         SsL = 0.5*(lamL[KSLOWM] + lamR[KSLOWM]);
         SsR = 0.5*(lamL[KSLOWP] + lamR[KSLOWP]);
         hx_clamp_gap (&SsL, &SsR, SaL, Sc, SaR);
@@ -987,6 +1010,7 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
         sweep->flux[i][MXt] = F[2];
         sweep->flux[i][MXb] = F[3];
         sweep->flux[i][BXn] = 0.0;
+        if (wf != 0.0) sweep->flux[i][BXn] -= wf*hx_Bx;   /* SPECTRE-MOD: as in every other region */
         sweep->flux[i][BXt] = F[5];
         sweep->flux[i][BXb] = F[6];
         #if RMHD_REDUCED_ENERGY == YES

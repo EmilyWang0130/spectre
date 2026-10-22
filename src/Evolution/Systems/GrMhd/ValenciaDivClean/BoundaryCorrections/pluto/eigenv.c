@@ -18,16 +18,27 @@ int MaxSignalSpeed (const State *state, double *cmin, double *cmax, int beg, int
  *********************************************************************** */
 {
   int    i, err;
+  int    first_failure = -1;   /* SPECTRE-MOD */
   double lambda[NFLX], scrh, a2;
 
   for (i = beg; i <= end; i++) {
     err = Magnetosonic (state->v[i], state->a2[i], state->h[i], lambda);
     if (err) Where(i,NULL); 
-    if (err != 0) return i;
+    /* SPECTRE-MOD (2026-10-21): on a failure, give THIS interface the light-cone
+       bounds and go on. Upstream returned here, and HLL_Speed ignores the return
+       value, so this interface and every later one in the batch kept whatever the
+       caller's (thread-local, persistent) speed buffers held from an earlier call:
+       silently wrong, finite fluxes that depended on call history. */
+    if (err != 0) {
+      if (first_failure < 0) first_failure = i;
+      cmax[i] =  1.0;
+      cmin[i] = -1.0;
+      continue;
+    }
     cmax[i] = lambda[KFASTP];
     cmin[i] = lambda[KFASTM];
   }
-  return 0;
+  return first_failure < 0 ? 0 : first_failure;   /* SPECTRE-MOD: upstream's value */
 }
 
 /* ********************************************************************* */

@@ -325,6 +325,13 @@ typedef struct Sweep_{
   State stateL;
   State stateR;
   State stateC;
+  /* SPECTRE-MOD: speed of the interface in the frame the states are given in, per interface
+     (NULL = 0, PLUTO's own static interface). The SpECTRE GR adapter solves the face problem in the
+     normal observer's orthonormal frame, through which the coordinate face moves at
+     w = (beta^n + n.v_mesh)/alpha; the solvers then sample their fan on the ray w and return the flux
+     through the moving face, F - w U. Set only by pluto_hlld_shim.c, whose Sweep is _Thread_local, so
+     this adds no shared state. See spectre_face_speed.h. */
+  const double *spectre_face_speed;
   char fill[16];
 } Sweep;
 

@@ -20,6 +20,7 @@ set(LIBRARY_SOURCES
   BoundaryCorrections/Test_HllemHydroYe.cpp
   BoundaryCorrections/Test_Marquina.cpp
   BoundaryCorrections/Test_PlutoD2R.cpp
+  BoundaryCorrections/Test_PlutoFaceFrame.cpp
   BoundaryCorrections/Test_PlutoHllc.cpp
   BoundaryCorrections/Test_PlutoHlld.cpp
   BoundaryCorrections/Test_PlutoHllx.cpp
