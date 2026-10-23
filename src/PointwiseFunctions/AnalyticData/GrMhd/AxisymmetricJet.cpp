@@ -3,6 +3,7 @@
 
 #include "PointwiseFunctions/AnalyticData/GrMhd/AxisymmetricJet.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <ostream>
@@ -62,7 +63,8 @@ AxisymmetricJet::AxisymmetricJet(
     double ambient_electron_fraction, double jet_density, double jet_pressure,
     double jet_electron_fraction, std::array<double, 3> jet_velocity,
     double inlet_radius, double nozzle_length, double smoothing_width,
-    std::array<double, 3> magnetic_field)
+    std::array<double, 3> magnetic_field, double toroidal_field_amplitude,
+    double magnetization_radius)
     : equation_of_state_(adiabatic_index),
       ambient_density_(ambient_density),
       ambient_pressure_(ambient_pressure),
@@ -74,7 +76,9 @@ AxisymmetricJet::AxisymmetricJet(
       inlet_radius_(inlet_radius),
       nozzle_length_(nozzle_length),
       smoothing_width_(smoothing_width),
-      magnetic_field_(magnetic_field) {}
+      magnetic_field_(magnetic_field),
+      toroidal_field_amplitude_(toroidal_field_amplitude),
+      magnetization_radius_(magnetization_radius) {}
 
 std::unique_ptr<evolution::initial_data::InitialData>
 AxisymmetricJet::get_clone() const {
@@ -98,6 +102,8 @@ void AxisymmetricJet::pup(PUP::er& p) {
   p | nozzle_length_;
   p | smoothing_width_;
   p | magnetic_field_;
+  p | toroidal_field_amplitude_;
+  p | magnetization_radius_;
 }
 
 template <typename DataType>
@@ -164,7 +170,27 @@ template <typename DataType>
 tuples::TaggedTuple<hydro::Tags::Pressure<DataType>> AxisymmetricJet::variables(
     const tnsr::I<DataType, 3>& x,
     tmpl::list<hydro::Tags::Pressure<DataType>> /*meta*/) const {
-  return blend_scalar(nozzle_profile(x), ambient_pressure_, jet_pressure_);
+  // Inside the jet the pressure balances the toroidal field (MUB09):
+  // p_jet(R) = p_j + b_m^2 (1 - min(R^2/a^2, 1)); with b_m = 0 it is p_j, and
+  // the blend below is then blend_scalar's expression exactly.
+  const auto profile = nozzle_profile(x);
+  auto result = make_with_value<Scalar<DataType>>(x, ambient_pressure_);
+  for (size_t i = 0; i < get_size(get(result)); ++i) {
+    const double radius = get_element(get<0>(x), i);
+    const double core_ratio =
+        magnetization_radius_ > 0.
+            ? std::min((radius / magnetization_radius_) *
+                           (radius / magnetization_radius_),
+                       1.)
+            : 1.;
+    const double jet_pressure =
+        jet_pressure_ + toroidal_field_amplitude_ * toroidal_field_amplitude_ *
+                            (1. - core_ratio);
+    get_element(get(result), i) =
+        ambient_pressure_ +
+        (jet_pressure - ambient_pressure_) * get_element(profile, i);
+  }
+  return result;
 }
 
 template <typename DataType>
@@ -178,6 +204,25 @@ AxisymmetricJet::variables(
   get<0>(magnetic_field) = magnetic_field_[0];
   get<1>(magnetic_field) = magnetic_field_[1];
   get<2>(magnetic_field) = magnetic_field_[2];
+  if (toroidal_field_amplitude_ != 0.) {
+    // MUB09's toroidal field inside the jet, B_phi = W_j b_m (R/a for R < a,
+    // a/R for R >= a), the lab-frame field of a beam moving at W_j; blended
+    // with the ambient (no toroidal field) like the other jet values.
+    const auto profile = nozzle_profile(x);
+    const double jet_lorentz_factor =
+        1. / sqrt(1. - (jet_velocity_[0] * jet_velocity_[0] +
+                        jet_velocity_[1] * jet_velocity_[1] +
+                        jet_velocity_[2] * jet_velocity_[2]));
+    for (size_t i = 0; i < get_size(get<2>(magnetic_field)); ++i) {
+      const double radius = get_element(get<0>(x), i);
+      const double shape = radius < magnetization_radius_
+                               ? radius / magnetization_radius_
+                               : magnetization_radius_ / radius;
+      get_element(get<2>(magnetic_field), i) +=
+          jet_lorentz_factor * toroidal_field_amplitude_ * shape *
+          get_element(profile, i);
+    }
+  }
   return {std::move(magnetic_field)};
 }
 
@@ -228,7 +273,9 @@ bool operator==(const AxisymmetricJet& lhs, const AxisymmetricJet& rhs) {
          lhs.inlet_radius_ == rhs.inlet_radius_ and
          lhs.nozzle_length_ == rhs.nozzle_length_ and
          lhs.smoothing_width_ == rhs.smoothing_width_ and
-         lhs.magnetic_field_ == rhs.magnetic_field_;
+         lhs.magnetic_field_ == rhs.magnetic_field_ and
+         lhs.toroidal_field_amplitude_ == rhs.toroidal_field_amplitude_ and
+         lhs.magnetization_radius_ == rhs.magnetization_radius_;
 }
 
 bool operator!=(const AxisymmetricJet& lhs, const AxisymmetricJet& rhs) {

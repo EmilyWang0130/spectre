@@ -443,6 +443,60 @@ void test_creation_and_semantics() {
 }
 }  // namespace
 
+// MUB09's toroidal field and pressure profile inside the jet; zero outside.
+void test_toroidal_field() {
+  const double b_m = 0.2;
+  const double a = 0.5;
+  const grmhd::AnalyticData::AxisymmetricJet jet{
+      adiabatic_index, ambient_density, ambient_pressure, 0., jet_density,
+      jet_pressure, 0., std::array<double, 3>{{0., jet_speed, 0.}}, 1., 1., 0.,
+      std::array<double, 3>{{0., axial_field, 0.}}, b_m, a};
+  // Three points: in the core (R = 0.25), outside the core but inside the
+  // jet (R = 0.75), and in the ambient (z = 5).
+  tnsr::I<DataVector, 3> x{DataVector{3, 0.}};
+  get<0>(x) = DataVector{0.25, 0.75, 0.5};
+  get<1>(x) = DataVector{0.5, 0.5, 5.0};
+  const auto vars = jet.variables(
+      x, tmpl::list<hydro::Tags::Pressure<DataVector>,
+                    hydro::Tags::MagneticField<DataVector, 3>>{});
+  const auto& pressure = get<hydro::Tags::Pressure<DataVector>>(vars);
+  const auto& b_field = get<hydro::Tags::MagneticField<DataVector, 3>>(vars);
+  const double jet_lorentz_factor = 1. / sqrt(1. - jet_speed * jet_speed);
+  CHECK(get(pressure)[0] == approx(jet_pressure + b_m * b_m * (1. - 0.25)));
+  CHECK(get(pressure)[1] == approx(jet_pressure));
+  CHECK(get(pressure)[2] == approx(ambient_pressure));
+  CHECK(get<2>(b_field)[0] == approx(jet_lorentz_factor * b_m * 0.5));
+  CHECK(get<2>(b_field)[1] == approx(jet_lorentz_factor * b_m * (a / 0.75)));
+  CHECK(get<2>(b_field)[2] == approx(0.));
+  for (size_t i = 0; i < 3; ++i) {
+    CHECK(get<0>(b_field)[i] == approx(0.));
+    CHECK(get<1>(b_field)[i] == approx(axial_field));
+  }
+  // b_m = 0 is the Del Zanna jet: the same pressure and field as make_jet(0.)
+  // whatever the radius option says (the defaulted arguments are 0. and 0.5).
+  const grmhd::AnalyticData::AxisymmetricJet plain{
+      adiabatic_index, ambient_density, ambient_pressure, 0., jet_density,
+      jet_pressure, 0., std::array<double, 3>{{0., jet_speed, 0.}}, 1., 1., 0.,
+      std::array<double, 3>{{0., axial_field, 0.}}, 0., 2.};
+  const grmhd::AnalyticData::AxisymmetricJet defaulted{
+      adiabatic_index, ambient_density, ambient_pressure, 0., jet_density,
+      jet_pressure, 0., std::array<double, 3>{{0., jet_speed, 0.}}, 1., 1., 0.,
+      std::array<double, 3>{{0., axial_field, 0.}}};
+  CHECK(defaulted == make_jet(0.));
+  const auto expected = make_jet(0.).variables(
+      x, tmpl::list<hydro::Tags::Pressure<DataVector>,
+                    hydro::Tags::MagneticField<DataVector, 3>>{});
+  for (const auto& other : {plain, defaulted}) {
+    const auto got = other.variables(
+        x, tmpl::list<hydro::Tags::Pressure<DataVector>,
+                      hydro::Tags::MagneticField<DataVector, 3>>{});
+    CHECK(get<hydro::Tags::Pressure<DataVector>>(got) ==
+          get<hydro::Tags::Pressure<DataVector>>(expected));
+    CHECK(get<hydro::Tags::MagneticField<DataVector, 3>>(got) ==
+          get<hydro::Tags::MagneticField<DataVector, 3>>(expected));
+  }
+}
+
 SPECTRE_TEST_CASE("Unit.PointwiseFunctions.AnalyticData.GrMhd.AxisymmetricJet",
                   "[Unit][PointwiseFunctions]") {
   test_creation_and_semantics();
@@ -451,4 +505,5 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.AnalyticData.GrMhd.AxisymmetricJet",
   test_closed_form_beam_quantities();
   test_tag_completeness();
   test_smoothing();
+  test_toroidal_field();
 }

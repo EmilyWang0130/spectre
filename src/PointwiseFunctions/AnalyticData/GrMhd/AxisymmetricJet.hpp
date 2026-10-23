@@ -203,16 +203,38 @@ class AxisymmetricJet
         "the Del Zanna Fig. 6 setup this is purely axial, [0., B_z, 0.]"};
     static std::array<double, 3> suggested_value() { return {{0., 0.1, 0.}}; }
   };
+  struct ToroidalFieldAmplitude {
+    using type = double;
+    static constexpr Options::String help = {
+        "Amplitude b_m of a toroidal field inside the jet, in the form of "
+        "Mignone, Ugliano & Bodo 2009 (Sec. 4.2.3; PLUTO's RMHD/Jet): "
+        "B_phi = W_j b_m (R/a for R < a, a/R for R >= a), with the jet pressure "
+        "p_j + b_m^2 (1 - min(R^2/a^2, 1)) balancing it. Zero leaves the "
+        "Del Zanna et al. 2003 jet unchanged."};
+    static double lower_bound() { return 0.; }
+    static double suggested_value() { return 0.; }
+  };
+  struct MagnetizationRadius {
+    using type = double;
+    static constexpr Options::String help = {
+        "Radius a of the toroidal field's core, in units of the inlet radius "
+        "(0.5 in Mignone, Ugliano & Bodo 2009). Must be positive when "
+        "ToroidalFieldAmplitude is."};
+    static double lower_bound() { return 0.; }
+    static double suggested_value() { return 0.5; }
+  };
 
   using options = tmpl::list<AdiabaticIndex, AmbientDensity, AmbientPressure,
                              AmbientElectronFraction, JetDensity, JetPressure,
                              JetElectronFraction, JetVelocity, InletRadius,
-                             NozzleLength, SmoothingWidth, MagneticField>;
+                             NozzleLength, SmoothingWidth, MagneticField,
+                             ToroidalFieldAmplitude, MagnetizationRadius>;
 
   static constexpr Options::String help = {
       "Magnetized axisymmetric relativistic jet (Del Zanna et al. 2003, "
-      "Fig. 6). Intended for a CartoonCylinder domain, where x^0 is the "
-      "cylindrical radius and x^1 the symmetry axis."};
+      "Fig. 6), optionally with the toroidal field of Mignone, Ugliano & Bodo "
+      "2009 inside the jet. Intended for a CartoonCylinder domain, where x^0 "
+      "is the cylindrical radius and x^1 the symmetry axis."};
 
   AxisymmetricJet() = default;
   AxisymmetricJet(const AxisymmetricJet& /*rhs*/) = default;
@@ -227,7 +249,9 @@ class AxisymmetricJet
                   double jet_electron_fraction,
                   std::array<double, 3> jet_velocity, double inlet_radius,
                   double nozzle_length, double smoothing_width,
-                  std::array<double, 3> magnetic_field);
+                  std::array<double, 3> magnetic_field,
+                  double toroidal_field_amplitude = 0.,
+                  double magnetization_radius = 0.5);
 
   auto get_clone() const
       -> std::unique_ptr<evolution::initial_data::InitialData> override;
@@ -352,6 +376,9 @@ class AxisymmetricJet
       {std::numeric_limits<double>::signaling_NaN(),
        std::numeric_limits<double>::signaling_NaN(),
        std::numeric_limits<double>::signaling_NaN()}};
+  double toroidal_field_amplitude_ =
+      std::numeric_limits<double>::signaling_NaN();
+  double magnetization_radius_ = std::numeric_limits<double>::signaling_NaN();
 
   friend bool operator==(const AxisymmetricJet& lhs,
                          const AxisymmetricJet& rhs);
