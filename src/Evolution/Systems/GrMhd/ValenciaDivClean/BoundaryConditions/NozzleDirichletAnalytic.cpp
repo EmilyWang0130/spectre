@@ -10,6 +10,7 @@
 #include <ostream>
 #include <pup.h>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
 
@@ -18,6 +19,7 @@
 #include "DataStructures/SliceVariables.hpp"
 #include "DataStructures/Tags/TempTensor.hpp"
 #include "DataStructures/Tensor/Tensor.hpp"
+#include "DataStructures/Tensor/EagerMath/DeterminantAndInverse.hpp"
 #include "DataStructures/Variables.hpp"
 #include "Domain/CoordinateMaps/CoordinateMap.hpp"
 #include "Domain/ElementMap.hpp"
@@ -28,8 +30,11 @@
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryConditions/DirichletAnalytic.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryConditions/HydroFreeOutflow.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryConditions/Reflective.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/ComputeFluxesFromPrimitives.hpp"
 #include "NumericalAlgorithms/Spectral/Mesh.hpp"
 #include "Options/Options.hpp"
+#include "PointwiseFunctions/GeneralRelativity/Tags.hpp"
+#include "PointwiseFunctions/Hydro/Tags.hpp"
 #include "Options/ParseError.hpp"
 #include "Options/ParseOptions.hpp"
 #include "Utilities/ErrorHandling/Error.hpp"
@@ -419,13 +424,6 @@ void NozzleDirichletAnalytic::fd_ghost(
                   interior_lorentz_factor, interior_spatial_velocity,
                   interior_magnetic_field, reconstructor);
   } else {
-    if (outside_ == NozzleOutside::Extrapolation and
-        cell_centered_ghost_fluxes->has_value()) {
-      ERROR(
-          "NozzleDirichletAnalytic with Outside: Extrapolation does not "
-          "support cell-centered ghost fluxes (FiniteDifferenceDerivativeOrder "
-          "above 2).");
-    }
     HydroFreeOutflow::fd_ghost(
         rest_mass_density, electron_fraction, temperature,
         lorentz_factor_times_spatial_velocity, magnetic_field,
@@ -463,6 +461,95 @@ void NozzleDirichletAnalytic::fd_ghost(
       }
       lorentz_factor_times_spatial_velocity->get(normal_dimension) =
           get(get<NormalMomentum>(ghost_slices));
+      if (cell_centered_ghost_fluxes->has_value()) {
+        // HydroFreeOutflow's fluxes belong to its own ghost velocity. Recompute
+        // them from the final primitives: rho, Y_e, B and Phi as set above, the
+        // pressure, specific internal energy and metric of the boundary cell
+        // replicated over the ghost layers (as HydroFreeOutflow does), and the
+        // Lorentz factor of the restored W v^i.
+        const size_t number_of_ghost_points =
+            number_of_face_points * ghost_zone_size;
+        const auto replicate = [&](const auto& interior_tensor) {
+          auto face = evolution::dg::subcell::slice_tensor_for_subcell(
+              interior_tensor, subcell_extents, 1, direction, {});
+          std::decay_t<decltype(face)> ghost{number_of_ghost_points};
+          Variables<tmpl::list<NormalMomentum>> face_component{
+              number_of_face_points};
+          for (size_t component = 0; component < face.size(); ++component) {
+            get(get<NormalMomentum>(face_component)) = face[component];
+            Variables<tmpl::list<NormalMomentum>> ghost_component{
+                number_of_ghost_points, 0.0};
+            for (size_t ghost_index = 0; ghost_index < ghost_zone_size;
+                 ++ghost_index) {
+              add_slice_to_data(make_not_null(&ghost_component),
+                                face_component, ghost_extents,
+                                normal_dimension, ghost_index);
+            }
+            ghost[component] = get(get<NormalMomentum>(ghost_component));
+          }
+          return ghost;
+        };
+        Variables<tmpl::list<
+            hydro::Tags::RestMassDensity<DataVector>,
+            hydro::Tags::ElectronFraction<DataVector>,
+            hydro::Tags::SpecificInternalEnergy<DataVector>,
+            hydro::Tags::Pressure<DataVector>,
+            hydro::Tags::SpatialVelocity<DataVector, 3>,
+            hydro::Tags::LorentzFactor<DataVector>,
+            hydro::Tags::MagneticField<DataVector, 3>,
+            hydro::Tags::DivergenceCleaningField<DataVector>,
+            gr::Tags::SqrtDetSpatialMetric<DataVector>,
+            gr::Tags::SpatialMetric<DataVector, 3>,
+            gr::Tags::InverseSpatialMetric<DataVector, 3>,
+            gr::Tags::Lapse<DataVector>, gr::Tags::Shift<DataVector, 3>>>
+            ghost_vars{number_of_ghost_points};
+        get<hydro::Tags::RestMassDensity<DataVector>>(ghost_vars) =
+            *rest_mass_density;
+        get<hydro::Tags::ElectronFraction<DataVector>>(ghost_vars) =
+            *electron_fraction;
+        get<hydro::Tags::MagneticField<DataVector, 3>>(ghost_vars) =
+            *magnetic_field;
+        get<hydro::Tags::DivergenceCleaningField<DataVector>>(ghost_vars) =
+            *divergence_cleaning_field;
+        get<hydro::Tags::Pressure<DataVector>>(ghost_vars) =
+            replicate(interior_pressure);
+        get<hydro::Tags::SpecificInternalEnergy<DataVector>>(ghost_vars) =
+            replicate(interior_specific_internal_energy);
+        get<gr::Tags::Lapse<DataVector>>(ghost_vars) = replicate(interior_lapse);
+        get<gr::Tags::Shift<DataVector, 3>>(ghost_vars) =
+            replicate(interior_shift);
+        get<gr::Tags::SpatialMetric<DataVector, 3>>(ghost_vars) =
+            replicate(interior_spatial_metric);
+        const auto& spatial_metric =
+            get<gr::Tags::SpatialMetric<DataVector, 3>>(ghost_vars);
+        determinant_and_inverse(
+            make_not_null(
+                &get<gr::Tags::SqrtDetSpatialMetric<DataVector>>(ghost_vars)),
+            make_not_null(
+                &get<gr::Tags::InverseSpatialMetric<DataVector, 3>>(ghost_vars)),
+            spatial_metric);
+        get(get<gr::Tags::SqrtDetSpatialMetric<DataVector>>(ghost_vars)) = sqrt(
+            get(get<gr::Tags::SqrtDetSpatialMetric<DataVector>>(ghost_vars)));
+        DataVector& lorentz_factor =
+            get(get<hydro::Tags::LorentzFactor<DataVector>>(ghost_vars));
+        lorentz_factor = 1.0;
+        for (size_t i = 0; i < 3; ++i) {
+          for (size_t j = 0; j < 3; ++j) {
+            lorentz_factor += spatial_metric.get(i, j) *
+                              lorentz_factor_times_spatial_velocity->get(i) *
+                              lorentz_factor_times_spatial_velocity->get(j);
+          }
+        }
+        lorentz_factor = sqrt(lorentz_factor);
+        auto& spatial_velocity =
+            get<hydro::Tags::SpatialVelocity<DataVector, 3>>(ghost_vars);
+        for (size_t i = 0; i < 3; ++i) {
+          spatial_velocity.get(i) =
+              lorentz_factor_times_spatial_velocity->get(i) / lorentz_factor;
+        }
+        compute_fluxes_from_primitives(
+            make_not_null(&cell_centered_ghost_fluxes->value()), ghost_vars);
+      }
     }
   }
 

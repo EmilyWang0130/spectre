@@ -78,8 +78,9 @@ std::ostream& operator<<(std::ostream& os, NozzleOutside outside);
  *   normal component of \f$W v^i\f$ is copied from the boundary cell whatever
  *   its sign, so the ghost cells are a zero-gradient copy of the boundary
  *   cell's primitives with \f$\Phi = 0\f$. Cell-centered ghost fluxes
- *   (`FiniteDifferenceDerivativeOrder` above 2) are not supported with it. On
- *   DG faces it falls back to `HydroFreeOutflow`.
+ *   (`FiniteDifferenceDerivativeOrder` above 2) are recomputed from these
+ *   primitives, with the boundary cell's pressure, specific internal energy
+ *   and metric. On DG faces it falls back to `HydroFreeOutflow`.
  * - `FreeOutflow`: `HydroFreeOutflow`.
  * - `Reflective`, `ReflectiveBoth`: `Reflective` with `ReflectBoth` false or
  *   true.
