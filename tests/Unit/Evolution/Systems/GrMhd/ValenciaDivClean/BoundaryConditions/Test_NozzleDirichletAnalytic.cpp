@@ -16,6 +16,7 @@
 #include "DataStructures/DataVector.hpp"
 #include "DataStructures/Index.hpp"
 #include "DataStructures/Tensor/Tensor.hpp"
+#include "DataStructures/Tensor/EagerMath/DeterminantAndInverse.hpp"
 #include "DataStructures/Variables.hpp"
 #include "Domain/CoordinateMaps/CoordinateMap.hpp"
 #include "Domain/CoordinateMaps/CoordinateMap.tpp"
@@ -30,6 +31,7 @@
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryConditions/HydroFreeOutflow.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryConditions/NozzleDirichletAnalytic.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryConditions/Reflective.hpp"
+#include "Evolution/Systems/GrMhd/ValenciaDivClean/ComputeFluxesFromPrimitives.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/FiniteDifference/MonotonisedCentral.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/System.hpp"
 #include "Framework/TestCreation.hpp"
@@ -37,6 +39,8 @@
 #include "Helpers/DataStructures/MakeWithRandomValues.hpp"
 #include "NumericalAlgorithms/Spectral/Mesh.hpp"
 #include "PointwiseFunctions/AnalyticSolutions/GrMhd/SmoothFlow.hpp"
+#include "PointwiseFunctions/GeneralRelativity/Tags.hpp"
+#include "PointwiseFunctions/Hydro/Tags.hpp"
 #include "Utilities/Gsl.hpp"
 #include "Utilities/Serialization/RegisterDerivedClassesWithCharm.hpp"
 #include "Utilities/TMPL.hpp"
@@ -186,28 +190,6 @@ void test_fd(const NozzleOutside outside, const Direction<3>& direction,
 
   for (const bool with_fluxes : {false, true}) {
     CAPTURE(with_fluxes);
-    if (with_fluxes and outside == NozzleOutside::Extrapolation) {
-      FdGhost result{number_of_ghost_points, true};
-      CHECK_THROWS_WITH(
-          clone.fd_ghost(
-              make_not_null(&result.rest_mass_density),
-              make_not_null(&result.electron_fraction),
-              make_not_null(&result.temperature),
-              make_not_null(&result.lorentz_factor_times_spatial_velocity),
-              make_not_null(&result.magnetic_field),
-              make_not_null(&result.divergence_cleaning_field),
-              make_not_null(&result.fluxes), direction, subcell_mesh,
-              interior.shift, interior.lapse, interior.spatial_metric,
-              interior.rest_mass_density, interior.electron_fraction,
-              interior.temperature, interior.pressure,
-              interior.specific_internal_energy, interior.lorentz_factor,
-              interior.spatial_velocity, interior.magnetic_field, time,
-              functions_of_time, logical_to_grid_map, *grid_to_inertial_map,
-              reconstructor),
-          Catch::Matchers::ContainsSubstring(
-              "does not support cell-centered ghost fluxes"));
-      continue;
-    }
     FdGhost result{number_of_ghost_points, with_fluxes};
     clone.fd_ghost(make_not_null(&result.rest_mass_density),
                    make_not_null(&result.electron_fraction),
@@ -271,6 +253,95 @@ void test_fd(const NozzleOutside outside, const Direction<3>& direction,
     // point's normal W v^i is that of the boundary cell it sits beyond.
     Index<3> ghost_extents = extents;
     ghost_extents[normal_dimension] = ghost_zone_size;
+    const auto boundary_cell_of = [&](const size_t point) {
+      std::array<size_t, 3> index{};
+      index[0] = point % ghost_extents[0];
+      index[1] = (point / ghost_extents[0]) % ghost_extents[1];
+      index[2] = point / (ghost_extents[0] * ghost_extents[1]);
+      index[normal_dimension] =
+          direction.side() == Side::Lower ? 0 : extents[normal_dimension] - 1;
+      return index[0] + extents[0] * (index[1] + extents[1] * index[2]);
+    };
+    // Outside the nozzle, Extrapolation's fluxes are those of the returned
+    // primitives: the ghost's rho, Y_e, B and Phi, the boundary cell's p,
+    // epsilon and metric, and the Lorentz factor of the restored W v^i (not
+    // HydroFreeOutflow's fluxes, which belong to its own ghost velocity).
+    std::optional<GhostFluxes> extrapolation_fluxes{};
+    if (with_fluxes and outside == NozzleOutside::Extrapolation) {
+      Variables<tmpl::list<
+          hydro::Tags::RestMassDensity<DataVector>,
+          hydro::Tags::ElectronFraction<DataVector>,
+          hydro::Tags::SpecificInternalEnergy<DataVector>,
+          hydro::Tags::Pressure<DataVector>,
+          hydro::Tags::SpatialVelocity<DataVector, 3>,
+          hydro::Tags::LorentzFactor<DataVector>,
+          hydro::Tags::MagneticField<DataVector, 3>,
+          hydro::Tags::DivergenceCleaningField<DataVector>,
+          gr::Tags::SqrtDetSpatialMetric<DataVector>,
+          gr::Tags::SpatialMetric<DataVector, 3>,
+          gr::Tags::InverseSpatialMetric<DataVector, 3>,
+          gr::Tags::Lapse<DataVector>, gr::Tags::Shift<DataVector, 3>>>
+          ghost_vars{number_of_ghost_points};
+      get<hydro::Tags::RestMassDensity<DataVector>>(ghost_vars) =
+          result.rest_mass_density;
+      get<hydro::Tags::ElectronFraction<DataVector>>(ghost_vars) =
+          result.electron_fraction;
+      get<hydro::Tags::MagneticField<DataVector, 3>>(ghost_vars) =
+          result.magnetic_field;
+      get<hydro::Tags::DivergenceCleaningField<DataVector>>(ghost_vars) =
+          result.divergence_cleaning_field;
+      auto& pressure = get<hydro::Tags::Pressure<DataVector>>(ghost_vars);
+      auto& specific_internal_energy =
+          get<hydro::Tags::SpecificInternalEnergy<DataVector>>(ghost_vars);
+      auto& lapse = get<gr::Tags::Lapse<DataVector>>(ghost_vars);
+      auto& shift = get<gr::Tags::Shift<DataVector, 3>>(ghost_vars);
+      auto& spatial_metric =
+          get<gr::Tags::SpatialMetric<DataVector, 3>>(ghost_vars);
+      for (size_t point = 0; point < number_of_ghost_points; ++point) {
+        const size_t cell = boundary_cell_of(point);
+        get(pressure)[point] = get(interior.pressure)[cell];
+        get(specific_internal_energy)[point] =
+            get(interior.specific_internal_energy)[cell];
+        get(lapse)[point] = get(interior.lapse)[cell];
+        for (size_t i = 0; i < 3; ++i) {
+          shift.get(i)[point] = interior.shift.get(i)[cell];
+          for (size_t j = i; j < 3; ++j) {
+            spatial_metric.get(i, j)[point] =
+                interior.spatial_metric.get(i, j)[cell];
+          }
+        }
+      }
+      determinant_and_inverse(
+          make_not_null(
+              &get<gr::Tags::SqrtDetSpatialMetric<DataVector>>(ghost_vars)),
+          make_not_null(
+              &get<gr::Tags::InverseSpatialMetric<DataVector, 3>>(ghost_vars)),
+          spatial_metric);
+      get(get<gr::Tags::SqrtDetSpatialMetric<DataVector>>(ghost_vars)) =
+          sqrt(get(get<gr::Tags::SqrtDetSpatialMetric<DataVector>>(ghost_vars)));
+      auto& lorentz_factor =
+          get<hydro::Tags::LorentzFactor<DataVector>>(ghost_vars);
+      get(lorentz_factor) = 1.0;
+      for (size_t i = 0; i < 3; ++i) {
+        for (size_t j = 0; j < 3; ++j) {
+          get(lorentz_factor) +=
+              spatial_metric.get(i, j) *
+              result.lorentz_factor_times_spatial_velocity.get(i) *
+              result.lorentz_factor_times_spatial_velocity.get(j);
+        }
+      }
+      get(lorentz_factor) = sqrt(get(lorentz_factor));
+      auto& spatial_velocity =
+          get<hydro::Tags::SpatialVelocity<DataVector, 3>>(ghost_vars);
+      for (size_t i = 0; i < 3; ++i) {
+        spatial_velocity.get(i) =
+            result.lorentz_factor_times_spatial_velocity.get(i) /
+            get(lorentz_factor);
+      }
+      extrapolation_fluxes.emplace(number_of_ghost_points);
+      compute_fluxes_from_primitives(make_not_null(&*extrapolation_fluxes),
+                                     ghost_vars);
+    }
     size_t number_inside = 0;
     for (size_t point = 0; point < number_of_ghost_points; ++point) {
       CAPTURE(point);
@@ -289,15 +360,7 @@ void test_fd(const NozzleOutside outside, const Direction<3>& direction,
       for (size_t i = 0; i < 3; ++i) {
         if (i == normal_dimension and not inside and
             outside == NozzleOutside::Extrapolation) {
-          std::array<size_t, 3> index{};
-          index[0] = point % ghost_extents[0];
-          index[1] = (point / ghost_extents[0]) % ghost_extents[1];
-          index[2] = point / (ghost_extents[0] * ghost_extents[1]);
-          index[normal_dimension] = direction.side() == Side::Lower
-                                        ? 0
-                                        : extents[normal_dimension] - 1;
-          const size_t volume_point =
-              index[0] + extents[0] * (index[1] + extents[1] * index[2]);
+          const size_t volume_point = boundary_cell_of(point);
           CHECK(result.lorentz_factor_times_spatial_velocity.get(i)[point] ==
                 approx(get(interior.lorentz_factor)[volume_point] *
                        interior.spatial_velocity.get(i)[volume_point]));
@@ -311,10 +374,14 @@ void test_fd(const NozzleOutside outside, const Direction<3>& direction,
             result.fluxes->number_of_independent_components;
         for (size_t component = 0; component < number_of_components;
              ++component) {
-          CHECK(result.fluxes
-                    ->data()[component * number_of_ghost_points + point] ==
-                expected.fluxes
-                    ->data()[component * number_of_ghost_points + point]);
+          const size_t offset = component * number_of_ghost_points + point;
+          if (not inside and outside == NozzleOutside::Extrapolation) {
+            CHECK(result.fluxes->data()[offset] ==
+                  approx(extrapolation_fluxes->data()[offset]));
+          } else {
+            CHECK(result.fluxes->data()[offset] ==
+                  expected.fluxes->data()[offset]);
+          }
         }
       }
     }

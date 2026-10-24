@@ -430,7 +430,9 @@ void test_creation_and_semantics() {
           "  InletRadius: 1.\n"
           "  NozzleLength: 1.\n"
           "  SmoothingWidth: 0.\n"
-          "  MagneticField: [0., 0.1, 0.]\n")
+          "  MagneticField: [0., 0.1, 0.]\n"
+          "  ToroidalFieldAmplitude: 0.\n"
+          "  MagnetizationRadius: 0.5\n")
           ->get_clone();
   const auto deserialized = serialize_and_deserialize(option_data);
   const auto& parsed =
