@@ -155,6 +155,14 @@ void cartesian_high_order_fluxes_using_nodes(
         get<tag>((*high_order_boundary_corrections_in_logical_direction)[dim]);
     const auto& second_order_var_correction =
         get<tag>(second_order_boundary_corrections_in_logical_direction[dim]);
+    if (subcell_mesh.extents(dim) == 1) {
+      // A collapsed dimension (the symmetry direction of a cartoon mesh) has
+      // a single cell, no neighbors and no ghost data, and its flux
+      // divergence is replaced by the cartoon source terms; the second-order
+      // correction is passed through unchanged.
+      high_order_var_correction = second_order_var_correction;
+      return;
+    }
     const auto& recons_order = reconstruction_order[dim];
     const auto& cell_centered_flux =
         get<::Tags::Flux<tag, tmpl::size_t<Dim>, Frame::Inertial>>(
@@ -608,7 +616,9 @@ void cartesian_high_order_flux_corrections(
                second_order_boundary_corrections,
                [expected_size = second_order_boundary_corrections[0]
                                     .number_of_grid_points()](const auto& e) {
-                 return e.number_of_grid_points() == expected_size;
+                 // a collapsed (cartoon) dimension may carry no correction
+                 return e.number_of_grid_points() == expected_size or
+                        e.number_of_grid_points() == 0;
                }),
            "All second-order boundary corrections must be of the same size, "
                << second_order_boundary_corrections[0].number_of_grid_points());
