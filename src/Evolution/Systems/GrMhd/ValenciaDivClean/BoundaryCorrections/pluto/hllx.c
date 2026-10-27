@@ -78,7 +78,7 @@
   #define HLLX_STATS_EVERY 0
 #endif
 
-enum {HX_SUPERSONIC = 0, HX_HLL, HX_BX0, HX_HLLX, HX_HLLX_CONT, HX_HLLD, HX_NSTAT};
+enum {HX_SUPERSONIC = 0, HX_HLL, HX_BX0, HX_HLLX, HX_HLLX_CONT, HX_HLLD, HX_BT0, HX_BT0F, HX_NSTAT};
 static _Thread_local long hx_stat[HX_NSTAT];                 /* SPECTRE-MOD */
 static _Thread_local long hx_newton_iters, hx_calls;         /* SPECTRE-MOD */
 static _Thread_local int  hx_seven_waves = 1;   /* SPECTRE-MOD */    /* 0: HLLDR_Solver, HLLD with the converged root only */
@@ -788,6 +788,110 @@ void HLLX_Stats (long *out)
 }
 
 /* ===================================================================
+   2b. The field-aligned branch (2026-10-26): ZPL26 section 4.2.2, the case c_f ~ c_a with
+   c_s < c_a, in the relativistic variables. With v_t = B_t = 0 the longitudinal subsystem
+   (D, m_n, E - B_n^2/2) is exactly relativistic hydrodynamics -- b^2 = B_n^2 and the
+   magnetic terms are constants that drop out of every jump condition -- so the fan between
+   the (coincident) fast-Alfven waves is Mignone & Bodo 2005's HLLC with the SLOW (acoustic)
+   speeds as its outer speeds: closed form, no Newton. The seven-wave construction cannot
+   form there (its unknowns are the inner states' transverse fields, 0 = 0 at B_t = 0), and
+   HLLD's own fan degenerates (its a-states have zero width): on such faces the solver used
+   to keep HLLD's flux. Transverse momenta and fields keep the HLL flux over the fast fan
+   (they are Alfvenic and couple to the longitudinal system at O(B_t^2)); B_n's flux is zero;
+   everything is sampled at x/t = w (0 in PLUTO). Design and derivation:
+   notes/projects/active/hllx_rmhd/bt0_branch_design.md; numpy reference
+   scripts/rmhd_py/hllx_rmhd.py (bt0_face), validated against an independent relativistic
+   hydro HLLC to 1e-13 and against the converged seven-wave flux at B_t/B_n = 1e-2 to 1e-5.
+   =================================================================== */
+#ifndef HX_EPS_BT
+  #define HX_EPS_BT 1.0e-2            /* |B_t| <= HX_EPS_BT |B_n| on both sides takes the branch */
+#endif
+#ifndef HX_EPS_BT_FALLBACK
+  #define HX_EPS_BT_FALLBACK 5.0e-2   /* a nearly aligned face whose HLLD root or seven-wave Newton fails takes it too */
+#endif
+
+static int hx_bt0_gate (const double *vL, const double *vR, double a2L, double hL,
+                        double a2R, double hR, double bx, double eps)
+{
+  double bn = fabs(bx), bt, va2;
+  if (!(bn > 0.0)) return 0;
+  bt = sqrt(vL[BXt]*vL[BXt] + vL[BXb]*vL[BXb]); if (bt > eps*bn) return 0;
+  bt = sqrt(vR[BXt]*vR[BXt] + vR[BXb]*vR[BXb]); if (bt > eps*bn) return 0;
+  va2 = bn*bn/(vL[RHO]*hL + bn*bn); if (!(va2 > a2L)) return 0;   /* fast = Alfven needs v_A > c_s */
+  va2 = bn*bn/(vR[RHO]*hR + bn*bn); if (!(va2 > a2R)) return 0;
+  return 1;
+}
+
+static void hx_bt0_face (const double *vL, const double *vR,
+                         const double *uL, const double *uR,
+                         const double *fL, const double *fR,
+                         double pTL, double pTR, double SL, double SR, double bx,
+                         double a2L, double a2R, double w, const double *Fhll_i,
+                         double *flux, double *press)
+{
+  const double bconst = 0.5*bx*bx;
+  const double csL = sqrt(a2L), csR = sqrt(a2R), vnL = vL[VXn], vnR = vR[VXn];
+  const double SsL = MIN((vnL - csL)/(1.0 - vnL*csL), (vnR - csR)/(1.0 - vnR*csR));
+  const double SsR = MAX((vnL + csL)/(1.0 + vnL*csL), (vnR + csR)/(1.0 + vnR*csR));
+  double UL[3], UR[3], FL[3], FR[3], Uh[3], Fh[3], RL[3], RR[3], Us[3], Fl[3];
+  double dS, a, b, c, lam, disc, ps, pT, scrh, uh;
+  int k, nv;
+
+  /* longitudinal hydro variables: D, m_n, the TOTAL energy minus the magnetic constant; hydro fluxes */
+  UL[0] = uL[RHO]; UL[1] = uL[MXn]; UL[2] = uL[ENG] + uL[RHO] - bconst;
+  UR[0] = uR[RHO]; UR[1] = uR[MXn]; UR[2] = uR[ENG] + uR[RHO] - bconst;
+  FL[0] = fL[RHO]; FL[1] = fL[MXn] + pTL + bconst; FL[2] = fL[ENG] + fL[RHO];
+  FR[0] = fR[RHO]; FR[1] = fR[MXn] + pTR + bconst; FR[2] = fR[ENG] + fR[RHO];
+
+  dS = 1.0/(SsR - SsL);
+  for (k = 0; k < 3; k++){
+    Uh[k] = (SsR*UR[k] - SsL*UL[k] + FL[k] - FR[k])*dS;
+    Fh[k] = (SsR*FL[k] - SsL*FR[k] + SsL*SsR*(UR[k] - UL[k]))*dS;
+    RL[k] = SsL*UL[k] - FL[k];
+    RR[k] = SsR*UR[k] - FR[k];
+  }
+  /* Mignone & Bodo 2005: F_E^hll lam^2 - (E^hll + F_m^hll) lam + m^hll = 0, the subluminal root */
+  a = Fh[2]; b = -(Uh[2] + Fh[1]); c = Uh[1];
+  if (fabs(a) < 1.e-12*MAX(fabs(b), 1.e-300)){
+    lam = -c/b;
+  }else{
+    disc = b*b - 4.0*a*c; disc = MAX(disc, 0.0);
+    lam = (-b - sqrt(disc))/(2.0*a);
+  }
+  ps = 0.5*((RL[1] - RL[2]*lam)/(SsL*lam - 1.0) + (RR[1] - RR[2]*lam)/(SsR*lam - 1.0));
+
+  if (SsL >= w){
+    for (k = 0; k < 3; k++){ Us[k] = UL[k]; Fl[k] = FL[k]; }
+    pT = pTL;
+  }else if (lam >= w){
+    Us[0] = RL[0]/(SsL - lam); Us[1] = (RL[1] + ps)/(SsL - lam); Us[2] = (RL[2] + Us[1])/SsL;
+    for (k = 0; k < 3; k++) Fl[k] = FL[k] + SsL*(Us[k] - UL[k]);
+    pT = ps + bconst;
+  }else if (SsR > w){
+    Us[0] = RR[0]/(SsR - lam); Us[1] = (RR[1] + ps)/(SsR - lam); Us[2] = (RR[2] + Us[1])/SsR;
+    for (k = 0; k < 3; k++) Fl[k] = FR[k] + SsR*(Us[k] - UR[k]);
+    pT = ps + bconst;
+  }else{
+    for (k = 0; k < 3; k++){ Us[k] = UR[k]; Fl[k] = FR[k]; }
+    pT = pTR;
+  }
+
+  /* transverse components (and GLM's psi if present): HLL over the fast fan, sampled at w */
+  scrh = 1.0/(SR - SL);
+  for (nv = 0; nv < NFLX; nv++){
+    if (nv == RHO || nv == MXn || nv == ENG || nv == BXn) continue;
+    uh = (SR*uR[nv] - SL*uL[nv] + fL[nv] - fR[nv])*scrh;
+    flux[nv] = Fhll_i[nv] - w*uh;
+  }
+  /* PLUTO's layout: total pressure outside the normal momentum flux, reduced energy; magnetic constant restored */
+  flux[RHO] = Fl[0] - w*Us[0];
+  flux[MXn] = Fl[1] - bconst - pT - w*Us[1];
+  flux[ENG] = Fl[2] - Fl[0] - w*(Us[2] + bconst - Us[0]);
+  flux[BXn] = -w*bx;
+  *press = pT;
+}
+
+/* ===================================================================
    3. The solver: hlld.c's loop, with the seven-wave upgrade.
    =================================================================== */
 void HLLX_Solver (const Sweep *sweep, int beg, int end,
@@ -863,6 +967,14 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
     }
     Uhll[i][MXn] += (pL[i] - pR[i])*dS_1;
 
+    /* field-aligned faces: the closed-form branch (section 2b) */
+    if (hx_bt0_gate (vL, vR, stateL->a2[i], stateL->h[i], stateR->a2[i], stateR->h[i], Uhll[i][BXn], HX_EPS_BT)){
+      hx_bt0_face (vL, vR, uL, uR, fL, fR, pL[i], pR[i], SL[i], SR[i], Uhll[i][BXn],
+                   stateL->a2[i], stateR->a2[i], wf, Fhll[i], sweep->flux[i], &sweep->press[i]);
+      hx_stat[HX_BT0]++;
+      continue;
+    }
+
     memset (&PaL, 0, sizeof PaL);      /* deterministic: hlld.c leaves these on the stack */
     memset (&PaR, 0, sizeof PaR);
     PaL.S = SL[i];
@@ -899,6 +1011,12 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
     k = 0;
 
     if (switch_to_hll){
+      if (hx_bt0_gate (vL, vR, stateL->a2[i], stateL->h[i], stateR->a2[i], stateR->h[i], hx_Bx, HX_EPS_BT_FALLBACK)){
+        hx_bt0_face (vL, vR, uL, uR, fL, fR, pL[i], pR[i], SL[i], SR[i], hx_Bx,
+                     stateL->a2[i], stateR->a2[i], wf, Fhll[i], sweep->flux[i], &sweep->press[i]);
+        hx_stat[HX_BT0F]++;
+        continue;
+      }
       NFLX_LOOP(nv) sweep->flux[i][nv] = Fhll[i][nv];
       sweep->press[i]  = (SR[i]*pL[i] - SL[i]*pR[i])*dS_1;
       if (wf != 0.0) SpectreMovingFaceHll (sweep->flux[i], wf, uL, uR, fL, fR,   /* SPECTRE-MOD */
@@ -1002,7 +1120,14 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
 
         status = hx_solve_face (&c, z0, SaL, Sc, SaR, F);
         hx_stat[status]++;
-        if (status == HX_HLLD) continue;              /* HLLD's flux stays */
+        if (status == HX_HLLD){                      /* HLLD's flux stays, unless the face is nearly aligned */
+          if (hx_bt0_gate (vL, vR, stateL->a2[i], stateL->h[i], stateR->a2[i], stateR->h[i], hx_Bx, HX_EPS_BT_FALLBACK)){
+            hx_bt0_face (vL, vR, uL, uR, fL, fR, pL[i], pR[i], SL[i], SR[i], hx_Bx,
+                         stateL->a2[i], stateR->a2[i], wf, Fhll[i], sweep->flux[i], &sweep->press[i]);
+            hx_stat[HX_HLLD]--; hx_stat[HX_BT0F]++;
+          }
+          continue;
+        }
 
         /* back to PLUTO's layout: pressure apart, reduced energy */
         sweep->flux[i][RHO] = F[0];
@@ -1024,8 +1149,8 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
 
   #if HLLX_STATS_EVERY > 0
   if (hx_calls % HLLX_STATS_EVERY == 0){
-    printLog ("> HLLX stats after %ld calls: supersonic %ld, hll %ld, bx0 %ld, hllx %ld, hllx-cont %ld, hlld %ld; Newton iterations %ld\n",
-              hx_calls, hx_stat[0], hx_stat[1], hx_stat[2], hx_stat[3], hx_stat[4], hx_stat[5], hx_newton_iters);
+    printLog ("> HLLX stats after %ld calls: supersonic %ld, hll %ld, bx0 %ld, hllx %ld, hllx-cont %ld, hlld %ld, bt0 %ld, bt0-fallback %ld; Newton iterations %ld\n",
+              hx_calls, hx_stat[0], hx_stat[1], hx_stat[2], hx_stat[3], hx_stat[4], hx_stat[5], hx_stat[HX_BT0], hx_stat[HX_BT0F], hx_newton_iters);
   }
   #endif
 
