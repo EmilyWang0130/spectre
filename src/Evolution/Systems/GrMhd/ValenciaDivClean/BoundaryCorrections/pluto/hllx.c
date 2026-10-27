@@ -815,14 +815,20 @@ void HLLX_Stats (long *out)
                                  against B_n^2 but need not be against p (the cold large-B_x tube: B_t/B_n = 0.02,
                                  B_t^2/2p = 0.6; taking the branch there as a fallback wrecked the run, 2026-10-26) */
 #endif
+#ifndef HX_EPS_BTP_FALLBACK
+  #define HX_EPS_BTP_FALLBACK 1.0e-3  /* the fallback replaces a sound HLLD flux, not a degenerate one, so its
+                                         reduction error B_t^2/2p must be smaller: the relativistic large-B_x tube
+                                         (B_t/B_n = 0.02, B_t^2/2p = 0.9-1.0 %) took the fallback at 1e-2 and moved
+                                         rho by 1.5e-3 at its slow front with no change in error (gate job 79873) */
+#endif
 
 static int hx_bt0_gate (const double *vL, const double *vR, double a2L, double hL,
-                        double a2R, double hR, double bx, double eps)
+                        double a2R, double hR, double bx, double eps, double epsp)
 {
   double bn = fabs(bx), bt, va2;
   if (!(bn > 0.0)) return 0;
-  bt = sqrt(vL[BXt]*vL[BXt] + vL[BXb]*vL[BXb]); if (bt > eps*bn || 0.5*bt*bt > HX_EPS_BTP*vL[PRS]) return 0;
-  bt = sqrt(vR[BXt]*vR[BXt] + vR[BXb]*vR[BXb]); if (bt > eps*bn || 0.5*bt*bt > HX_EPS_BTP*vR[PRS]) return 0;
+  bt = sqrt(vL[BXt]*vL[BXt] + vL[BXb]*vL[BXb]); if (bt > eps*bn || 0.5*bt*bt > epsp*vL[PRS]) return 0;
+  bt = sqrt(vR[BXt]*vR[BXt] + vR[BXb]*vR[BXb]); if (bt > eps*bn || 0.5*bt*bt > epsp*vR[PRS]) return 0;
   va2 = bn*bn/(vL[RHO]*hL + bn*bn); if (!(va2 > a2L)) return 0;   /* fast = Alfven needs v_A > c_s */
   va2 = bn*bn/(vR[RHO]*hR + bn*bn); if (!(va2 > a2R)) return 0;
   return 1;
@@ -974,7 +980,7 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
     Uhll[i][MXn] += (pL[i] - pR[i])*dS_1;
 
     /* field-aligned faces: the closed-form branch (section 2b) */
-    if (hx_bt0_gate (vL, vR, stateL->a2[i], stateL->h[i], stateR->a2[i], stateR->h[i], Uhll[i][BXn], HX_EPS_BT)){
+    if (hx_bt0_gate (vL, vR, stateL->a2[i], stateL->h[i], stateR->a2[i], stateR->h[i], Uhll[i][BXn], HX_EPS_BT, HX_EPS_BTP)){
       hx_bt0_face (vL, vR, uL, uR, fL, fR, pL[i], pR[i], SL[i], SR[i], Uhll[i][BXn],
                    stateL->a2[i], stateR->a2[i], wf, Fhll[i], sweep->flux[i], &sweep->press[i]);
       hx_stat[HX_BT0]++;
@@ -1017,7 +1023,7 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
     k = 0;
 
     if (switch_to_hll){
-      if (hx_bt0_gate (vL, vR, stateL->a2[i], stateL->h[i], stateR->a2[i], stateR->h[i], hx_Bx, HX_EPS_BT_FALLBACK)){
+      if (hx_bt0_gate (vL, vR, stateL->a2[i], stateL->h[i], stateR->a2[i], stateR->h[i], hx_Bx, HX_EPS_BT_FALLBACK, HX_EPS_BTP_FALLBACK)){
         hx_bt0_face (vL, vR, uL, uR, fL, fR, pL[i], pR[i], SL[i], SR[i], hx_Bx,
                      stateL->a2[i], stateR->a2[i], wf, Fhll[i], sweep->flux[i], &sweep->press[i]);
         hx_stat[HX_BT0F]++;
@@ -1127,7 +1133,7 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
         status = hx_solve_face (&c, z0, SaL, Sc, SaR, F);
         hx_stat[status]++;
         if (status == HX_HLLD){                      /* HLLD's flux stays, unless the face is nearly aligned */
-          if (hx_bt0_gate (vL, vR, stateL->a2[i], stateL->h[i], stateR->a2[i], stateR->h[i], hx_Bx, HX_EPS_BT_FALLBACK)){
+          if (hx_bt0_gate (vL, vR, stateL->a2[i], stateL->h[i], stateR->a2[i], stateR->h[i], hx_Bx, HX_EPS_BT_FALLBACK, HX_EPS_BTP_FALLBACK)){
             hx_bt0_face (vL, vR, uL, uR, fL, fR, pL[i], pR[i], SL[i], SR[i], hx_Bx,
                          stateL->a2[i], stateR->a2[i], wf, Fhll[i], sweep->flux[i], &sweep->press[i]);
             hx_stat[HX_HLLD]--; hx_stat[HX_BT0F]++;
