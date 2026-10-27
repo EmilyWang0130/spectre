@@ -809,14 +809,20 @@ void HLLX_Stats (long *out)
 #ifndef HX_EPS_BT_FALLBACK
   #define HX_EPS_BT_FALLBACK 5.0e-2   /* a nearly aligned face whose HLLD root or seven-wave Newton fails takes it too */
 #endif
+#ifndef HX_EPS_BTP
+  #define HX_EPS_BTP 1.0e-2           /* and the transverse magnetic pressure B_t^2/2 must be below HX_EPS_BTP of the gas
+                                 pressure on both sides: the hydro reduction drops B_t^2 terms, which are small
+                                 against B_n^2 but need not be against p (the cold large-B_x tube: B_t/B_n = 0.02,
+                                 B_t^2/2p = 0.6; taking the branch there as a fallback wrecked the run, 2026-10-26) */
+#endif
 
 static int hx_bt0_gate (const double *vL, const double *vR, double a2L, double hL,
                         double a2R, double hR, double bx, double eps)
 {
   double bn = fabs(bx), bt, va2;
   if (!(bn > 0.0)) return 0;
-  bt = sqrt(vL[BXt]*vL[BXt] + vL[BXb]*vL[BXb]); if (bt > eps*bn) return 0;
-  bt = sqrt(vR[BXt]*vR[BXt] + vR[BXb]*vR[BXb]); if (bt > eps*bn) return 0;
+  bt = sqrt(vL[BXt]*vL[BXt] + vL[BXb]*vL[BXb]); if (bt > eps*bn || 0.5*bt*bt > HX_EPS_BTP*vL[PRS]) return 0;
+  bt = sqrt(vR[BXt]*vR[BXt] + vR[BXb]*vR[BXb]); if (bt > eps*bn || 0.5*bt*bt > HX_EPS_BTP*vR[PRS]) return 0;
   va2 = bn*bn/(vL[RHO]*hL + bn*bn); if (!(va2 > a2L)) return 0;   /* fast = Alfven needs v_A > c_s */
   va2 = bn*bn/(vR[RHO]*hR + bn*bn); if (!(va2 > a2R)) return 0;
   return 1;
