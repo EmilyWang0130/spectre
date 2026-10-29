@@ -235,11 +235,10 @@ FishboneMoncriefDisk::variables(
                            const size_t s, const double /*potential_at_s*/) {
     using std::max;
     const double deviate =
-        noise_ == 0.0
-            ? 0.0
-            : noise_ * white_noise_at({{get_element(x.get(0), s),
-                                        get_element(x.get(1), s),
-                                        get_element(x.get(2), s)}});
+        noise_ == 0.0 ? 0.0
+                      : noise_ * white_noise_at({{get_element(x.get(0), s),
+                                                  get_element(x.get(1), s),
+                                                  get_element(x.get(2), s)}});
     get_element(get(pressure), s) =
         max((1 / rho_max_) * (1 + deviate) *
                 get(equation_of_state_.pressure_from_density(Scalar<double>{

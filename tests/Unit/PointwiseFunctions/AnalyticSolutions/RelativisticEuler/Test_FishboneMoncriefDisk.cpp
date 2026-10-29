@@ -225,8 +225,8 @@ void test_deterministic_noise() {
   const double noise = 0.02;
   const FishboneMoncriefDisk disk(1.0, 0.9375, 6.0, 12.0, 0.001, 4.0 / 3.0,
                                   noise);
-  const FishboneMoncriefDisk same_disk(1.0, 0.9375, 6.0, 12.0, 0.001,
-                                       4.0 / 3.0, noise);
+  const FishboneMoncriefDisk same_disk(1.0, 0.9375, 6.0, 12.0, 0.001, 4.0 / 3.0,
+                                       noise);
   const FishboneMoncriefDisk quiet_disk(1.0, 0.9375, 6.0, 12.0, 0.001,
                                         4.0 / 3.0, 0.0);
   // four points inside the torus, three outside (inner edge, far away, axis)
@@ -248,8 +248,7 @@ void test_deterministic_noise() {
     // the double overload samples the same field
     const tnsr::I<double, 3> xi{{{x.get(0)[i], x.get(1)[i], x.get(2)[i]}}};
     CHECK(get(get<hydro::Tags::Pressure<double>>(disk.variables(
-              xi, 0.0, tmpl::list<hydro::Tags::Pressure<double>>{}))) ==
-          p[i]);
+              xi, 0.0, tmpl::list<hydro::Tags::Pressure<double>>{}))) == p[i]);
   }
   CHECK(p[0] / p_quiet[0] != p[1] / p_quiet[1]);
   for (size_t i = 4; i < 7; ++i) {
