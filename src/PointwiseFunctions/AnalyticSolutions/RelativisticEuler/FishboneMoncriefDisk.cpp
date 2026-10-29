@@ -4,10 +4,11 @@
 #include "PointwiseFunctions/AnalyticSolutions/RelativisticEuler/FishboneMoncriefDisk.hpp"
 
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <pup.h>
-#include <random>
 
 #include "DataStructures/DataVector.hpp"
 #include "DataStructures/Tensor/EagerMath/DotProduct.hpp"
@@ -200,23 +201,47 @@ FishboneMoncriefDisk::variables(
   return {std::move(specific_enthalpy)};
 }
 
+namespace {
+// A white-noise deviate in [-1, 1) that is a pure function of the point: the
+// bit patterns of its coordinates are mixed by splitmix64. Every evaluation,
+// every process and every run that samples the same point gets the same
+// value, so the perturbed disk is the same initial data for every solver and
+// at every boundary re-evaluation. (The earlier std::random_device seed gave a
+// different field at every call.)
+double white_noise_at(const std::array<double, 3>& x) {
+  uint64_t state = 0;
+  for (const double xi : x) {
+    state += std::bit_cast<uint64_t>(xi) + 0x9e3779b97f4a7c15ULL;
+    uint64_t z = state;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    state = z ^ (z >> 31);
+  }
+  // the top 53 bits as a double in [0, 1), then onto [-1, 1)
+  return 2.0 * static_cast<double>(state >> 11) * 0x1.0p-53 - 1.0;
+}
+}  // namespace
+
 template <typename DataType>
 tuples::TaggedTuple<hydro::Tags::Pressure<DataType>>
 FishboneMoncriefDisk::variables(
     const tnsr::I<DataType, 3>& x,
     tmpl::list<hydro::Tags::Pressure<DataType>> /*meta*/,
     gsl::not_null<IntermediateVariables<DataType>*> vars) const {
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::uniform_real_distribution<> dis(-noise_, noise_);
   const auto rest_mass_density = get<hydro::Tags::RestMassDensity<DataType>>(
       variables(x, tmpl::list<hydro::Tags::RestMassDensity<DataType>>{}, vars));
   auto pressure = make_with_value<Scalar<DataType>>(x, background_pressure_);
-  variables_impl(vars, [&pressure, &rest_mass_density, &gen, &dis, this](
+  variables_impl(vars, [&pressure, &rest_mass_density, &x, this](
                            const size_t s, const double /*potential_at_s*/) {
     using std::max;
+    const double deviate =
+        noise_ == 0.0
+            ? 0.0
+            : noise_ * white_noise_at({{get_element(x.get(0), s),
+                                        get_element(x.get(1), s),
+                                        get_element(x.get(2), s)}});
     get_element(get(pressure), s) =
-        max((1 / rho_max_) * (1 + dis(gen)) *
+        max((1 / rho_max_) * (1 + deviate) *
                 get(equation_of_state_.pressure_from_density(Scalar<double>{
                     rho_max_ * get_element(get(rest_mass_density), s)})),
             background_pressure_);

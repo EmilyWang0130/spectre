@@ -215,6 +215,47 @@ void test_solution() {
   verify_grmhd_solution(solution, domain.blocks()[0], mesh, 1.e-9, 1.234,
                         1.e-1);
 }
+
+// The pressure noise is a function of the point only: two evaluations, two
+// objects and the double and DataVector overloads agree bit for bit; inside
+// the disk it moves the pressure by at most the given fraction and is not the
+// same at every point; outside the disk (the background) it does nothing.
+void test_deterministic_noise() {
+  using RelativisticEuler::Solutions::FishboneMoncriefDisk;
+  const double noise = 0.02;
+  const FishboneMoncriefDisk disk(1.0, 0.9375, 6.0, 12.0, 0.001, 4.0 / 3.0,
+                                  noise);
+  const FishboneMoncriefDisk same_disk(1.0, 0.9375, 6.0, 12.0, 0.001,
+                                       4.0 / 3.0, noise);
+  const FishboneMoncriefDisk quiet_disk(1.0, 0.9375, 6.0, 12.0, 0.001,
+                                        4.0 / 3.0, 0.0);
+  // four points inside the torus, three outside (inner edge, far away, axis)
+  const tnsr::I<DataVector, 3> x{
+      {{DataVector{8.0, 10.0, 12.0, 0.0, 3.0, 50.0, 0.0},
+        DataVector{0.0, 0.5, 0.0, 15.0, 0.0, 0.0, 0.0},
+        DataVector{0.0, 0.2, 0.0, 0.5, 0.0, 0.0, 10.0}}}};
+  const auto pressure_of = [&x](const FishboneMoncriefDisk& d) {
+    return get(get<hydro::Tags::Pressure<DataVector>>(
+        d.variables(x, 0.0, tmpl::list<hydro::Tags::Pressure<DataVector>>{})));
+  };
+  const DataVector p = pressure_of(disk);
+  CHECK(p == pressure_of(disk));
+  CHECK(p == pressure_of(same_disk));
+  const DataVector p_quiet = pressure_of(quiet_disk);
+  for (size_t i = 0; i < 4; ++i) {
+    CHECK(p[i] != p_quiet[i]);
+    CHECK(std::abs(p[i] / p_quiet[i] - 1.0) <= noise);
+    // the double overload samples the same field
+    const tnsr::I<double, 3> xi{{{x.get(0)[i], x.get(1)[i], x.get(2)[i]}}};
+    CHECK(get(get<hydro::Tags::Pressure<double>>(disk.variables(
+              xi, 0.0, tmpl::list<hydro::Tags::Pressure<double>>{}))) ==
+          p[i]);
+  }
+  CHECK(p[0] / p_quiet[0] != p[1] / p_quiet[1]);
+  for (size_t i = 4; i < 7; ++i) {
+    CHECK(p[i] == p_quiet[i]);
+  }
+}
 }  // namespace
 
 SPECTRE_TEST_CASE("Unit.PointwiseFunctions.AnalyticSolutions.RelEuler.FMDisk",
@@ -232,6 +273,7 @@ SPECTRE_TEST_CASE("Unit.PointwiseFunctions.AnalyticSolutions.RelEuler.FMDisk",
   test_sin_theta_squared(DataVector(5));
 
   test_solution();
+  test_deterministic_noise();
 
   CHECK_THROWS_WITH(TestHelpers::test_creation<
                         RelativisticEuler::Solutions::FishboneMoncriefDisk>(

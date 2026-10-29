@@ -217,12 +217,15 @@ class FishboneMoncriefDisk
     static type lower_bound() { return 1.; }
   };
   /// The magnitude of noise added to pressure/energy of the Disk
-  /// to drive MRI.
+  /// to drive MRI. The noise is a deterministic function of the point (a hash
+  /// of its coordinates), so the same disk is produced in every evaluation and
+  /// every run.
   struct Noise {
     using type = double;
     static constexpr Options::String help = {
         "The magnitude of the white noise perturbation added to "
-        "pressure to excite MRI in the disk."};
+        "pressure to excite MRI in the disk. Deterministic per point: every "
+        "run and every evaluation gets the same perturbation."};
     static type lower_bound() { return 0.; }
     static type upper_bound() { return 1.; }
   };
