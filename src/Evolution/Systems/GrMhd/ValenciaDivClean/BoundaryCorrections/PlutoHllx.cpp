@@ -3,6 +3,7 @@
 
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/PlutoHllx.hpp"
 
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <pup.h>
@@ -11,6 +12,7 @@
 #include "DataStructures/Tensor/Tensor.hpp"
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/pluto/pluto_hlld_shim.h"
 #include "NumericalAlgorithms/DiscontinuousGalerkin/Formulation.hpp"
+#include "Parallel/Printf/Printf.hpp"
 #include "Utilities/Gsl.hpp"
 
 namespace grmhd::ValenciaDivClean::BoundaryCorrections {
@@ -194,8 +196,27 @@ void PlutoHllx::dg_boundary_terms(
     const Scalar<DataVector>& lorentz_factor_ext,
     const Scalar<DataVector>& specific_internal_energy_ext,
     const dg::Formulation dg_formulation) const {
+  // SPECTRE_PLUTO_HLLX_SEVEN_WAVES=0 runs HLLx's HLLD stage on its own (hllx.c's
+  // HLLDR_Solver): MUB09's HLLD with the total-pressure root converged by the
+  // damped Newton instead of PLUTO's secant, which gives up at its first probe
+  // p = 1.025 p0 at beta <~ 1e-3 and returns HLL on nearly every face there.
+  // The fair HLLD for the cold tubes (2026-11-03). Read once per process; the
+  // log line is the engagement check.
+  static const bool seven_waves = [] {
+    const char* e = std::getenv("SPECTRE_PLUTO_HLLX_SEVEN_WAVES");
+    const bool on = e == nullptr or std::atoi(e) != 0;
+    Parallel::printf("PlutoHllx: seven-wave stage %s\n",
+                     on ? "ON (HLLx)"
+                        : "OFF (hlldr: HLLD with the converged root, no slow "
+                          "fronts)");
+    return on;
+  }();
+  const detail::PlutoFluxFunction flux_fn =
+      seven_waves ? &pluto_hllx_flux : &pluto_hlldr_flux;
+  const detail::PlutoMovingFaceFluxFunction moving_flux_fn =
+      seven_waves ? &pluto_hllx_flux_moving : &pluto_hlldr_flux_moving;
   detail::pluto_dg_boundary_terms(
-      &pluto_hllx_flux, &pluto_hllx_flux_moving, boundary_correction_tilde_d,
+      flux_fn, moving_flux_fn, boundary_correction_tilde_d,
       boundary_correction_tilde_ye, boundary_correction_tilde_tau,
       boundary_correction_tilde_s, boundary_correction_tilde_b,
       boundary_correction_tilde_phi, tilde_d_int, tilde_ye_int, tilde_tau_int,

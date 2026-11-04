@@ -133,3 +133,16 @@ int pluto_hllx_flux_moving(int npts, const double* vL, const double* vR, double 
   return pluto_riemann_flux(HLLX_Solver, npts, vL, vR, gamma, face_speed, flux_out,
                             press_out);
 }
+
+int pluto_hlldr_flux(int npts, const double* vL, const double* vR, double gamma,
+                     double* flux_out, double* press_out) {
+  return pluto_riemann_flux(HLLDR_Solver, npts, vL, vR, gamma, NULL, flux_out,
+                            press_out);
+}
+
+int pluto_hlldr_flux_moving(int npts, const double* vL, const double* vR, double gamma,
+                            const double* face_speed, double* flux_out,
+                            double* press_out) {
+  return pluto_riemann_flux(HLLDR_Solver, npts, vL, vR, gamma, face_speed, flux_out,
+                            press_out);
+}

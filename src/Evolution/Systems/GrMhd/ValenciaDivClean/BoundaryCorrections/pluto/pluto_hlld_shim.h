@@ -50,6 +50,17 @@ int pluto_hllc_kb_flux(int npts, const double* vL, const double* vR,
 int pluto_hllx_flux(int npts, const double* vL, const double* vR, double gamma,
                     double* flux_out, double* press_out);
 
+/* The same contract through HLLDR_Solver (hllx.c): HLLX_Solver's HLLD stage on
+ * its own -- MUB09's construction with the total-pressure root converged by the
+ * damped Newton and PLUTO's eight admissibility checks applied at the root, no
+ * slow fronts. Where PLUTO's secant gives up at its first probe p = 1.025 p0
+ * (beta <~ 1e-3: the probe is tens of gas pressures, the Alfven speed of the
+ * probed state leaves the HLL bounds) this still returns an HLLD flux; it falls
+ * back to HLL only where no admissible root exists. SpECTRE selects it with
+ * SPECTRE_PLUTO_HLLX_SEVEN_WAVES=0 (PlutoHllx.cpp). */
+int pluto_hlldr_flux(int npts, const double* vL, const double* vR, double gamma,
+                     double* flux_out, double* press_out);
+
 /* The same four solvers with the fan sampled on a moving interface (the SpECTRE
  * GR adapter, PlutoFaceFrame.hpp):
  *  face_speed [in]  npts, the speed w of each interface in the frame the states
@@ -73,6 +84,9 @@ int pluto_hllc_kb_flux_moving(int npts, const double* vL, const double* vR,
 int pluto_hllx_flux_moving(int npts, const double* vL, const double* vR,
                            double gamma, const double* face_speed,
                            double* flux_out, double* press_out);
+int pluto_hlldr_flux_moving(int npts, const double* vL, const double* vR,
+                            double gamma, const double* face_speed,
+                            double* flux_out, double* press_out);
 
 #ifdef __cplusplus
 }
