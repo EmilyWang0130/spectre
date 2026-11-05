@@ -48,8 +48,9 @@
   separate pressure are converted at the entry and exit.
 
   Statistics (interfaces per outcome) live in static counters; HLLX_Stats()
-  returns them and, with HLLX_STATS_EVERY > 0, prints them every that many
-  calls of the solver.
+  returns them and, with the environment variable SPECTRE_PLUTO_HLLX_STATS_EVERY
+  set to N > 0 (SPECTRE-MOD; was the compile-time HLLX_STATS_EVERY), prints
+  them every N calls of the solver.
 */
 /* ///////////////////////////////////////////////////////////////////// */
 #include "pluto.h"
@@ -1159,12 +1160,23 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
     }
   }
 
-  #if HLLX_STATS_EVERY > 0
-  if (hx_calls % HLLX_STATS_EVERY == 0){
-    printLog ("> HLLX stats after %ld calls: supersonic %ld, hll %ld, bx0 %ld, hllx %ld, hllx-cont %ld, hlld %ld, bt0 %ld, bt0-fallback %ld; Newton iterations %ld\n",
-              hx_calls, hx_stat[0], hx_stat[1], hx_stat[2], hx_stat[3], hx_stat[4], hx_stat[5], hx_stat[HX_BT0], hx_stat[HX_BT0F], hx_newton_iters);
+  /* SPECTRE-MOD: the statistics print is gated at run time by
+     SPECTRE_PLUTO_HLLX_STATS_EVERY (calls of the solver between prints; unset
+     or 0: never), read once per thread, instead of the compile-time
+     HLLX_STATS_EVERY. Print only; no result changes. Each Charm++ worker
+     thread prints its own counters (they are _Thread_local). */
+  {
+    static _Thread_local long hx_stats_every = -1;
+    if (hx_stats_every < 0){
+      const char *e = getenv ("SPECTRE_PLUTO_HLLX_STATS_EVERY");
+      hx_stats_every = (e != NULL) ? atol (e) : 0;
+      if (hx_stats_every < 0) hx_stats_every = 0;
+    }
+    if (hx_stats_every > 0 && hx_calls % hx_stats_every == 0){
+      printLog ("> HLLX stats after %ld calls: supersonic %ld, hll %ld, bx0 %ld, hllx %ld, hllx-cont %ld, hlld %ld, bt0 %ld, bt0-fallback %ld; Newton iterations %ld\n",
+                hx_calls, hx_stat[0], hx_stat[1], hx_stat[2], hx_stat[3], hx_stat[4], hx_stat[5], hx_stat[HX_BT0], hx_stat[HX_BT0F], hx_newton_iters);
+    }
   }
-  #endif
 
 #if DIVB_CONTROL == CONSTRAINED_TRANSPORT
   CT_Flux (sweep, beg, end, grid);
