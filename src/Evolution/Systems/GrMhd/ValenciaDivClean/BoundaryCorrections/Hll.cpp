@@ -86,7 +86,7 @@ double Hll::dg_package_data(
     const Scalar<DataVector>& lapse,
     const tnsr::I<DataVector, 3, Frame::Inertial>& shift,
     const tnsr::i<DataVector, 3, Frame::Inertial>& spatial_velocity_one_form,
-    const tnsr::ii<DataVector, 3, Frame::Inertial>& /*spatial_metric*/,
+    const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
 
     const Scalar<DataVector>& rest_mass_density,
     const Scalar<DataVector>& electron_fraction,
@@ -196,6 +196,12 @@ double Hll::dg_package_data(
   *packaged_interface_unit_normal = normal_covector;
   get(*packaged_metric_flatness) = abs(get(lapse) - 1.0) + abs(get<0>(shift)) +
                                    abs(get<1>(shift)) + abs(get<2>(shift));
+  for (size_t i = 0; i < 3; ++i) {
+    get(*packaged_metric_flatness) += abs(spatial_metric.get(i, i) - 1.0);
+    for (size_t j = i + 1; j < 3; ++j) {
+      get(*packaged_metric_flatness) += abs(spatial_metric.get(i, j));
+    }
+  }
 
   // Fast-magnetosonic speeds of this side. In flat space the divergence
   // cleaning pair decouples and keeps the light-speed bounds; all other

@@ -122,7 +122,11 @@ def dg_package_data(
     # The C++ only evaluates the fast speeds where the background is flat; the
     # states generated here all have |shift| >= 0.01, so it leaves them equal to
     # the largest speeds. The return order matches dg_package_field_tags.
-    metric_flatness = np.abs(lapse - 1.0) + np.sum(np.abs(shift))
+    metric_flatness = (
+        np.abs(lapse - 1.0)
+        + np.sum(np.abs(shift))
+        + np.sum(np.abs(np.triu(spatial_metric - np.identity(3))))
+    )
     return (
         tilde_d,
         tilde_ye,

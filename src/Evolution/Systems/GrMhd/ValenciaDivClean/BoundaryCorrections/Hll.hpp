@@ -118,9 +118,9 @@ class Hll final : public evolution::BoundaryCorrection {
   struct InterfaceUnitNormal : db::SimpleTag {
     using type = tnsr::i<DataVector, 3, Frame::Inertial>;
   };
-  /// |lapse - 1| + |shift|, a measure of how far the background is from flat.
-  /// The scalar/MHD split only holds in flat space; where this is nonzero the
-  /// boundary correction falls back to the standard (light-speed) HLL flux.
+  /// \f$|\alpha - 1| + \sum_i |\beta^i| + \sum_{i \le j} |\gamma_{ij} -
+  /// \delta_{ij}|\f$; the split of the system is only used where this
+  /// vanishes.
   struct MetricFlatness : db::SimpleTag {
     using type = Scalar<DataVector>;
   };
@@ -228,7 +228,7 @@ class Hll final : public evolution::BoundaryCorrection {
       const Scalar<DataVector>& lapse,
       const tnsr::I<DataVector, 3, Frame::Inertial>& shift,
       const tnsr::i<DataVector, 3, Frame::Inertial>& spatial_velocity_one_form,
-      const tnsr::ii<DataVector, 3, Frame::Inertial>& /*spatial_metric*/,
+      const tnsr::ii<DataVector, 3, Frame::Inertial>& spatial_metric,
 
       const Scalar<DataVector>& rest_mass_density,
       const Scalar<DataVector>& electron_fraction,
