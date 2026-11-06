@@ -32,7 +32,9 @@
   itself failed, and accepted only if the states behind the fast and rotational
   fronts are subluminal with positive nominal gas pressure (hx_hlld_root; the
   result is the fallback and the seed; HLLDR_Solver, solver name "hlldr", stops
-  here); then, if HLLD found an admissible root with
+  here, after the field-aligned branch of section 2b; HLLD_ROOT_Solver stops here
+  too but without that branch, so it differs from hlld.c in the root stage only:
+  SpECTRE's default PlutoHlld since 2026-11-05); then, if HLLD found an admissible root with
   B_x^2 >= 0.01 max(p_L, p_R), a damped Newton from z0 = (p, p, p, B_c, B_c)
   on residuals scaled per face (hx_scales: unit-invariant, tolerance HLLX_TOL
   relative to those scales) with a forward-difference Jacobian and
@@ -83,6 +85,7 @@ enum {HX_SUPERSONIC = 0, HX_HLL, HX_BX0, HX_HLLX, HX_HLLX_CONT, HX_HLLD, HX_BT0,
 static _Thread_local long hx_stat[HX_NSTAT];                 /* SPECTRE-MOD */
 static _Thread_local long hx_newton_iters, hx_calls;         /* SPECTRE-MOD */
 static _Thread_local int  hx_seven_waves = 1;   /* SPECTRE-MOD */    /* 0: HLLDR_Solver, HLLD with the converged root only */
+static _Thread_local int  hx_field_aligned = 1; /* SPECTRE-MOD */    /* 0: HLLD_ROOT_Solver, no field-aligned branch (section 2b) */
 
 /* ===================================================================
    1. The HLLD machinery, from hlld.c (renamed; hx_Sc and hx_Bx play the
@@ -980,8 +983,9 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
     }
     Uhll[i][MXn] += (pL[i] - pR[i])*dS_1;
 
-    /* field-aligned faces: the closed-form branch (section 2b) */
-    if (hx_bt0_gate (vL, vR, stateL->a2[i], stateL->h[i], stateR->a2[i], stateR->h[i], Uhll[i][BXn], HX_EPS_BT, HX_EPS_BTP)){
+    /* field-aligned faces: the closed-form branch (section 2b); not in HLLD_ROOT_Solver */
+    if (hx_field_aligned &&
+        hx_bt0_gate (vL, vR, stateL->a2[i], stateL->h[i], stateR->a2[i], stateR->h[i], Uhll[i][BXn], HX_EPS_BT, HX_EPS_BTP)){
       hx_bt0_face (vL, vR, uL, uR, fL, fR, pL[i], pR[i], SL[i], SR[i], Uhll[i][BXn],
                    stateL->a2[i], stateR->a2[i], wf, Fhll[i], sweep->flux[i], &sweep->press[i]);
       hx_stat[HX_BT0]++;
@@ -1024,7 +1028,8 @@ void HLLX_Solver (const Sweep *sweep, int beg, int end,
     k = 0;
 
     if (switch_to_hll){
-      if (hx_bt0_gate (vL, vR, stateL->a2[i], stateL->h[i], stateR->a2[i], stateR->h[i], hx_Bx, HX_EPS_BT_FALLBACK, HX_EPS_BTP_FALLBACK)){
+      if (hx_field_aligned &&
+          hx_bt0_gate (vL, vR, stateL->a2[i], stateL->h[i], stateR->a2[i], stateR->h[i], hx_Bx, HX_EPS_BT_FALLBACK, HX_EPS_BTP_FALLBACK)){
         hx_bt0_face (vL, vR, uL, uR, fL, fR, pL[i], pR[i], SL[i], SR[i], hx_Bx,
                      stateL->a2[i], stateR->a2[i], wf, Fhll[i], sweep->flux[i], &sweep->press[i]);
         hx_stat[HX_BT0F]++;
@@ -1193,5 +1198,25 @@ void HLLDR_Solver (const Sweep *sweep, int beg, int end, double *cmax, Grid *gri
 {
   hx_seven_waves = 0;
   HLLX_Solver (sweep, beg, end, cmax, grid);
+  hx_seven_waves = 1;
+}
+
+
+/* SPECTRE-MOD (2026-11-05): HLLD with the improved root stage alone, SpECTRE's default PlutoHlld.
+   HLLDR_Solver without the field-aligned branch of section 2b: a field-aligned face keeps HLLD's
+   own flux and a face whose root stage fails gets HLL, as in hlld.c. So this differs from
+   hlld.c only in hx_hlld_root: the retry from the 1 + 1e-4 probe where the 1.025 probe fails,
+   the states re-evaluated at the final pressure (hlld.c keeps those of the iterate before, so
+   where both converge the fluxes agree to the secant's tolerance, ~1e-5, not to round-off), and
+   the three physical checks at the accepted root. On an exactly field-aligned face HLLD's fan
+   degenerates and both return HLL. HLLDR_Solver also took the field-aligned
+   branch (HLLC with the slow speeds) on every aligned face, which is HLLx's construction, not
+   HLLD's: on the sigma = 10 rotor that was about a third of the interfaces. */
+void HLLD_ROOT_Solver (const Sweep *sweep, int beg, int end, double *cmax, Grid *grid)
+{
+  hx_seven_waves = 0;
+  hx_field_aligned = 0;
+  HLLX_Solver (sweep, beg, end, cmax, grid);
+  hx_field_aligned = 1;
   hx_seven_waves = 1;
 }

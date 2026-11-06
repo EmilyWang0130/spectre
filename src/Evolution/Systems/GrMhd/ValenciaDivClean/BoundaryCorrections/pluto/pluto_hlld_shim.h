@@ -50,14 +50,25 @@ int pluto_hllc_kb_flux(int npts, const double* vL, const double* vR,
 int pluto_hllx_flux(int npts, const double* vL, const double* vR, double gamma,
                     double* flux_out, double* press_out);
 
-/* The same contract through HLLDR_Solver (hllx.c): HLLX_Solver's HLLD stage on
- * its own -- MUB09's construction with the total-pressure root converged by the
- * damped Newton and PLUTO's eight admissibility checks applied at the root, no
- * slow fronts. Where PLUTO's secant gives up at its first probe p = 1.025 p0
- * (beta <~ 1e-3: the probe is tens of gas pressures, the Alfven speed of the
- * probed state leaves the HLL bounds) this still returns an HLLD flux; it falls
- * back to HLL only where no admissible root exists. SpECTRE selects it with
- * SPECTRE_PLUTO_HLLX_SEVEN_WAVES=0 (PlutoHllx.cpp). */
+/* The same contract through HLLD_ROOT_Solver (hllx.c): MUB09's HLLD with
+ * HLLX_Solver's root stage -- hlld.c's secant and its eight admissibility
+ * checks, retried once from a probe of 1 + 1e-4 where PLUTO's first probe
+ * p = 1.025 p0 already fails (beta <~ 1e-3: the probe is tens of gas
+ * pressures), the states re-evaluated at the final pressure (hlld.c keeps
+ * those of the iterate before), and accepted only if the states behind the
+ * fast and rotational fronts are subluminal with positive gas pressure and
+ * density. It is not a Newton solve. Where hlld.c converges too the two agree
+ * to the secant's tolerance (~1e-5), not to round-off. Where no admissible root is found it returns HLL, as hlld.c
+ * does. SpECTRE's PlutoHlld uses it unless SPECTRE_PLUTO_HLLD_STOCK=1. */
+int pluto_hlld_root_flux(int npts, const double* vL, const double* vR,
+                         double gamma, double* flux_out, double* press_out);
+
+/* The same contract through HLLDR_Solver (hllx.c): the same root stage, plus
+ * the field-aligned branch of HLLx (relativistic HLLC with the slow speeds
+ * where B_t ~ 0 and v_A > c_s, and where the root fails on a nearly aligned
+ * face). That branch is HLLx's construction, not HLLD's, so this is not a
+ * plain HLLD. SpECTRE selects it with SPECTRE_PLUTO_HLLX_SEVEN_WAVES=0
+ * (PlutoHllx.cpp); the "PlutoHlldr" arms of 2026-11-03 ran it. */
 int pluto_hlldr_flux(int npts, const double* vL, const double* vR, double gamma,
                      double* flux_out, double* press_out);
 
@@ -87,6 +98,9 @@ int pluto_hllx_flux_moving(int npts, const double* vL, const double* vR,
 int pluto_hlldr_flux_moving(int npts, const double* vL, const double* vR,
                             double gamma, const double* face_speed,
                             double* flux_out, double* press_out);
+int pluto_hlld_root_flux_moving(int npts, const double* vL, const double* vR,
+                                double gamma, const double* face_speed,
+                                double* flux_out, double* press_out);
 
 #ifdef __cplusplus
 }

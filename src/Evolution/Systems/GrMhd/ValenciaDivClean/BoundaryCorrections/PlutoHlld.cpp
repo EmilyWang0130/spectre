@@ -1419,8 +1419,28 @@ void PlutoHlld::dg_boundary_terms(
     const Scalar<DataVector>& lorentz_factor_ext,
     const Scalar<DataVector>& specific_internal_energy_ext,
     const dg::Formulation dg_formulation) const {
+  // Since 2026-11-05 the default is HLLD with the improved root stage
+  // (hllx.c's HLLD_ROOT_Solver): hlld.c's secant retried from a 1 + 1e-4 probe
+  // where PLUTO's 1.025 probe fails, the states re-evaluated at the final
+  // pressure, and physical checks at the accepted root. Everything else,
+  // including the HLL fallback, is hlld.c's. PLUTO's stock
+  // HLLD_Solver, which every PlutoHlld run before that date used, is selected
+  // with SPECTRE_PLUTO_HLLD_STOCK=1. Read once per process; the log line is the
+  // engagement check.
+  static const bool stock = [] {
+    const char* e = std::getenv("SPECTRE_PLUTO_HLLD_STOCK");
+    const bool use_stock = e != nullptr and std::atoi(e) != 0;
+    Parallel::printf("PlutoHlld: %s\n",
+                     use_stock ? "STOCK (PLUTO's hlld.c)"
+                               : "ROOT (HLLD with the improved root stage)");
+    return use_stock;
+  }();
+  const detail::PlutoFluxFunction flux_fn =
+      stock ? &pluto_hlld_flux : &pluto_hlld_root_flux;
+  const detail::PlutoMovingFaceFluxFunction moving_flux_fn =
+      stock ? &pluto_hlld_flux_moving : &pluto_hlld_root_flux_moving;
   detail::pluto_dg_boundary_terms(
-      &pluto_hlld_flux, &pluto_hlld_flux_moving, boundary_correction_tilde_d,
+      flux_fn, moving_flux_fn, boundary_correction_tilde_d,
       boundary_correction_tilde_ye, boundary_correction_tilde_tau,
       boundary_correction_tilde_s, boundary_correction_tilde_b,
       boundary_correction_tilde_phi, tilde_d_int, tilde_ye_int, tilde_tau_int,

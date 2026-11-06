@@ -196,19 +196,22 @@ void PlutoHllx::dg_boundary_terms(
     const Scalar<DataVector>& lorentz_factor_ext,
     const Scalar<DataVector>& specific_internal_energy_ext,
     const dg::Formulation dg_formulation) const {
-  // SPECTRE_PLUTO_HLLX_SEVEN_WAVES=0 runs HLLx's HLLD stage on its own (hllx.c's
-  // HLLDR_Solver): MUB09's HLLD with the total-pressure root converged by the
-  // damped Newton instead of PLUTO's secant, which gives up at its first probe
-  // p = 1.025 p0 at beta <~ 1e-3 and returns HLL on nearly every face there.
-  // The fair HLLD for the cold tubes (2026-11-03). Read once per process; the
-  // log line is the engagement check.
+  // SPECTRE_PLUTO_HLLX_SEVEN_WAVES=0 runs HLLx without its seven-wave stage
+  // (hllx.c's HLLDR_Solver): MUB09's HLLD with HLLx's root stage (PLUTO's
+  // secant retried from a 1 + 1e-4 probe where its 1.025 probe fails at
+  // beta <~ 1e-3, physical checks at the root; not a Newton solve) AND HLLx's
+  // field-aligned branch, relativistic HLLC with the slow speeds wherever
+  // B_t ~ 0 and v_A > c_s. The 2026-11-03 "PlutoHlldr" arms ran this. HLLD with
+  // the root stage alone, without the field-aligned branch, is PlutoHlld's
+  // default since 2026-11-05. Read once per process; the log line is the
+  // engagement check.
   static const bool seven_waves = [] {
     const char* e = std::getenv("SPECTRE_PLUTO_HLLX_SEVEN_WAVES");
     const bool on = e == nullptr or std::atoi(e) != 0;
     Parallel::printf("PlutoHllx: seven-wave stage %s\n",
                      on ? "ON (HLLx)"
-                        : "OFF (hlldr: HLLD with the converged root, no slow "
-                          "fronts)");
+                        : "OFF (hlldr: HLLD with the improved root plus "
+                          "HLLx's field-aligned branch)");
     return on;
   }();
   const detail::PlutoFluxFunction flux_fn =

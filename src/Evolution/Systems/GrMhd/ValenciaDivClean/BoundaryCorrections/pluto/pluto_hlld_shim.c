@@ -146,3 +146,17 @@ int pluto_hlldr_flux_moving(int npts, const double* vL, const double* vR, double
   return pluto_riemann_flux(HLLDR_Solver, npts, vL, vR, gamma, face_speed, flux_out,
                             press_out);
 }
+
+/* HLLD with the improved root stage alone (hllx.c's HLLD_ROOT_Solver): SpECTRE's
+   default PlutoHlld since 2026-11-05. */
+int pluto_hlld_root_flux(int npts, const double* vL, const double* vR,
+                         double gamma, double* flux_out, double* press_out) {
+  return pluto_riemann_flux(HLLD_ROOT_Solver, npts, vL, vR, gamma, NULL,
+                            flux_out, press_out);
+}
+int pluto_hlld_root_flux_moving(int npts, const double* vL, const double* vR,
+                                double gamma, const double* face_speed,
+                                double* flux_out, double* press_out) {
+  return pluto_riemann_flux(HLLD_ROOT_Solver, npts, vL, vR, gamma, face_speed,
+                            flux_out, press_out);
+}

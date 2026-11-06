@@ -63,9 +63,14 @@ as a function pointer.
    for one thread per process and uses file-scope and function-static state.
    - `hlld.c`: `static double Sc, Bx;` and `static double **Uhll, **Fhll, **Vhll;`
    - `hllx.c`: `hx_stat[]`, `hx_newton_iters`, `hx_calls`, `hx_seven_waves`,
-     `hx_Sc`, `hx_Bx`, and `HLLX_Solver`'s lazily-allocated `Uhll/Fhll/Vhll` and
-     `lamL/lamR` (six declarations; `mod_defs.h` also declares `HLLX_Solver` and
-     `HLLDR_Solver`)
+     `hx_field_aligned`, `hx_Sc`, `hx_Bx`, and `HLLX_Solver`'s lazily-allocated
+     `Uhll/Fhll/Vhll` and `lamL/lamR` (seven declarations; `mod_defs.h` also
+     declares `HLLX_Solver`, `HLLDR_Solver` and `HLLD_ROOT_Solver`).
+     `HLLD_ROOT_Solver` (2026-11-05) is HLLD with HLLx's root stage and nothing
+     else: `PlutoHlld` runs it by default, and `SPECTRE_PLUTO_HLLD_STOCK=1`
+     restores PLUTO's unmodified `HLLD_Solver`. `HLLDR_Solver`
+     (`PlutoHllx` with `SPECTRE_PLUTO_HLLX_SEVEN_WAVES=0`) also takes HLLx's
+     field-aligned branch, so it is not a plain HLLD.
    - `hllc_mb.c`: `static double **Uhll, **Fhll;`; `hllc_kb.c`:
      `static uint16_t *flag;` and `static double **Uhll, **Fhll, **Vhll;`
      (added with the HLLC files; their `totfail/totzones` statics are compiled

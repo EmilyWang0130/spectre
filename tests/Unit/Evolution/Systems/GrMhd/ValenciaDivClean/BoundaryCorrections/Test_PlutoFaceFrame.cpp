@@ -492,11 +492,12 @@ void test_static_entry_points_reproduced(
       int (*)(int, const double*, const double*, double, double*, double*);
   using Moving = int (*)(int, const double*, const double*, double,
                          const double*, double*, double*);
-  const std::array<std::pair<Static, Moving>, 4> solvers{
+  const std::array<std::pair<Static, Moving>, 5> solvers{
       {{&pluto_hlld_flux, &pluto_hlld_flux_moving},
        {&pluto_hllc_mb_flux, &pluto_hllc_mb_flux_moving},
        {&pluto_hllc_kb_flux, &pluto_hllc_kb_flux_moving},
-       {&pluto_hllx_flux, &pluto_hllx_flux_moving}}};
+       {&pluto_hllx_flux, &pluto_hllx_flux_moving},
+       {&pluto_hlld_root_flux, &pluto_hlld_root_flux_moving}}};
   for (size_t s = 0; s < solvers.size(); ++s) {
     CAPTURE(s);
     std::vector<double> f_old(8 * npts), f_new(8 * npts), p_old(npts),
@@ -567,9 +568,10 @@ void test_moving_face_sampling(const gsl::not_null<std::mt19937*> gen) {
   std::uniform_real_distribution<double> sym(-1.0, 1.0);
   using Moving = int (*)(int, const double*, const double*, double,
                          const double*, double*, double*);
-  const std::array<Moving, 4> solvers{
+  const std::array<Moving, 5> solvers{
       {&pluto_hlld_flux_moving, &pluto_hllc_mb_flux_moving,
-       &pluto_hllc_kb_flux_moving, &pluto_hllx_flux_moving}};
+       &pluto_hllc_kb_flux_moving, &pluto_hllx_flux_moving,
+       &pluto_hlld_root_flux_moving}};
   constexpr size_t num_rays = 2601;
   constexpr double w_min = -1.3;
   constexpr double step = 2.6 / static_cast<double>(num_rays - 1);
@@ -698,11 +700,12 @@ void test_batch_independence(const gsl::not_null<std::mt19937*> gen) {
       int (*)(int, const double*, const double*, double, double*, double*);
   using Moving = int (*)(int, const double*, const double*, double,
                          const double*, double*, double*);
-  const std::array<std::pair<Static, Moving>, 4> solvers{
+  const std::array<std::pair<Static, Moving>, 5> solvers{
       {{&pluto_hlld_flux, &pluto_hlld_flux_moving},
        {&pluto_hllc_mb_flux, &pluto_hllc_mb_flux_moving},
        {&pluto_hllc_kb_flux, &pluto_hllc_kb_flux_moving},
-       {&pluto_hllx_flux, &pluto_hllx_flux_moving}}};
+       {&pluto_hllx_flux, &pluto_hllx_flux_moving},
+       {&pluto_hlld_root_flux, &pluto_hlld_root_flux_moving}}};
   for (size_t s = 0; s < solvers.size(); ++s) {
     CAPTURE(s);
     for (const bool moving : {false, true}) {

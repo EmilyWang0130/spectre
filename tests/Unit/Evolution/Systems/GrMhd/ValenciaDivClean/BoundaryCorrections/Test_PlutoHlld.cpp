@@ -3,6 +3,7 @@
 
 #include "Framework/TestingFramework.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstddef>
@@ -87,6 +88,100 @@ void test_matches_reference_pluto() {
       }
       CHECK(press[static_cast<size_t>(i)] == approx(expected_press));
     }
+  }
+}
+
+// Since 2026-11-05 PlutoHlld runs HLLD with HLLx's root stage
+// (pluto_hlld_root_flux, hllx.c's HLLD_ROOT_Solver) unless
+// SPECTRE_PLUTO_HLLD_STOCK=1. That root stage is hlld.c's secant, retried from
+// a 1 + 1e-4 probe where the 1.025 probe fails, with the states re-evaluated
+// at the final pressure (hlld.c keeps those of the iterate before) and three
+// physical checks there. Three faces pin what it is:
+//  (a) the Balsara-1 interface above, where PLUTO's own secant converges: it
+//      is HLLDR bit for bit (same root stage, not an aligned face) and PLUTO's
+//      HLLD to the secant's stopping tolerance |dp| < 1e-5 p (measured: 7e-6
+//      relative), not to round-off, because of the re-evaluated states;
+//  (b) a nearly uniform face in the cold, strongly magnetized state of the
+//      strong-B_x Dai-Woodward tube (beta ~ 1e-3): it is HLLDR bit for bit
+//      (B_t / B_n = 0.02 is not aligned) and differs from PLUTO's HLLD, whose
+//      secant gives up there (2 % in the mass flux);
+//  (c) an exactly field-aligned face with v_A > c_s: HLLD's fan degenerates
+//      and both PLUTO's HLLD and this return the HLL flux, identically, while
+//      HLLDR takes HLLx's field-aligned branch (HLLC with the slow speeds),
+//      which this must not.
+void test_root_stage_default() {
+  const ScopedFpeState fpe_off(false);
+  using Flux =
+      int (*)(int, const double*, const double*, double, double*, double*);
+  // the eight fluxes, then the normal total pressure
+  const auto solve = [](const Flux flux_function,
+                        const std::array<double, 8>& left,
+                        const std::array<double, 8>& right,
+                        const double adiabatic_index) {
+    std::array<double, 8> flux{};
+    double press = 0.0;
+    CHECK(flux_function(1, left.data(), right.data(), adiabatic_index,
+                        flux.data(), &press) == 0);
+    std::array<double, 9> result{};
+    for (size_t i = 0; i < 8; ++i) {
+      gsl::at(result, i) = gsl::at(flux, i);
+    }
+    result[8] = press;
+    return result;
+  };
+  const auto max_difference = [](const std::array<double, 9>& a,
+                                 const std::array<double, 9>& b) {
+    double result = 0.0;
+    for (size_t i = 0; i < 9; ++i) {
+      result = std::max(result, std::abs(gsl::at(a, i) - gsl::at(b, i)));
+    }
+    return result;
+  };
+
+  {
+    INFO("(a) Balsara-1: PLUTO's root converges");
+    const std::array<double, 8> vl{{1.0, 0.0, 0.0, 0.0, 0.5, 1.0, 0.0, 1.0}};
+    const std::array<double, 8> vr{
+        {0.125, 0.0, 0.0, 0.0, 0.5, -1.0, 0.0, 0.1}};
+    const auto stock = solve(&pluto_hlld_flux, vl, vr, 2.0);
+    const auto root = solve(&pluto_hlld_root_flux, vl, vr, 2.0);
+    const auto hlldr = solve(&pluto_hlldr_flux, vl, vr, 2.0);
+    CHECK(max_difference(root, hlldr) == 0.0);
+    Approx secant_tolerance = Approx::custom().epsilon(1.0e-5).scale(1.0);
+    for (size_t i = 0; i < 9; ++i) {
+      CAPTURE(i);
+      CHECK(gsl::at(root, i) == secant_tolerance(gsl::at(stock, i)));
+    }
+    CHECK(max_difference(root, stock) > 0.0);
+  }
+  {
+    INFO("(b) cold strong-B_x face: PLUTO's first probe fails");
+    const std::array<double, 8> vl{
+        {1.08, 0.012, 1.0e-4, 0.005, 0.5641895835477563, 0.010155412503859613,
+         0.005641895835477563, 9.5e-5}};
+    std::array<double, 8> vr = vl;
+    vr[0] *= 1.001;
+    vr[7] *= 1.01;
+    const auto stock = solve(&pluto_hlld_flux, vl, vr, 5.0 / 3.0);
+    const auto root = solve(&pluto_hlld_root_flux, vl, vr, 5.0 / 3.0);
+    const auto hlldr = solve(&pluto_hlldr_flux, vl, vr, 5.0 / 3.0);
+    CAPTURE(max_difference(root, stock));
+    CHECK(max_difference(root, hlldr) == 0.0);
+    CHECK(max_difference(root, stock) > 1.0e-10);
+  }
+  {
+    INFO("(c) field-aligned face, v_A > c_s: no field-aligned branch");
+    const std::array<double, 8> vl{{1.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.1}};
+    const std::array<double, 8> vr{{0.5, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.05}};
+    const auto stock = solve(&pluto_hlld_flux, vl, vr, 5.0 / 3.0);
+    const auto root = solve(&pluto_hlld_root_flux, vl, vr, 5.0 / 3.0);
+    const auto hlldr = solve(&pluto_hlldr_flux, vl, vr, 5.0 / 3.0);
+    CAPTURE(max_difference(root, hlldr));
+    for (size_t i = 0; i < 9; ++i) {
+      CAPTURE(i);
+      CHECK(gsl::at(root, i) == approx(gsl::at(stock, i)));
+    }
+    CHECK(max_difference(root, hlldr) > 1.0e-6);
   }
 }
 
@@ -561,6 +656,7 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.PlutoHlld",
                   "[Unit][GrMhd]") {
   PUPable_reg(grmhd::ValenciaDivClean::BoundaryCorrections::PlutoHlld);
   test_matches_reference_pluto();
+  test_root_stage_default();
   test_thread_safety();
   test_interface_state();
 
