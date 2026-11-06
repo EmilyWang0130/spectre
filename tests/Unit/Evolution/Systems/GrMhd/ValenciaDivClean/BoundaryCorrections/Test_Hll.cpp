@@ -25,6 +25,7 @@
 #include "NumericalAlgorithms/Spectral/Basis.hpp"
 #include "NumericalAlgorithms/Spectral/Mesh.hpp"
 #include "NumericalAlgorithms/Spectral/Quadrature.hpp"
+#include "PointwiseFunctions/GeneralRelativity/Tags.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/EquationOfState.hpp"
 #include "PointwiseFunctions/Hydro/EquationsOfState/PolytropicFluid.hpp"
 #include "PointwiseFunctions/Hydro/Tags.hpp"
@@ -250,7 +251,7 @@ void test_fast_speeds_closed_forms() {
 // The flux must change sign under the int<->ext swap when the fast speeds are
 // inside the light speeds, also when the two sides' normals are not exactly
 // opposite. One-sided fast bounds, or a split along one side's normal, fail
-// this. The conservation test below covers curved backgrounds only.
+// this.
 void test_int_ext_swap_symmetry() {
   INFO("HLL: two-sided fast bounds, antisymmetric under the int<->ext swap");
   MAKE_GENERATOR(gen);
@@ -460,6 +461,46 @@ SPECTRE_TEST_CASE("Unit.GrMhd.ValenciaDivClean.BoundaryCorrections.Hll",
       grmhd::ValenciaDivClean::BoundaryCorrections::Hll{1.0e-30, 1.0e-8},
       Mesh<2>{5, Spectral::Basis::Legendre, Spectral::Quadrature::Gauss},
       volume_data, ranges_atmo);
+
+  // Test the fast speeds and the split of the magnetic field on a flat
+  // background. The helper adds one to the random spatial metric, scales it
+  // by 0.005 and adds the identity, so the range -1 gives the flat metric.
+  const tuples::TaggedTuple<
+      helpers::Tags::Range<gr::Tags::Lapse<DataVector>>,
+      helpers::Tags::Range<gr::Tags::Shift<DataVector, 3>>,
+      helpers::Tags::Range<gr::Tags::SpatialMetric<DataVector, 3>>,
+      helpers::Tags::Range<hydro::Tags::RestMassDensity<DataVector>>,
+      helpers::Tags::Range<hydro::Tags::SpatialVelocity<DataVector, 3>>,
+      helpers::Tags::Range<hydro::Tags::LorentzFactor<DataVector>>,
+      helpers::Tags::Range<hydro::Tags::SpecificInternalEnergy<DataVector>>,
+      helpers::Tags::Range<hydro::Tags::Pressure<DataVector>>>
+      ranges_flat{std::array{1.0, 1.0},   std::array{0.0, 0.0},
+                  std::array{-1.0, -1.0}, std::array{0.5, 1.5},
+                  std::array{-0.5, 0.5},  std::array{1.0, 2.0},
+                  std::array{0.0, 1.0},   std::array{0.0, 1.0}};
+  TestHelpers::evolution::dg::test_boundary_correction_conservation<system>(
+      make_not_null(&gen),
+      grmhd::ValenciaDivClean::BoundaryCorrections::Hll{1.0e-30, 1.0e-8},
+      Mesh<2>{5, Spectral::Basis::Legendre, Spectral::Quadrature::Gauss},
+      volume_data, ranges_flat);
+  TestHelpers::evolution::dg::test_boundary_correction_with_python<
+      system, tmpl::list<ConvertPolytropic>>(
+      make_not_null(&gen), "Hll", "dg_package_data", "dg_boundary_terms",
+      grmhd::ValenciaDivClean::BoundaryCorrections::Hll{1.0e-30, 1.0e-8},
+      Mesh<2>{5, Spectral::Basis::Legendre, Spectral::Quadrature::Gauss},
+      volume_data, ranges_flat);
+
+  // Test the light speed density cutoff on a flat background, with points on
+  // both sides of it
+  auto ranges_flat_atmo = ranges_flat;
+  tuples::get<helpers::Tags::Range<hydro::Tags::RestMassDensity<DataVector>>>(
+      ranges_flat_atmo) = std::array{1.0e-9, 1.0e-7};
+  TestHelpers::evolution::dg::test_boundary_correction_with_python<
+      system, tmpl::list<ConvertPolytropic>>(
+      make_not_null(&gen), "Hll", "dg_package_data", "dg_boundary_terms",
+      grmhd::ValenciaDivClean::BoundaryCorrections::Hll{1.0e-30, 1.0e-8},
+      Mesh<2>{5, Spectral::Basis::Legendre, Spectral::Quadrature::Gauss},
+      volume_data, ranges_flat_atmo);
 
   const auto hll = TestHelpers::test_factory_creation<
       evolution::BoundaryCorrection,

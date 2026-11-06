@@ -15,13 +15,11 @@
 #include "DataStructures/Tensor/EagerMath/DotProduct.hpp"
 #include "DataStructures/Tensor/EagerMath/Magnitude.hpp"
 #include "DataStructures/Tensor/Tensor.hpp"
-#include "Evolution/Systems/GrMhd/ValenciaDivClean/Characteristics.hpp"
 #include "NumericalAlgorithms/DiscontinuousGalerkin/Formulation.hpp"
 #include "NumericalAlgorithms/DiscontinuousGalerkin/NormalDotFlux.hpp"
 #include "PointwiseFunctions/Hydro/SoundSpeedSquared.hpp"
-#include "PointwiseFunctions/Hydro/SpecificEnthalpy.hpp"
+#include "Utilities/ConstantExpressions.hpp"
 #include "Utilities/ErrorHandling/CaptureForError.hpp"
-#include "Utilities/ErrorHandling/FloatingPointExceptions.hpp"
 #include "Utilities/GenerateInstantiations.hpp"
 #include "Utilities/Gsl.hpp"
 
@@ -102,6 +100,8 @@ double Hll::dg_package_data(
     /*mesh_velocity*/,
     const std::optional<Scalar<DataVector>>& normal_dot_mesh_velocity,
     const EquationsOfState::EquationOfState<true, 3>& equation_of_state) const {
+  const bool has_b_field =
+      max(get(magnitude(tilde_b))) > magnetic_field_magnitude_for_hydro_;
   {
     Scalar<DataVector> shift_dot_normal = tilde_d;
     dot_product(make_not_null(&shift_dot_normal), shift, normal_covector);
@@ -113,9 +113,7 @@ double Hll::dg_package_data(
     get(*packaged_largest_ingoing_char_speed) =
         -get(lapse) - get(shift_dot_normal);
 
-    if (const bool has_b_field =
-            max(get(magnitude(tilde_b))) > magnetic_field_magnitude_for_hydro_;
-        not has_b_field and
+    if (not has_b_field and
         (max(get(rest_mass_density)) > light_speed_density_cutoff_)) {
       // Since we have no magnetic field (and we have grid points not in the
       // atmosphere), we can reduce the char speeds to the hydro speeds only.
@@ -208,30 +206,60 @@ double Hll::dg_package_data(
   // variables use these speeds instead of the light speed, combined with the
   // neighbor's by the same two-sided min/max in dg_boundary_terms. The
   // estimate a^2 = c_s^2 + v_A^2 (1 - c_s^2) drops the dependence on B.n and is
-  // an upper bound on the fast speed. On a curved background they are the
-  // largest speeds.
+  // an upper bound on the fast speed. On a curved background, and without a
+  // magnetic field, they are the largest speeds.
   *packaged_fast_outgoing_char_speed = *packaged_largest_outgoing_char_speed;
   *packaged_fast_ingoing_char_speed = *packaged_largest_ingoing_char_speed;
-  if (max(get(*packaged_metric_flatness)) <= 1.0e-12) {
-    const ScopedFpeState fpe(false);
+  if (has_b_field and max(get(*packaged_metric_flatness)) <= 1.0e-12) {
     const size_t num_points = get(rest_mass_density).size();
-    const Scalar<DataVector> specific_enthalpy =
-        hydro::relativistic_specific_enthalpy(
-            rest_mass_density, specific_internal_energy, pressure);
-    tnsr::ii<DataVector, 3, Frame::Inertial> flat_metric{num_points, 0.0};
-    for (size_t i = 0; i < 3; ++i) {
-      flat_metric.get(i, i) = 1.0;
-    }
-    // In flat space TildeB^i = B^i.
-    std::array<DataVector, 9> fast_speeds{};
-    characteristic_speeds_approximate_mhd(
-        make_not_null(&fast_speeds), rest_mass_density, electron_fraction,
-        specific_internal_energy, specific_enthalpy, spatial_velocity,
-        lorentz_factor, tilde_b, lapse, shift, flat_metric, normal_covector,
-        equation_of_state);
-    // Indices 1 and 7 are the ingoing and outgoing fast speeds.
-    get(*packaged_fast_outgoing_char_speed) = fast_speeds[7];
-    get(*packaged_fast_ingoing_char_speed) = fast_speeds[1];
+    Variables<tmpl::list<::Tags::TempScalar<0>, ::Tags::TempScalar<1>,
+                         ::Tags::TempScalar<2>, ::Tags::TempScalar<3>,
+                         ::Tags::TempScalar<4>, ::Tags::TempScalar<5>>>
+        temp_buffer{num_points};
+    auto& v_dot_normal = get<::Tags::TempScalar<0>>(temp_buffer);
+    auto& v_squared = get<::Tags::TempScalar<1>>(temp_buffer);
+    auto& b_squared = get<::Tags::TempScalar<2>>(temp_buffer);
+    auto& b_dot_v = get<::Tags::TempScalar<3>>(temp_buffer);
+    auto& a_squared = get(get<::Tags::TempScalar<4>>(temp_buffer));
+    auto& one_minus_v2_a2 = get(get<::Tags::TempScalar<5>>(temp_buffer));
+
+    // In flat space v_i = v^i and TildeB^i = B^i. The inputs are clamped as
+    // in the hydro branch above, so unphysical face states cannot trap.
+    dot_product(make_not_null(&v_dot_normal), spatial_velocity,
+                normal_covector);
+    dot_product(make_not_null(&v_squared), spatial_velocity, spatial_velocity);
+    get(v_squared) = clamp(get(v_squared), 0.0, 1.0 - 1.0e-8);
+    dot_product(make_not_null(&b_squared), tilde_b, tilde_b);
+    dot_product(make_not_null(&b_dot_v), tilde_b, spatial_velocity);
+    // b^2 = B^2 / W^2 + (B.v)^2 and v_A^2 = b^2 / (b^2 + rho h)
+    get(b_squared) =
+        get(b_squared) / square(get(lorentz_factor)) + square(get(b_dot_v));
+    a_squared = get(b_squared) / (get(b_squared) +
+                                  get(rest_mass_density) *
+                                      (1.0 + get(specific_internal_energy)) +
+                                  get(pressure));
+    a_squared = clamp(a_squared, 0.0, 1.0);
+    const Scalar<DataVector> sound_speed_squared{clamp(
+        get(equation_of_state.sound_speed_squared_from_density_and_temperature(
+            rest_mass_density, temperature, electron_fraction)),
+        0.0, 1.0)};
+    a_squared =
+        get(sound_speed_squared) + a_squared * (1.0 - get(sound_speed_squared));
+
+    // The dispersion relation of the hydro branch with a^2 for c_s^2, lapse 1
+    // and shift 0
+    one_minus_v2_a2 = 1.0 - get(v_squared) * a_squared;
+    auto& discriminant = get(b_dot_v);
+    discriminant =
+        a_squared * (1.0 - get(v_squared)) *
+        (one_minus_v2_a2 - square(get(v_dot_normal)) * (1.0 - a_squared));
+    discriminant = max(discriminant, 0.0);
+    discriminant = sqrt(discriminant);
+    get(v_dot_normal) *= 1.0 - a_squared;
+    get(*packaged_fast_outgoing_char_speed) =
+        (get(v_dot_normal) + discriminant) / one_minus_v2_a2;
+    get(*packaged_fast_ingoing_char_speed) =
+        (get(v_dot_normal) - discriminant) / one_minus_v2_a2;
     if (normal_dot_mesh_velocity.has_value()) {
       get(*packaged_fast_outgoing_char_speed) -= get(*normal_dot_mesh_velocity);
       get(*packaged_fast_ingoing_char_speed) -= get(*normal_dot_mesh_velocity);

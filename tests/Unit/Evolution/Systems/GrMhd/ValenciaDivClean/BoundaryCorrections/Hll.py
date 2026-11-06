@@ -119,14 +119,84 @@ def dg_package_data(
                 )
             )
 
-    # The C++ only evaluates the fast speeds where the background is flat; the
-    # states generated here all have |shift| >= 0.01, so it leaves them equal to
-    # the largest speeds. The return order matches dg_package_field_tags.
     metric_flatness = (
         np.abs(lapse - 1.0)
         + np.sum(np.abs(shift))
         + np.sum(np.abs(np.triu(spatial_metric - np.identity(3))))
     )
+
+    def compute_fast(lapse_sign):
+        # Without a magnetic field, on a curved background and in the
+        # atmosphere the fast speeds are the largest speeds. In flat space
+        # they are the estimate a^2 = c_s^2 + v_A^2 (1 - c_s^2) through the
+        # dispersion relation of the sound speeds, with the inputs clamped as
+        # there.
+        if (
+            np.sqrt(np.einsum("i,i->", tilde_b, tilde_b))
+            < _magnetic_field_magnitude_for_hydro
+            or metric_flatness > 1.0e-12
+            or rest_mass_density <= _atmosphere_density_cutoff
+        ):
+            return compute_char(lapse_sign)
+        polytropic_pressure = (
+            _polytropic_constant * rest_mass_density**_polytropic_gamma
+        )
+        sound_speed_squared = min(
+            max(
+                _polytropic_gamma
+                * (_polytropic_gamma - 1.0)
+                * polytropic_pressure
+                / (
+                    rest_mass_density * (_polytropic_gamma - 1.0)
+                    + _polytropic_gamma * polytropic_pressure
+                ),
+                0.0,
+            ),
+            1.0,
+        )
+        # Flat space: v_i = v^i and TildeB = B^i.
+        velocity_squared = min(
+            max(np.dot(spatial_velocity, spatial_velocity), 0.0), 1.0 - 1.0e-8
+        )
+        velocity_dot_normal = np.dot(spatial_velocity, normal_covector)
+        comoving_magnetic_field_squared = (
+            np.dot(tilde_b, tilde_b) / lorentz_factor**2
+            + np.dot(tilde_b, spatial_velocity) ** 2
+        )
+        alfven_speed_squared = min(
+            max(
+                comoving_magnetic_field_squared
+                / (
+                    comoving_magnetic_field_squared
+                    + rest_mass_density * (1.0 + specific_internal_energy)
+                    + pressure
+                ),
+                0.0,
+            ),
+            1.0,
+        )
+        a_squared = sound_speed_squared + alfven_speed_squared * (
+            1.0 - sound_speed_squared
+        )
+        one_minus_v2_a2 = 1.0 - velocity_squared * a_squared
+        discriminant = np.sqrt(
+            max(
+                a_squared
+                * (1.0 - velocity_squared)
+                * (
+                    one_minus_v2_a2 - velocity_dot_normal**2 * (1.0 - a_squared)
+                ),
+                0.0,
+            )
+        )
+        Lambda = (
+            velocity_dot_normal * (1.0 - a_squared) + lapse_sign * discriminant
+        ) / one_minus_v2_a2
+        if normal_dot_mesh_velocity is not None:
+            Lambda = Lambda - normal_dot_mesh_velocity
+        return np.asarray(Lambda)
+
+    # The return order matches dg_package_field_tags.
     return (
         tilde_d,
         tilde_ye,
@@ -142,8 +212,8 @@ def dg_package_data(
         np.asarray(np.dot(flux_tilde_phi, normal_covector)),
         compute_char(1.0),
         compute_char(-1.0),
-        compute_char(1.0),
-        compute_char(-1.0),
+        compute_fast(1.0),
+        compute_fast(-1.0),
         normal_covector,
         np.asarray(metric_flatness),
     )
