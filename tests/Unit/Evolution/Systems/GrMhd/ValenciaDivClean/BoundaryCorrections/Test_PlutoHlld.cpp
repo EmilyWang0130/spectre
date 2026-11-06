@@ -98,17 +98,18 @@ void test_matches_reference_pluto() {
 // at the final pressure (hlld.c keeps those of the iterate before) and three
 // physical checks there. Three faces pin what it is:
 //  (a) the Balsara-1 interface above, where PLUTO's own secant converges: it
-//      is HLLDR bit for bit (same root stage, not an aligned face) and PLUTO's
-//      HLLD to the secant's stopping tolerance |dp| < 1e-5 p (measured: 7e-6
-//      relative), not to round-off, because of the re-evaluated states;
+//      is PLUTO's HLLD to the secant's stopping tolerance |dp| < 1e-5 p
+//      (measured: 7e-6 relative), not to round-off, because of the
+//      re-evaluated states;
 //  (b) a nearly uniform face in the cold, strongly magnetized state of the
-//      strong-B_x Dai-Woodward tube (beta ~ 1e-3): it is HLLDR bit for bit
-//      (B_t / B_n = 0.02 is not aligned) and differs from PLUTO's HLLD, whose
-//      secant gives up there (2 % in the mass flux);
+//      strong-B_x Dai-Woodward tube (beta ~ 1e-3): the root stage finds the
+//      HLLD root (mass flux pinned below) where PLUTO's secant gives up and
+//      PLUTO's HLLD differs by 2 % in the mass flux;
 //  (c) an exactly field-aligned face with v_A > c_s: HLLD's fan degenerates
 //      and both PLUTO's HLLD and this return the HLL flux, identically, while
-//      HLLDR takes HLLx's field-aligned branch (HLLC with the slow speeds),
-//      which this must not.
+//      HLLx takes its field-aligned branch (HLLC with the slow speeds), which
+//      this must not. (Until 2026-11-05 HLLx's HLLD stage was also run alone
+//      WITH that branch, as HLLDR_Solver; that mode is retired.)
 void test_root_stage_default() {
   const ScopedFpeState fpe_off(false);
   using Flux =
@@ -145,8 +146,6 @@ void test_root_stage_default() {
         {0.125, 0.0, 0.0, 0.0, 0.5, -1.0, 0.0, 0.1}};
     const auto stock = solve(&pluto_hlld_flux, vl, vr, 2.0);
     const auto root = solve(&pluto_hlld_root_flux, vl, vr, 2.0);
-    const auto hlldr = solve(&pluto_hlldr_flux, vl, vr, 2.0);
-    CHECK(max_difference(root, hlldr) == 0.0);
     Approx secant_tolerance = Approx::custom().epsilon(1.0e-5).scale(1.0);
     for (size_t i = 0; i < 9; ++i) {
       CAPTURE(i);
@@ -164,10 +163,11 @@ void test_root_stage_default() {
     vr[7] *= 1.01;
     const auto stock = solve(&pluto_hlld_flux, vl, vr, 5.0 / 3.0);
     const auto root = solve(&pluto_hlld_root_flux, vl, vr, 5.0 / 3.0);
-    const auto hlldr = solve(&pluto_hlldr_flux, vl, vr, 5.0 / 3.0);
     CAPTURE(max_difference(root, stock));
-    CHECK(max_difference(root, hlldr) == 0.0);
-    CHECK(max_difference(root, stock) > 1.0e-10);
+    // the mass flux of the HLLD fan at the root (hydroYe-mhd-tov a92c3f5c4)
+    Approx regression = Approx::custom().epsilon(1.0e-10).scale(0.0);
+    CHECK(root[0] == regression(1.296012553832128e-02));
+    CHECK(std::abs(stock[0] / root[0] - 1.0) > 0.01);
   }
   {
     INFO("(c) field-aligned face, v_A > c_s: no field-aligned branch");
@@ -175,13 +175,13 @@ void test_root_stage_default() {
     const std::array<double, 8> vr{{0.5, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.05}};
     const auto stock = solve(&pluto_hlld_flux, vl, vr, 5.0 / 3.0);
     const auto root = solve(&pluto_hlld_root_flux, vl, vr, 5.0 / 3.0);
-    const auto hlldr = solve(&pluto_hlldr_flux, vl, vr, 5.0 / 3.0);
-    CAPTURE(max_difference(root, hlldr));
+    const auto hllx = solve(&pluto_hllx_flux, vl, vr, 5.0 / 3.0);
+    CAPTURE(max_difference(root, hllx));
     for (size_t i = 0; i < 9; ++i) {
       CAPTURE(i);
       CHECK(gsl::at(root, i) == approx(gsl::at(stock, i)));
     }
-    CHECK(max_difference(root, hlldr) > 1.0e-6);
+    CHECK(max_difference(root, hllx) > 1.0e-6);
   }
 }
 

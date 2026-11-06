@@ -63,16 +63,7 @@ int pluto_hllx_flux(int npts, const double* vL, const double* vR, double gamma,
 int pluto_hlld_root_flux(int npts, const double* vL, const double* vR,
                          double gamma, double* flux_out, double* press_out);
 
-/* The same contract through HLLDR_Solver (hllx.c): the same root stage, plus
- * the field-aligned branch of HLLx (relativistic HLLC with the slow speeds
- * where B_t ~ 0 and v_A > c_s, and where the root fails on a nearly aligned
- * face). That branch is HLLx's construction, not HLLD's, so this is not a
- * plain HLLD. SpECTRE selects it with SPECTRE_PLUTO_HLLX_SEVEN_WAVES=0
- * (PlutoHllx.cpp); the "PlutoHlldr" arms of 2026-11-03 ran it. */
-int pluto_hlldr_flux(int npts, const double* vL, const double* vR, double gamma,
-                     double* flux_out, double* press_out);
-
-/* The same four solvers with the fan sampled on a moving interface (the SpECTRE
+/* The same solvers with the fan sampled on a moving interface (the SpECTRE
  * GR adapter, PlutoFaceFrame.hpp):
  *  face_speed [in]  npts, the speed w of each interface in the frame the states
  *                   are given in (the normal observer's orthonormal frame:
@@ -95,9 +86,6 @@ int pluto_hllc_kb_flux_moving(int npts, const double* vL, const double* vR,
 int pluto_hllx_flux_moving(int npts, const double* vL, const double* vR,
                            double gamma, const double* face_speed,
                            double* flux_out, double* press_out);
-int pluto_hlldr_flux_moving(int npts, const double* vL, const double* vR,
-                            double gamma, const double* face_speed,
-                            double* flux_out, double* press_out);
 int pluto_hlld_root_flux_moving(int npts, const double* vL, const double* vR,
                                 double gamma, const double* face_speed,
                                 double* flux_out, double* press_out);

@@ -13,6 +13,7 @@
 #include "Evolution/Systems/GrMhd/ValenciaDivClean/BoundaryCorrections/pluto/pluto_hlld_shim.h"
 #include "NumericalAlgorithms/DiscontinuousGalerkin/Formulation.hpp"
 #include "Parallel/Printf/Printf.hpp"
+#include "Utilities/ErrorHandling/Error.hpp"
 #include "Utilities/Gsl.hpp"
 
 namespace grmhd::ValenciaDivClean::BoundaryCorrections {
@@ -196,28 +197,30 @@ void PlutoHllx::dg_boundary_terms(
     const Scalar<DataVector>& lorentz_factor_ext,
     const Scalar<DataVector>& specific_internal_energy_ext,
     const dg::Formulation dg_formulation) const {
-  // SPECTRE_PLUTO_HLLX_SEVEN_WAVES=0 runs HLLx without its seven-wave stage
-  // (hllx.c's HLLDR_Solver): MUB09's HLLD with HLLx's root stage (PLUTO's
-  // secant retried from a 1 + 1e-4 probe where its 1.025 probe fails at
-  // beta <~ 1e-3, physical checks at the root; not a Newton solve) AND HLLx's
-  // field-aligned branch, relativistic HLLC with the slow speeds wherever
-  // B_t ~ 0 and v_A > c_s. The 2026-11-03 "PlutoHlldr" arms ran this. HLLD with
-  // the root stage alone, without the field-aligned branch, is PlutoHlld's
-  // default since 2026-11-05. Read once per process; the log line is the
+  // SPECTRE_PLUTO_HLLX_SEVEN_WAVES=0 ran HLLx without its seven-wave stage
+  // (hllx.c's HLLDR_Solver, 2026-11-03 to 2026-11-05: HLLx's HLLD root stage
+  // plus its field-aligned branch, the "PlutoHlldr" arms). It is retired: the
+  // root stage alone is PlutoHlld's default since 2026-11-05. Setting the
+  // variable to 0 stops the run rather than silently running something else;
+  // any other value runs HLLx. Read once per process; the log line is the
   // engagement check.
   static const bool seven_waves = [] {
     const char* e = std::getenv("SPECTRE_PLUTO_HLLX_SEVEN_WAVES");
-    const bool on = e == nullptr or std::atoi(e) != 0;
-    Parallel::printf("PlutoHllx: seven-wave stage %s\n",
-                     on ? "ON (HLLx)"
-                        : "OFF (hlldr: HLLD with the improved root plus "
-                          "HLLx's field-aligned branch)");
-    return on;
+    if (e != nullptr and std::atoi(e) == 0) {
+      ERROR(
+          "SPECTRE_PLUTO_HLLX_SEVEN_WAVES=0 (HLLx's HLLD stage alone, the "
+          "'PlutoHlldr' arms) was retired on 2026-11-05. Use PlutoHlld, whose "
+          "default is HLLD with the same improved root stage (without HLLx's "
+          "field-aligned branch); SPECTRE_PLUTO_HLLD_STOCK=1 gives PLUTO's own "
+          "HLLD. Unset the variable to run HLLx.");
+    }
+    Parallel::printf("PlutoHllx: seven-wave stage ON (HLLx)\n");
+    return true;
   }();
-  const detail::PlutoFluxFunction flux_fn =
-      seven_waves ? &pluto_hllx_flux : &pluto_hlldr_flux;
+  (void)seven_waves;
+  const detail::PlutoFluxFunction flux_fn = &pluto_hllx_flux;
   const detail::PlutoMovingFaceFluxFunction moving_flux_fn =
-      seven_waves ? &pluto_hllx_flux_moving : &pluto_hlldr_flux_moving;
+      &pluto_hllx_flux_moving;
   detail::pluto_dg_boundary_terms(
       flux_fn, moving_flux_fn, boundary_correction_tilde_d,
       boundary_correction_tilde_ye, boundary_correction_tilde_tau,
